@@ -21,3 +21,25 @@
 .waste-status-line { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
 .waste-status-line .waste-allowance { display: block; }
 .waste-status-line .waste-allowance > span { display: none; }
+
+.hero-row { min-height: 96px; }
+.hero-logo { flex: 0 0 156px; height: 90px; overflow: hidden; margin-top: -25px; margin-right: -10px; }
+.hero-logo img { display: block; width: 100%; height: 90px; object-fit: cover; filter: grayscale(1) invert(1) contrast(1.25); mix-blend-mode: screen; opacity: .95; transform: scale(1.2); }
+.login-brand { position: absolute; top: 9px; right: 10px; width: 156px; height: 90px; overflow: hidden; }
+.login-brand img { display: block; width: 100%; height: 90px; object-fit: cover; filter: grayscale(1) invert(1) contrast(1.25); mix-blend-mode: screen; opacity: .95; transform: scale(1.2); }
+.login-form { width: min(420px, 100%); margin: auto; }
+.status-filter { min-width: 0; padding: 13px; border: 1px solid #d9e1d6; border-radius: 13px; color: var(--ink); background: var(--soft); text-align: left; transition: transform .15s ease, box-shadow .15s ease; }
+.status-filter:active { transform: scale(.985); }
+.status-filter > span { display: block; color: var(--muted); font: 10px Arial, sans-serif; }
+.status-filter > strong { display: flex; flex-wrap: wrap; gap: 4px 7px; align-items: baseline; margin-top: 5px; color: var(--ink); font-size: 21px; }
+.status-filter > strong > span { color: inherit; font: inherit; }
+.status-filter > strong > small { color: var(--muted); font: 700 10px Arial, sans-serif; }
+.status-filter.warning { border-color: #ead5a2; background: #fff7df; }
+.status-filter.danger { border-color: #efc0b4; background: #fff0eb; }
+.status-filter.selected { border-width: 2px; border-color: var(--pine); padding: 12px; box-shadow: 0 3px 9px #1e4b3f12; }
+.dashboard-head { display: flex; justify-content: space-between; gap: 12px; align-items: end; }
+.dashboard-head > span { color: var(--muted); font: 700 10px Arial, sans-serif; }
+.active-card.wasted { border-color: #efc3b7; border-left-color: #b84f37; background: #fff8f5; }
+.waste-reason { display: grid; gap: 4px; margin-top: 13px; padding: 10px 11px; border-radius: 10px; background: #fff0eb; }
+.waste-reason span { color: #a54c37; font: 700 12px Arial, sans-serif; }
+.waste-reason small { color: var(--muted); font: 11px/1.4 Arial, sans-serif; }

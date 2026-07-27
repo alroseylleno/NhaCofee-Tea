@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import Image from "next/image";
 import type { Session } from "@supabase/supabase-js";
 import { isSupabaseConfigured, supabase } from "@/lib/supabase";
 import { createActiveSession, loadInventory, migrateLocalLifecycle, removeInventory, saveInventory, updateActiveSession } from "@/lib/inventory-store";
@@ -21,6 +22,7 @@ type ActiveSession = { id: string; sourceReceiptId: string; ingredientKey: strin
 type IngredientGroup = { key: string; name: string; category: string; brand: string; unit: string; specification: string; lots: Ingredient[] };
 type ActivationCandidate = { group: IngredientGroup; lot: Ingredient };
 type CloseCandidate = { session: ActiveSession; status: "used" | "wasted" };
+type LifecycleFilter = "active" | "soon" | "overdue" | "loss";
 
 const STORAGE_KEY = "nha-ops-inventory-v1";
 const ACTIVE_STORAGE_KEY = "nha-ops-active-uat-v1";
@@ -106,6 +108,7 @@ export default function Home() {
   const [closeNote, setCloseNote] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [tab, setTab] = useState<"inventory" | "active" | "report">("inventory");
+  const [lifecycleFilter, setLifecycleFilter] = useState<LifecycleFilter>("active");
   const [search, setSearch] = useState("");
   const [reportSearch, setReportSearch] = useState("");
   const [supplierFilter, setSupplierFilter] = useState("all");
@@ -167,12 +170,23 @@ export default function Home() {
   }, [items]);
   const filteredGroups = useMemo(() => ingredientGroups.filter((group) => `${group.name} ${group.category} ${group.brand} ${group.lots.map((lot) => lot.supplier).join(" ")}`.toLowerCase().includes(search.toLowerCase())), [ingredientGroups, search]);
   const openSessions = useMemo(() => activeSessions.filter((session) => session.status === "active"), [activeSessions]);
+  const wastedSessions = useMemo(() => activeSessions.filter((session) => session.status === "wasted"), [activeSessions]);
   const selectedGroup = detailGroup ? ingredientGroups.find((group) => group.key === detailGroup.key) || detailGroup : undefined;
   const now = Date.now();
   const expiringSoonCount = openSessions.filter((session) => session.useBy && new Date(session.useBy).getTime() >= now && new Date(session.useBy).getTime() - now <= 86_400_000).length;
   const overdueCount = openSessions.filter((session) => session.useBy && new Date(session.useBy).getTime() < now).length;
-  const wastedThisWeek = activeSessions.filter((session) => session.status === "wasted" && session.closedAt && now - new Date(session.closedAt).getTime() <= 7 * 86_400_000).length;
-  const activeDashboard = useMemo(() => [...openSessions].sort((a, b) => (a.useBy || "9999").localeCompare(b.useBy || "9999")), [openSessions]);
+  const lifecycleDashboard = useMemo(() => {
+    if (lifecycleFilter === "soon") return openSessions.filter((activeSession) => activeSession.useBy && new Date(activeSession.useBy).getTime() >= now && new Date(activeSession.useBy).getTime() - now <= 86_400_000).sort((a, b) => (a.useBy || "9999").localeCompare(b.useBy || "9999"));
+    if (lifecycleFilter === "overdue") return openSessions.filter((activeSession) => activeSession.useBy && new Date(activeSession.useBy).getTime() < now).sort((a, b) => (a.useBy || "9999").localeCompare(b.useBy || "9999"));
+    if (lifecycleFilter === "loss") return [...wastedSessions].sort((a, b) => (items.find((item) => item.id === b.sourceReceiptId)?.unitCost || 0) - (items.find((item) => item.id === a.sourceReceiptId)?.unitCost || 0));
+    return [...openSessions].sort((a, b) => (a.useBy || "9999").localeCompare(b.useBy || "9999"));
+  }, [lifecycleFilter, openSessions, wastedSessions, items, now]);
+  const lifecycleHeading: Record<LifecycleFilter, [string, string]> = {
+    active: ["Đang active", "Tất cả nguyên liệu đang được mở để sử dụng"],
+    soon: ["Sắp hạn trong 24 giờ", "Ưu tiên sử dụng trước khi chất lượng giảm"],
+    overdue: ["Đã quá hạn", "Cần kiểm tra và xử lý ngay"],
+    loss: ["Hao hụt đã ghi nhận", "Sắp xếp theo giá trị hao hụt cao nhất"],
+  };
   const suppliers = useMemo(() => [...new Set(items.map((item) => item.supplier))].sort(), [items]);
   const categories = useMemo(() => [...new Set(items.map((item) => item.category))].sort(), [items]);
   const brands = useMemo(() => [...new Set(items.map((item) => item.brand))].sort(), [items]);
@@ -297,7 +311,7 @@ export default function Home() {
 
   if (isSupabaseConfigured && !session) return <main className="login">
     <section className="login-visual">
-      <div className="login-mark" aria-hidden="true">N</div>
+      <div className="login-brand"><Image src="/nha-coffee-logo.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div>
       <div className="eyebrow">NHA COFFEE & TEA</div>
       <h1>Nhà Ops</h1>
       <p>Quản lý nhập kho rõ ràng, đồng bộ cho cả quán.</p>
@@ -317,7 +331,7 @@ export default function Home() {
   return <main>
     <section className="hero">
       <div className="eyebrow">NHA COFFEE & TEA</div>
-      <div className="hero-row"><div><h1>{tab === "inventory" ? "Kho nguyên liệu" : tab === "active" ? "Đang sử dụng" : "Báo cáo nhập kho"}</h1><p>{tab === "inventory" ? "Tìm nguyên liệu, xem tồn và mở để sử dụng." : tab === "active" ? "Ưu tiên những món sắp hư hoặc đã mở lâu." : "Lọc và sắp xếp dữ liệu nhập nguyên liệu."}</p></div><span className="live-dot">UAT local</span></div>
+      <div className="hero-row"><div><h1>{tab === "inventory" ? "Kho nguyên liệu" : tab === "active" ? "Đang sử dụng" : "Báo cáo nhập kho"}</h1><p>{tab === "inventory" ? "Tìm nguyên liệu, xem tồn và mở để sử dụng." : tab === "active" ? "Ưu tiên những món sắp hư hoặc đã mở lâu." : "Lọc và sắp xếp dữ liệu nhập nguyên liệu."}</p></div><div className="hero-logo"><Image src="/nha-coffee-logo.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div></div>
       <div className="metric"><span>{tab === "active" ? "Đơn vị đang active" : "Giá trị kho đã ghi nhận"}</span><strong>{tab === "active" ? openSessions.length : formatMoney(totalValue)}</strong><small>{tab === "active" ? `${overdueCount} quá hạn · ${expiringSoonCount} sắp đến hạn` : `${items.length} lần nhập hàng`}</small></div>
     </section>
     <nav className="tabs" aria-label="Điều hướng"><button className={tab === "inventory" ? "active" : ""} onClick={() => setTab("inventory")}>Kho NVL</button><button className={tab === "active" ? "active" : ""} onClick={() => setTab("active")}>Đang dùng</button><button className={tab === "report" ? "active" : ""} onClick={() => setTab("report")}>Báo cáo</button></nav>
@@ -332,15 +346,21 @@ export default function Home() {
     </section>}
 
     {tab === "active" && <section className="content active-dashboard">
-      <div className="status-grid"><div><span>Đang active</span><strong>{openSessions.length}</strong></div><div className="warning"><span>Sắp hạn 24h</span><strong>{expiringSoonCount}</strong></div><div className="danger"><span>Quá hạn</span><strong>{overdueCount}</strong></div><div className={isWasteOverAllowance ? "danger" : ""}><span>Hao hụt đã ghi nhận</span><strong>{wasteRate.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%</strong></div></div>
+      <div className="status-grid">
+        <button className={`status-filter ${lifecycleFilter === "active" ? "selected" : ""}`} aria-pressed={lifecycleFilter === "active"} onClick={() => setLifecycleFilter("active")}><span>Đang active</span><strong>{openSessions.length}</strong></button>
+        <button className={`status-filter warning ${lifecycleFilter === "soon" ? "selected" : ""}`} aria-pressed={lifecycleFilter === "soon"} onClick={() => setLifecycleFilter("soon")}><span>Sắp hạn 24h</span><strong>{expiringSoonCount}</strong></button>
+        <button className={`status-filter danger ${lifecycleFilter === "overdue" ? "selected" : ""}`} aria-pressed={lifecycleFilter === "overdue"} onClick={() => setLifecycleFilter("overdue")}><span>Quá hạn</span><strong>{overdueCount}</strong></button>
+        <button className={`status-filter ${isWasteOverAllowance ? "danger" : ""} ${lifecycleFilter === "loss" ? "selected" : ""}`} aria-pressed={lifecycleFilter === "loss"} onClick={() => setLifecycleFilter("loss")}><span>Hao hụt đã ghi nhận</span><strong><span>{wasteRate.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%</span><small>({formatMoney(wastedValue)})</small></strong></button>
+      </div>
       <section className={`waste-monitor ${isWasteOverAllowance ? "over-limit" : ""}`} aria-label="Theo dõi hao hụt kho">
         <div className="waste-monitor-head"><div><span>THEO DÕI HAO HỤT</span><div className="waste-status-line"><h2>{isWasteOverAllowance ? "Hao hụt đang vượt mức cho phép" : "Hao hụt đang trong mức cho phép"} ({wasteAllowancePercent.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%)</h2><label className="waste-allowance"><span>Điều chỉnh</span><div><input aria-label="Ngưỡng hao hụt cho phép" min="0" max="100" step="0.1" type="number" inputMode="decimal" value={wasteAllowance} onChange={(event) => setWasteAllowance(event.target.value)} /><b>%</b></div></label></div></div></div>
         <div className="waste-bar" aria-label={`Hao hụt ${wasteRate.toFixed(1)} phần trăm trên mức cho phép ${wasteAllowancePercent.toFixed(1)} phần trăm`}><i className="waste-limit-marker" style={{ left: `${Math.min(100, wasteAllowancePercent)}%` }} /><b style={{ width: `${Math.min(100, wasteRate)}%` }} /></div>
         <div className="waste-monitor-foot"><span>Đã báo hỏng: {formatMoney(wastedValue)} / {formatMoney(totalValue)} giá trị nhập kho</span><strong>{isWasteOverAllowance ? `Vượt ${Math.max(0, wasteRate - wasteAllowancePercent).toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% — cần kiểm tra nguyên nhân.` : `Còn ${Math.max(0, wasteAllowancePercent - wasteRate).toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% trước ngưỡng.`}</strong></div>
       </section>
-      <div className="dashboard-head"><div><h2>Cần theo dõi</h2><p>Sắp xếp theo hạn dùng gần nhất</p></div></div>
-      {activeDashboard.length === 0 ? <div className="empty"><b>Chưa có nguyên liệu active</b><span>Vào Kho NVL, chọn một nguyên liệu và nhấn “Mở để sử dụng”.</span></div> : <div className="active-list">{activeDashboard.map((activeSession) => {
+      <div className="dashboard-head"><div><h2>{lifecycleHeading[lifecycleFilter][0]}</h2><p>{lifecycleHeading[lifecycleFilter][1]}</p></div><span>{lifecycleDashboard.length} kết quả</span></div>
+      {lifecycleDashboard.length === 0 ? <div className="empty"><b>Không có dữ liệu trong bộ lọc này</b><span>Chọn một chỉ số khác để xem các nguyên liệu liên quan.</span></div> : <div className="active-list">{lifecycleDashboard.map((activeSession) => {
         const lot = items.find((entry) => entry.id === activeSession.sourceReceiptId); const group = ingredientGroups.find((entry) => entry.key === (lot ? ingredientKey(lot) : activeSession.ingredientKey)); const remaining = activeSession.useBy ? new Date(activeSession.useBy).getTime() - now : undefined; const totalLife = activeSession.useBy ? new Date(activeSession.useBy).getTime() - new Date(activeSession.activatedAt).getTime() : undefined; const elapsed = totalLife ? Math.min(100, Math.max(4, ((now - new Date(activeSession.activatedAt).getTime()) / totalLife) * 100)) : 12; const urgency = remaining === undefined ? "neutral" : remaining < 0 ? "overdue" : remaining <= 86_400_000 ? "soon" : "safe";
+        if (activeSession.status === "wasted") return <article className="active-card wasted" key={activeSession.id}><div className="active-card-top"><div><span>{group?.category || "Nguyên liệu"}</span><h3>{group?.name || lot?.name || "Không xác định"}</h3><p>Báo hỏng {activeSession.closedAt ? formatDateTime(activeSession.closedAt) : "chưa rõ thời gian"}</p></div><b>{formatMoney(lot?.unitCost || 0)}</b></div><div className="waste-reason"><span>{reasonLabel(activeSession.reason)}</span>{activeSession.note && <small>{activeSession.note}</small>}</div><div className="active-meta"><span>Lô {lot ? formatDate(lot.purchasedOn) : "-"}</span><span>Mở lúc {formatDateTime(activeSession.activatedAt)}</span></div><div className="active-actions"><button onClick={() => group && setDetailGroup(group)}>Chi tiết nguồn hàng</button></div></article>;
         return <article className={`active-card ${urgency}`} key={activeSession.id}><div className="active-card-top"><div><span>{group?.category || "Nguyên liệu"}</span><h3>{group?.name || lot?.name || "Không xác định"}</h3><p>Mở {formatDateTime(activeSession.activatedAt)} · đã {formatDuration(now - new Date(activeSession.activatedAt).getTime())}</p></div><b>{remaining === undefined ? "Chưa đặt hạn" : remaining < 0 ? `Quá ${formatDuration(remaining)}` : `Còn ${formatDuration(remaining)}`}</b></div><div className="life-bar"><i style={{ width: `${elapsed}%` }} /></div><div className="active-meta"><span>Lô {lot ? formatDate(lot.purchasedOn) : "-"}</span><span>{lotMeta[activeSession.sourceReceiptId]?.storageLocation || "Chưa ghi nơi bảo quản"}</span></div><div className="active-actions"><button onClick={() => requestClose(activeSession, "used")}>Đã dùng hết</button><button className="waste" onClick={() => requestClose(activeSession, "wasted")}>Báo hỏng</button><button onClick={() => group && setDetailGroup(group)}>Chi tiết</button></div></article>;
       })}</div>}
     </section>}
