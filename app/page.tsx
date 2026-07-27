@@ -49,6 +49,7 @@ export default function Home() {
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [authError, setAuthError] = useState("");
+  const [isSigningIn, setIsSigningIn] = useState(false);
   const [editingId, setEditingId] = useState<string | undefined>();
   const [historyItem, setHistoryItem] = useState<Ingredient | undefined>();
   const [showForm, setShowForm] = useState(false);
@@ -86,6 +87,19 @@ export default function Home() {
   }, [items, reportSearch, supplierFilter, categoryFilter, brandFilter, dateFrom, dateTo, sort]);
 
   function updateForm(field: keyof FormValues, value: string) { setForm((current) => ({ ...current, [field]: value })); }
+  async function signIn(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase || isSigningIn) return;
+
+    setAuthError("");
+    setIsSigningIn(true);
+    const { error } = await supabase.auth.signInWithPassword({
+      email: loginEmail.trim(),
+      password: loginPassword,
+    });
+    setIsSigningIn(false);
+    if (error) setAuthError("Tên đăng nhập hoặc mật khẩu chưa đúng. Vui lòng thử lại.");
+  }
   function attachReceipt(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; setReceiptFile(file); const reader = new FileReader(); reader.onload = () => setReceipt({ name: file.name, dataUrl: String(reader.result) }); reader.readAsDataURL(file); }
   function openAdd() { setForm(formDefaults()); setReceipt(undefined); setReceiptFile(undefined); setEditingId(undefined); setShowForm(true); }
   function openEdit(item: Ingredient) { setForm({ name: item.name, category: item.category, brand: item.brand, unit: item.unit, quantity: String(item.quantity), specification: item.specification, unitCost: formatPriceInput(String(item.unitCost)), purchasedOn: item.purchasedOn, supplier: item.supplier }); setReceipt(item.receipt); setEditingId(item.id); setShowForm(true); }
@@ -108,7 +122,25 @@ export default function Home() {
   function changeSort(key: SortKey) { setSort((current) => current.key === key ? { key, direction: current.direction === "asc" ? "desc" : "asc" } : { key, direction: "asc" }); }
   function sortMarker(key: SortKey) { return sort.key === key ? (sort.direction === "asc" ? " ↑" : " ↓") : " ↕"; }
 
-  if (isSupabaseConfigured && !session) return <main className="login"><section className="hero"><div className="eyebrow">NHA COFFEE & TEA</div><h1>Nhà Ops</h1><p>Đăng nhập tài khoản vận hành quán.</p></section><form className="content" onSubmit={async (event) => { event.preventDefault(); if (!supabase) return; const { error } = await supabase.auth.signInWithPassword({ email: loginEmail, password: loginPassword }); setAuthError(error?.message || ""); }}><label>Email<input required type="email" value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} /></label><label>Mật khẩu<input required type="password" value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} /></label>{authError && <p>{authError}</p>}<button className="save-button">Đăng nhập</button></form></main>;
+  if (isSupabaseConfigured && !session) return <main className="login">
+    <section className="login-visual">
+      <div className="login-mark" aria-hidden="true">N</div>
+      <div className="eyebrow">NHA COFFEE & TEA</div>
+      <h1>Nhà Ops</h1>
+      <p>Quản lý nhập kho rõ ràng, đồng bộ cho cả quán.</p>
+      <div className="login-note"><span aria-hidden="true">✓</span> Dữ liệu dùng chung, có lịch sử thay đổi</div>
+    </section>
+    <form className="login-form" onSubmit={signIn}>
+      <div className="login-heading"><h2>Chào mừng trở lại</h2><p>Đăng nhập để tiếp tục vào kho nguyên liệu.</p></div>
+      <label htmlFor="login-username">Tên đăng nhập</label>
+      <input id="login-username" required autoComplete="username" inputMode="email" type="email" value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} placeholder="email@nhacoffee.vn" />
+      <div className="password-label"><label htmlFor="login-password">Mật khẩu</label><span>Chỉ dành cho nhân sự</span></div>
+      <input id="login-password" required autoComplete="current-password" type="password" value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} placeholder="Nhập mật khẩu" />
+      {authError && <p className="login-error" role="alert">{authError}</p>}
+      <button className="login-submit" type="submit" disabled={isSigningIn}>{isSigningIn ? "Đang đăng nhập..." : "Đăng nhập"}<span aria-hidden="true">→</span></button>
+      <p className="login-help">Tên đăng nhập hiện dùng email của tài khoản vận hành.</p>
+    </form>
+  </main>;
   return <main>
     <section className="hero"><div className="eyebrow">NHA COFFEE & TEA</div><div className="hero-row"><div><h1>{tab === "inventory" ? "Kho nguyên liệu" : "Báo cáo nhập kho"}</h1><p>{tab === "inventory" ? "Ghi lại từng lần nhập, không bỏ sót hóa đơn." : "Lọc và sắp xếp dữ liệu nhập nguyên liệu."}</p></div><span className="live-dot">Đang dùng</span></div><div className="metric"><span>Giá trị kho đã ghi nhận</span><strong>{formatMoney(totalValue)}</strong><small>{items.length} lần nhập hàng</small></div></section>
     <nav className="tabs" aria-label="Điều hướng"><button className={tab === "inventory" ? "active" : ""} onClick={() => setTab("inventory")}>Kho NVL</button><button className={tab === "report" ? "active" : ""} onClick={() => setTab("report")}>Báo cáo</button></nav>
