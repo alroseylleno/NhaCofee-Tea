@@ -1,0 +1,36 @@
+name: Apply Supabase migrations
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "supabase/migrations/**"
+  workflow_dispatch:
+    inputs:
+      baseline_existing_database:
+        description: "Mark the manually applied 001 and 002 migrations before applying pending migrations"
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  migrate:
+    # Secrets are intentionally kept only in GitHub Actions, never in Vercel or the app.
+    if: ${{ secrets.SUPABASE_ACCESS_TOKEN != '' && secrets.SUPABASE_DB_PASSWORD != '' }}
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      PROJECT_REF: xchriunljansnuxcpwic
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Link production project
+        run: supabase link --project-ref "$PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
+      - name: Baseline manually applied migrations
+        if: ${{ inputs.baseline_existing_database == true }}
+        run: supabase migration repair --status applied 20260701000000 20260701000001
+      - name: Apply pending migrations
+        run: supabase db push --linked --password "$SUPABASE_DB_PASSWORD"
