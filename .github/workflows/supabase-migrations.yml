@@ -16,7 +16,6 @@ on:
 jobs:
   migrate:
     # Secrets are intentionally kept only in GitHub Actions, never in Vercel or the app.
-    if: ${{ secrets.SUPABASE_ACCESS_TOKEN != '' && secrets.SUPABASE_DB_PASSWORD != '' }}
     runs-on: ubuntu-latest
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
@@ -24,6 +23,10 @@ jobs:
       PROJECT_REF: xchriunljansnuxcpwic
     steps:
       - uses: actions/checkout@v4
+      - name: Verify production credentials
+        run: |
+          test -n "$SUPABASE_ACCESS_TOKEN" || (echo "Missing SUPABASE_ACCESS_TOKEN repository secret." && exit 1)
+          test -n "$SUPABASE_DB_PASSWORD" || (echo "Missing SUPABASE_DB_PASSWORD repository secret." && exit 1)
       - uses: supabase/setup-cli@v1
         with:
           version: latest
