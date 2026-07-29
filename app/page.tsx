@@ -31,6 +31,7 @@ const LOT_META_STORAGE_KEY = "nha-ops-lot-meta-uat-v1";
 const LOCAL_UAT_STORAGE_KEY = "nha-ops-inventory-local-uat-v1";
 const LOCAL_UAT_ACTIVE_STORAGE_KEY = "nha-ops-active-local-uat-v1";
 const LOCAL_UAT_META_STORAGE_KEY = "nha-ops-meta-local-uat-v1";
+const LOCAL_UAT_AUTH_KEY = "nha-ops-auth-local-uat-v1";
 const CLOUD_MIGRATION_KEY = "nha-ops-lifecycle-cloud-v1";
 const WASTE_ALLOWANCE_STORAGE_KEY = "nha-ops-waste-allowance-v1";
 const IS_LOCAL_UAT = process.env.NODE_ENV === "development";
@@ -118,8 +119,9 @@ export default function Home() {
   const [receipt, setReceipt] = useState<Receipt | undefined>();
   const [receiptFile, setReceiptFile] = useState<File | undefined>();
   const [session, setSession] = useState<Session | null>(null);
-  const [loginEmail, setLoginEmail] = useState("");
-  const [loginPassword, setLoginPassword] = useState("");
+  const [uatAuthenticated, setUatAuthenticated] = useState(false);
+  const [loginEmail, setLoginEmail] = useState(IS_LOCAL_UAT ? "UAT" : "");
+  const [loginPassword, setLoginPassword] = useState(IS_LOCAL_UAT ? "Giang21c" : "");
   const [authError, setAuthError] = useState("");
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [lotMeta, setLotMeta] = useState<Record<string, LotMeta>>({});
@@ -152,8 +154,8 @@ export default function Home() {
   const [sort, setSort] = useState<{ key: SortKey; direction: "asc" | "desc" }>({ key: "purchasedOn", direction: "desc" });
   const [loaded, setLoaded] = useState(false);
   const [deletingId, setDeletingId] = useState<string | undefined>();
-  const canDeleteInventory = session?.user.email?.toLocaleLowerCase() === "cfo@nhacoffeentea.com";
-  const canAccessFinance = !isSupabaseConfigured || Boolean(session);
+  const canDeleteInventory = IS_LOCAL_UAT || session?.user.email?.toLocaleLowerCase() === "cfo@nhacoffeentea.com";
+  const canAccessFinance = IS_LOCAL_UAT ? uatAuthenticated : !isSupabaseConfigured || Boolean(session);
 
   function loadLocalUatInventory() {
     const seed = seedInventoryUat();
@@ -204,7 +206,11 @@ export default function Home() {
     } finally { setLoaded(true); }
   }
   useEffect(() => {
-    if (IS_LOCAL_UAT && (!isSupabaseConfigured || !supabase)) { loadLocalUatInventory(); return; }
+    if (IS_LOCAL_UAT) {
+      loadLocalUatInventory();
+      setUatAuthenticated(window.sessionStorage.getItem(LOCAL_UAT_AUTH_KEY) === "authenticated");
+      return;
+    }
     if (!isSupabaseConfigured || !supabase) { const stored = window.localStorage.getItem(STORAGE_KEY); if (stored) setItems(safeItems(JSON.parse(stored))); setActiveSessions(JSON.parse(window.localStorage.getItem(ACTIVE_STORAGE_KEY) || "[]")); setLotMeta(JSON.parse(window.localStorage.getItem(LOT_META_STORAGE_KEY) || "{}")); setLoaded(true); return; }
     supabase.auth.getSession().then(({ data }) => { setSession(data.session); if (data.session) refreshCloud(); else setLoaded(true); });
     return supabase.auth.onAuthStateChange((_event, nextSession) => { setSession(nextSession); if (nextSession) refreshCloud(); }).data.subscription.unsubscribe;
@@ -310,9 +316,17 @@ export default function Home() {
   async function confirmClose(event: FormEvent<HTMLFormElement>) { event.preventDefault(); if (!closeCandidate || !closeReason) return; const updated: ActiveSession = { ...closeCandidate.session, status: closeCandidate.status, closedAt: new Date().toISOString(), reason: closeReason, note: closeNote.trim() || closeCandidate.session.note }; setActiveSessions((current) => current.map((activeSession) => activeSession.id === updated.id ? updated : activeSession)); setCloseCandidate(undefined); setCloseReason(""); setCloseNote(""); if (cloudLifecycleReady && session) { try { await updateActiveSession(updated); await refreshCloud(); } catch (error) { await refreshCloud(); window.alert(error instanceof Error ? error.message : "Không thể đồng bộ trạng thái nguyên liệu."); } } }
   async function signIn(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!supabase || isSigningIn) return;
+    if (isSigningIn) return;
 
     setAuthError("");
+    if (IS_LOCAL_UAT) {
+      if (loginEmail.trim() === "UAT" && loginPassword === "Giang21c") {
+        window.sessionStorage.setItem(LOCAL_UAT_AUTH_KEY, "authenticated");
+        setUatAuthenticated(true);
+      } else setAuthError("User hoặc mật khẩu UAT chưa đúng. Vui lòng thử lại.");
+      return;
+    }
+    if (!supabase) return;
     setIsSigningIn(true);
     const { error } = await supabase.auth.signInWithPassword({
       email: loginEmail.trim(),
@@ -414,7 +428,7 @@ export default function Home() {
     link.href = url; link.download = `bao-cao-nhap-kho-${new Date().toISOString().slice(0, 10)}.xls`; document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
   }
 
-  if (isSupabaseConfigured && !session) return <main className="login">
+  if ((IS_LOCAL_UAT && !uatAuthenticated) || (!IS_LOCAL_UAT && isSupabaseConfigured && !session)) return <main className="login">
     <section className="login-visual">
       <div className="login-brand"><Image src="/nha-coffee-logo-transparent.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div>
       <div className="eyebrow">NHA COFFEE & TEA</div>
@@ -423,14 +437,14 @@ export default function Home() {
       <div className="login-note"><span aria-hidden="true">✓</span> Dữ liệu dùng chung, có lịch sử thay đổi</div>
     </section>
     <form className="login-form" onSubmit={signIn}>
-      <div className="login-heading"><h2>Chào mừng trở lại</h2><p>Đăng nhập để tiếp tục vào kho nguyên liệu.</p></div>
-      <label htmlFor="login-username">Tên đăng nhập</label>
-      <input id="login-username" required autoComplete="username" inputMode="email" type="email" value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} placeholder="email@nhacoffee.vn" />
+      <div className="login-heading"><h2>Chào mừng trở lại</h2><p>{IS_LOCAL_UAT ? "Đăng nhập vào môi trường UAT local, tách biệt hoàn toàn với production." : "Đăng nhập để tiếp tục vào kho nguyên liệu."}</p></div>
+      <label htmlFor="login-username">{IS_LOCAL_UAT ? "User" : "Tên đăng nhập"}</label>
+      <input id="login-username" required autoComplete="username" inputMode={IS_LOCAL_UAT ? "text" : "email"} type={IS_LOCAL_UAT ? "text" : "email"} value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} placeholder={IS_LOCAL_UAT ? "UAT" : "email@nhacoffee.vn"} />
       <div className="password-label"><label htmlFor="login-password">Mật khẩu</label><span>Chỉ dành cho nhân sự</span></div>
       <input id="login-password" required autoComplete="current-password" type="password" value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} placeholder="Nhập mật khẩu" />
       {authError && <p className="login-error" role="alert">{authError}</p>}
       <button className="login-submit" type="submit" disabled={isSigningIn}>{isSigningIn ? "Đang đăng nhập..." : "Đăng nhập"}<span aria-hidden="true">→</span></button>
-      <p className="login-help">Tên đăng nhập hiện dùng email của tài khoản vận hành.</p>
+      <p className="login-help">{IS_LOCAL_UAT ? "Dữ liệu chỉ lưu trong trình duyệt này, không kết nối Supabase DB." : "Tên đăng nhập hiện dùng email của tài khoản vận hành."}</p>
     </form>
   </main>;
   return <main>
