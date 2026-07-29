@@ -34,7 +34,7 @@ const LOCAL_UAT_META_STORAGE_KEY = "nha-ops-meta-local-uat-v1";
 const LOCAL_UAT_AUTH_KEY = "nha-ops-auth-local-uat-v1";
 const CLOUD_MIGRATION_KEY = "nha-ops-lifecycle-cloud-v1";
 const WASTE_ALLOWANCE_STORAGE_KEY = "nha-ops-waste-allowance-v1";
-const IS_LOCAL_UAT = process.env.NODE_ENV === "development";
+const IS_LOCAL_UAT = process.env.NODE_ENV === "development" || process.env.NEXT_PUBLIC_UAT_MODE === "true";
 const formDefaults = (): FormValues => { const purchasedOn = new Date().toISOString().slice(0, 10); return { name: "", category: "", brand: "", invoiceCode: "", unit: "chai", quantity: "", specificationAmount: "", specificationUnit: "ml", specificationNote: "", unitCost: "", purchasedOn, supplier: "", expiresOn: defaultExpiryFor(purchasedOn), shelfLifeValue: "", shelfLifeUnit: "days", storageLocation: "Tủ mát" }; };
 const fieldLabels: Record<string, string> = { name: "Tên NVL", category: "Category", brand: "Thương hiệu", receiptCode: "Mã hóa đơn", unit: "Đơn vị", quantity: "SL tổng", specification: "Định lượng", unitCost: "Đơn giá", purchasedOn: "Ngày mua", supplier: "Nhà cung cấp", receipt: "Hóa đơn" };
 const activationReasons = [
