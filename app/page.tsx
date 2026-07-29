@@ -3,6 +3,7 @@
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import type { Session } from "@supabase/supabase-js";
+import FinanceModule from "@/app/finance-module";
 import { isSupabaseConfigured, supabase } from "@/lib/supabase";
 import { createActiveSession, loadInventory, migrateLocalLifecycle, removeInventory, saveInventory, updateActiveSession } from "@/lib/inventory-store";
 
@@ -27,8 +28,12 @@ type LifecycleFilter = "active" | "soon" | "overdue" | "loss";
 const STORAGE_KEY = "nha-ops-inventory-v1";
 const ACTIVE_STORAGE_KEY = "nha-ops-active-uat-v1";
 const LOT_META_STORAGE_KEY = "nha-ops-lot-meta-uat-v1";
+const LOCAL_UAT_STORAGE_KEY = "nha-ops-inventory-local-uat-v1";
+const LOCAL_UAT_ACTIVE_STORAGE_KEY = "nha-ops-active-local-uat-v1";
+const LOCAL_UAT_META_STORAGE_KEY = "nha-ops-meta-local-uat-v1";
 const CLOUD_MIGRATION_KEY = "nha-ops-lifecycle-cloud-v1";
 const WASTE_ALLOWANCE_STORAGE_KEY = "nha-ops-waste-allowance-v1";
+const IS_LOCAL_UAT = process.env.NODE_ENV === "development";
 const formDefaults = (): FormValues => { const purchasedOn = new Date().toISOString().slice(0, 10); return { name: "", category: "", brand: "", invoiceCode: "", unit: "chai", quantity: "", specificationAmount: "", specificationUnit: "ml", specificationNote: "", unitCost: "", purchasedOn, supplier: "", expiresOn: defaultExpiryFor(purchasedOn), shelfLifeValue: "", shelfLifeUnit: "days", storageLocation: "Tủ mát" }; };
 const fieldLabels: Record<string, string> = { name: "Tên NVL", category: "Category", brand: "Thương hiệu", receiptCode: "Mã hóa đơn", unit: "Đơn vị", quantity: "SL tổng", specification: "Định lượng", unitCost: "Đơn giá", purchasedOn: "Ngày mua", supplier: "Nhà cung cấp", receipt: "Hóa đơn" };
 const activationReasons = [
@@ -74,6 +79,32 @@ function safeItems(value: unknown): Ingredient[] {
     history: Array.isArray(item.history) ? item.history : [{ id: crypto.randomUUID(), at: new Date().toISOString(), action: "created", changes: [] }],
   }));
 }
+function seedInventoryUat(): { items: Ingredient[]; lotMeta: Record<string, LotMeta>; activeSessions: ActiveSession[] } {
+  const today = new Date().toISOString().slice(0, 10);
+  const atHours = (hours: number) => new Date(Date.now() + hours * 3_600_000).toISOString();
+  const receiptPreview = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='800' height='1100'%3E%3Crect width='100%25' height='100%25' fill='%23fffdf6'/%3E%3Ctext x='50%25' y='46%25' text-anchor='middle' font-family='Arial' font-size='54' fill='%231e4b3f'%3EHOA DON UAT%3C/text%3E%3Ctext x='50%25' y='53%25' text-anchor='middle' font-family='Arial' font-size='30' fill='%2371786e'%3ENHA COFFEE %26 TEA%3C/text%3E%3C/svg%3E";
+  const created = (id: string, purchasedOn: string): HistoryEvent[] => [{ id: `${id}-history`, at: `${purchasedOn}T08:00:00.000Z`, action: "created", changes: [] }];
+  const items: Ingredient[] = [
+    { id: "uat-lot-milk", name: "Sữa tươi không đường", category: "Sữa", brand: "Dalat Milk", unit: "hộp", quantity: 5, specification: "1 l", unitCost: 34_000, purchasedOn: addDays(today, -2), supplier: "WinMart", receiptCode: "UAT-MILK-001", receipt: { name: "hoa-don-sua-tuoi-uat.jpg", dataUrl: receiptPreview }, history: created("uat-lot-milk", addDays(today, -2)) },
+    { id: "uat-lot-syrup", name: "Syrup dâu", category: "Syrup", brand: "Monin", unit: "chai", quantity: 3, specification: "700 ml", unitCost: 198_000, purchasedOn: addDays(today, -4), supplier: "Nhất Hương", receiptCode: "UAT-SYRUP-002", receipt: { name: "hoa-don-syrup-uat.jpg", dataUrl: receiptPreview }, history: created("uat-lot-syrup", addDays(today, -4)) },
+    { id: "uat-lot-tea", name: "Trà lài", category: "Trà", brand: "Phúc Long", unit: "túi", quantity: 2, specification: "500 g", unitCost: 165_000, purchasedOn: addDays(today, -7), supplier: "Phúc Long Coffee & Tea", receiptCode: "UAT-TEA-003", receipt: { name: "hoa-don-tra-lai-uat.jpg", dataUrl: receiptPreview }, history: created("uat-lot-tea", addDays(today, -7)) },
+    { id: "uat-lot-cream", name: "Sữa béo", category: "Sữa", brand: "Rich's", unit: "hộp", quantity: 4, specification: "1 l", unitCost: 82_000, purchasedOn: addDays(today, -5), supplier: "Nhất Hương", receiptCode: "UAT-CREAM-004", receipt: { name: "hoa-don-sua-beo-uat.jpg", dataUrl: receiptPreview }, history: created("uat-lot-cream", addDays(today, -5)) },
+  ];
+  return {
+    items,
+    lotMeta: {
+      "uat-lot-milk": { expiresOn: addDays(today, 5), shelfLifeHours: 72, storageLocation: "Tủ mát" },
+      "uat-lot-syrup": { expiresOn: addDays(today, 180), shelfLifeHours: 720, storageLocation: "Kho khô" },
+      "uat-lot-tea": { expiresOn: addDays(today, 120), shelfLifeHours: 168, storageLocation: "Kho khô" },
+      "uat-lot-cream": { expiresOn: addDays(today, 14), shelfLifeHours: 48, storageLocation: "Tủ mát" },
+    },
+    activeSessions: [
+      { id: "uat-active-milk", sourceReceiptId: "uat-lot-milk", ingredientKey: ingredientKey(items[0]), activatedAt: atHours(-30), useBy: atHours(42), status: "active", reason: "first_open", note: "Dữ liệu mẫu UAT" },
+      { id: "uat-used-tea", sourceReceiptId: "uat-lot-tea", ingredientKey: ingredientKey(items[2]), activatedAt: atHours(-96), useBy: atHours(72), status: "used", closedAt: atHours(-60), reason: "used_up", note: "Dữ liệu mẫu UAT" },
+      { id: "uat-waste-cream", sourceReceiptId: "uat-lot-cream", ingredientKey: ingredientKey(items[3]), activatedAt: atHours(-72), useBy: atHours(-24), status: "wasted", closedAt: atHours(-36), reason: "temperature", note: "Tủ mát mất điện - dữ liệu mẫu UAT" },
+    ],
+  };
+}
 function changesFor(item: Ingredient, next: Omit<Ingredient, "id" | "history">): Change[] {
   const pairs: Array<[keyof Omit<Ingredient, "id" | "history">, string, string]> = [
     ["name", item.name, next.name], ["category", item.category, next.category], ["brand", item.brand, next.brand], ["receiptCode", item.receiptCode || "Chưa có", next.receiptCode || "Chưa có"], ["unit", item.unit, next.unit], ["quantity", String(item.quantity), String(next.quantity)], ["specification", item.specification, next.specification], ["unitCost", String(item.unitCost), String(next.unitCost)], ["purchasedOn", item.purchasedOn, next.purchasedOn], ["supplier", item.supplier, next.supplier], ["receipt", item.receipt?.name || "Không có", next.receipt?.name || "Không có"],
@@ -107,6 +138,7 @@ export default function Home() {
   const [closeReason, setCloseReason] = useState("");
   const [closeNote, setCloseNote] = useState("");
   const [showForm, setShowForm] = useState(false);
+  const [workspace, setWorkspace] = useState<"inventory" | "finance">("inventory");
   const [tab, setTab] = useState<"inventory" | "active" | "report">("inventory");
   const [inventoryView, setInventoryView] = useState<"stock" | "used">("stock");
   const [lifecycleFilter, setLifecycleFilter] = useState<LifecycleFilter>("active");
@@ -121,9 +153,35 @@ export default function Home() {
   const [loaded, setLoaded] = useState(false);
   const [deletingId, setDeletingId] = useState<string | undefined>();
   const canDeleteInventory = session?.user.email?.toLocaleLowerCase() === "cfo@nhacoffeentea.com";
+  const canAccessFinance = !isSupabaseConfigured || Boolean(session);
+
+  function loadLocalUatInventory() {
+    const seed = seedInventoryUat();
+    const storedItems = window.localStorage.getItem(LOCAL_UAT_STORAGE_KEY);
+    const storedActive = window.localStorage.getItem(LOCAL_UAT_ACTIVE_STORAGE_KEY);
+    const storedMeta = window.localStorage.getItem(LOCAL_UAT_META_STORAGE_KEY);
+    setItems(storedItems ? safeItems(JSON.parse(storedItems)) : seed.items);
+    setActiveSessions(storedActive ? JSON.parse(storedActive) as ActiveSession[] : seed.activeSessions);
+    setLotMeta(storedMeta ? JSON.parse(storedMeta) as Record<string, LotMeta> : seed.lotMeta);
+    setCloudLifecycleReady(false);
+    setLoaded(true);
+  }
+  function resetLocalUatInventory() {
+    if (!window.confirm("Nạp lại dữ liệu mẫu Kho NVL? Các thay đổi UAT local hiện tại sẽ mất.")) return;
+    window.localStorage.removeItem(LOCAL_UAT_STORAGE_KEY);
+    window.localStorage.removeItem(LOCAL_UAT_ACTIVE_STORAGE_KEY);
+    window.localStorage.removeItem(LOCAL_UAT_META_STORAGE_KEY);
+    const seed = seedInventoryUat();
+    setItems(seed.items);
+    setActiveSessions(seed.activeSessions);
+    setLotMeta(seed.lotMeta);
+    setDetailGroup(undefined);
+    setDetailLot(undefined);
+  }
 
   async function refreshCloud() {
     try {
+      if (IS_LOCAL_UAT) { loadLocalUatInventory(); return; }
       let cloud = await loadInventory();
       if (cloud.lifecycleReady && !window.localStorage.getItem(CLOUD_MIGRATION_KEY)) {
         const storedActive = JSON.parse(window.localStorage.getItem(ACTIVE_STORAGE_KEY) || "[]") as ActiveSession[];
@@ -146,13 +204,14 @@ export default function Home() {
     } finally { setLoaded(true); }
   }
   useEffect(() => {
+    if (IS_LOCAL_UAT && (!isSupabaseConfigured || !supabase)) { loadLocalUatInventory(); return; }
     if (!isSupabaseConfigured || !supabase) { const stored = window.localStorage.getItem(STORAGE_KEY); if (stored) setItems(safeItems(JSON.parse(stored))); setActiveSessions(JSON.parse(window.localStorage.getItem(ACTIVE_STORAGE_KEY) || "[]")); setLotMeta(JSON.parse(window.localStorage.getItem(LOT_META_STORAGE_KEY) || "{}")); setLoaded(true); return; }
     supabase.auth.getSession().then(({ data }) => { setSession(data.session); if (data.session) refreshCloud(); else setLoaded(true); });
     return supabase.auth.onAuthStateChange((_event, nextSession) => { setSession(nextSession); if (nextSession) refreshCloud(); }).data.subscription.unsubscribe;
   }, []);
-  useEffect(() => { if (loaded && !isSupabaseConfigured) window.localStorage.setItem(STORAGE_KEY, JSON.stringify(items)); }, [items, loaded]);
-  useEffect(() => { if (loaded && !cloudLifecycleReady) window.localStorage.setItem(ACTIVE_STORAGE_KEY, JSON.stringify(activeSessions)); }, [activeSessions, loaded, cloudLifecycleReady]);
-  useEffect(() => { if (loaded && !cloudLifecycleReady) window.localStorage.setItem(LOT_META_STORAGE_KEY, JSON.stringify(lotMeta)); }, [lotMeta, loaded, cloudLifecycleReady]);
+  useEffect(() => { if (loaded && (IS_LOCAL_UAT || !isSupabaseConfigured)) window.localStorage.setItem(IS_LOCAL_UAT ? LOCAL_UAT_STORAGE_KEY : STORAGE_KEY, JSON.stringify(items)); }, [items, loaded]);
+  useEffect(() => { if (loaded && !cloudLifecycleReady) window.localStorage.setItem(IS_LOCAL_UAT ? LOCAL_UAT_ACTIVE_STORAGE_KEY : ACTIVE_STORAGE_KEY, JSON.stringify(activeSessions)); }, [activeSessions, loaded, cloudLifecycleReady]);
+  useEffect(() => { if (loaded && !cloudLifecycleReady) window.localStorage.setItem(IS_LOCAL_UAT ? LOCAL_UAT_META_STORAGE_KEY : LOT_META_STORAGE_KEY, JSON.stringify(lotMeta)); }, [lotMeta, loaded, cloudLifecycleReady]);
   useEffect(() => { const stored = window.localStorage.getItem(WASTE_ALLOWANCE_STORAGE_KEY); if (stored) setWasteAllowance(stored); setWasteAllowanceLoaded(true); }, []);
   useEffect(() => { if (wasteAllowanceLoaded) window.localStorage.setItem(WASTE_ALLOWANCE_STORAGE_KEY, wasteAllowance); }, [wasteAllowance, wasteAllowanceLoaded]);
 
@@ -285,7 +344,7 @@ export default function Home() {
     setLotMeta((metadata) => ({ ...metadata, [item.id]: nextMeta }));
     if (current && !changes.length && !metaChanged) { closeForm(); return; }
     if (updatedActive.length) setActiveSessions((sessions) => sessions.map((activeSession) => updatedActive.find((updated) => updated.id === activeSession.id) || activeSession));
-    if (isSupabaseConfigured && session) {
+    if (!IS_LOCAL_UAT && isSupabaseConfigured && session) {
       try {
         await saveInventory(item, eventRecord, receiptFile, cloudLifecycleReady ? nextMeta : undefined);
         if (cloudLifecycleReady && updatedActive.length) await Promise.all(updatedActive.map(updateActiveSession));
@@ -308,6 +367,14 @@ export default function Home() {
       return;
     }
     if (!window.confirm("Xóa lô nhập kho này? Toàn bộ lịch sử, dữ liệu đã dùng/báo hỏng liên quan và dòng báo cáo sẽ bị xóa.")) return;
+    if (IS_LOCAL_UAT) {
+      setItems((current) => current.filter((item) => item.id !== id));
+      setLotMeta((current) => Object.fromEntries(Object.entries(current).filter(([lotId]) => lotId !== id)));
+      setActiveSessions((current) => current.filter((activeSession) => activeSession.sourceReceiptId !== id));
+      setDetailLot((current) => current?.id === id ? undefined : current);
+      setDetailGroup(undefined);
+      return;
+    }
     if (!isSupabaseConfigured || !session) {
       window.alert("Không thể xác nhận phiên đăng nhập. Vui lòng tải lại trang và đăng nhập lại.");
       return;
@@ -349,7 +416,7 @@ export default function Home() {
 
   if (isSupabaseConfigured && !session) return <main className="login">
     <section className="login-visual">
-      <div className="login-brand"><Image src="/nha-coffee-logo.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div>
+      <div className="login-brand"><Image src="/nha-coffee-logo-transparent.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div>
       <div className="eyebrow">NHA COFFEE & TEA</div>
       <h1>Nhà Ops</h1>
       <p>Quản lý nhập kho rõ ràng, đồng bộ cho cả quán.</p>
@@ -367,11 +434,18 @@ export default function Home() {
     </form>
   </main>;
   return <main>
+    {canAccessFinance && <nav className="module-switcher" aria-label="Khu vực quản lý"><button className={workspace === "inventory" ? "active" : ""} onClick={() => setWorkspace("inventory")}>Kho NVL</button><button className={workspace === "finance" ? "active" : ""} onClick={() => setWorkspace("finance")}>Chi phí</button></nav>}
+    {workspace === "finance" && canAccessFinance ? <FinanceModule
+      inventoryLots={items.map((item) => ({ id: item.id, name: item.name, quantity: item.quantity, unit: item.unit, unitCost: item.unitCost, purchasedOn: item.purchasedOn, receiptCode: item.receiptCode }))}
+      inventorySessions={activeSessions.map((entry) => ({ id: entry.id, sourceReceiptId: entry.sourceReceiptId, activatedAt: entry.activatedAt, status: entry.status, closedAt: entry.closedAt, reason: entry.reason }))}
+      onOpenInventoryLot={(id) => { const lot = items.find((item) => item.id === id); if (!lot) return; setWorkspace("inventory"); setTab("inventory"); setDetailLot(lot); }}
+    /> : <>
     <section className="hero">
       <div className="eyebrow">NHA COFFEE & TEA</div>
-      <div className="hero-row"><div><h1>{tab === "inventory" ? "Kho nguyên liệu" : tab === "active" ? "Đang sử dụng" : "Báo cáo nhập kho"}</h1><p>{tab === "inventory" ? "Tìm nguyên liệu, xem tồn và mở để sử dụng." : tab === "active" ? "Ưu tiên những món sắp hư hoặc đã mở lâu." : "Lọc và sắp xếp dữ liệu nhập nguyên liệu."}</p></div><div className="hero-logo"><Image src="/nha-coffee-logo.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div></div>
+      <div className="hero-row"><div><h1>{tab === "inventory" ? "Kho nguyên liệu" : tab === "active" ? "Đang sử dụng" : "Báo cáo nhập kho"}</h1><p>{tab === "inventory" ? "Tìm nguyên liệu, xem tồn và mở để sử dụng." : tab === "active" ? "Ưu tiên những món sắp hư hoặc đã mở lâu." : "Lọc và sắp xếp dữ liệu nhập nguyên liệu."}</p></div><div className="hero-logo"><Image src="/nha-coffee-logo-transparent.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div></div>
       <div className="metric"><span>{tab === "active" ? "Đơn vị đang active" : "Giá trị kho đã ghi nhận"}</span><strong>{tab === "active" ? openSessions.length : formatMoney(totalValue)}</strong><small>{tab === "active" ? `${overdueCount} quá hạn · ${expiringSoonCount} sắp đến hạn` : `${items.length} lần nhập hàng`}</small></div>
     </section>
+    {IS_LOCAL_UAT && <div className="uat-local-banner"><span><b>UAT LOCAL</b> · Dữ liệu mẫu không đồng bộ lên production.</span><button onClick={resetLocalUatInventory}>Nạp lại dữ liệu mẫu</button></div>}
     <nav className="tabs" aria-label="Điều hướng"><button className={tab === "inventory" ? "active" : ""} onClick={() => setTab("inventory")}>Kho NVL</button><button className={tab === "active" ? "active" : ""} onClick={() => setTab("active")}>Đang dùng</button><button className={tab === "report" ? "active" : ""} onClick={() => setTab("report")}>Báo cáo</button></nav>
 
     {tab === "inventory" && <section className="content">
@@ -413,12 +487,13 @@ export default function Home() {
 
     {detailLot && <div className="sheet-backdrop lot-detail-backdrop" role="presentation" onMouseDown={() => setDetailLot(undefined)}><aside className="sheet lot-detail-sheet" onMouseDown={(event) => event.stopPropagation()}><div className="sheet-handle" /><div className="sheet-title"><div><p>CHI TIẾT LÔ NHẬP KHO</p><h2>{detailLot.name}</h2><span>{detailLot.category} · {detailLot.brand}</span></div><button type="button" className="close" onClick={() => setDetailLot(undefined)}>×</button></div><div className="lot-detail-grid"><div><span>Mã phiếu</span><strong>{detailLot.receiptCode || "Chưa có"}</strong></div><div><span>SL tổng</span><strong>{detailLot.quantity.toLocaleString("vi-VN")} {detailLot.unit}</strong></div><div><span>Tồn niêm phong</span><strong>{sealedInLot(detailLot).toLocaleString("vi-VN")} {detailLot.unit}</strong></div><div><span>Định lượng/{detailLot.unit}</span><strong>{detailLot.specification}</strong></div><div><span>Đơn giá</span><strong>{formatMoney(detailLot.unitCost)}</strong></div><div><span>Thành tiền</span><strong>{formatMoney(detailLot.quantity * detailLot.unitCost)}</strong></div><div><span>Ngày mua</span><strong>{formatDate(detailLot.purchasedOn)}</strong></div><div><span>Hạn sử dụng</span><strong>{lotMeta[detailLot.id]?.expiresOn ? formatDate(lotMeta[detailLot.id].expiresOn) : "Chưa ghi"}</strong></div><div><span>Dùng sau khi mở</span><strong>{shelfLifeLabel(lotMeta[detailLot.id]?.shelfLifeHours)}</strong></div><div><span>Nhà cung cấp</span><strong>{detailLot.supplier}</strong></div><div><span>Nơi bảo quản</span><strong>{lotMeta[detailLot.id]?.storageLocation || "Chưa ghi"}</strong></div></div><section className="receipt-detail"><h3>Hóa đơn đính kèm</h3>{detailLot.receipt ? <div><span>▣ {detailLot.receipt.name}</span>{detailLot.receipt.dataUrl ? <a href={detailLot.receipt.dataUrl} target="_blank" rel="noreferrer">Mở hóa đơn</a> : <small>File đã ghi nhận nhưng đường dẫn xem hiện không khả dụng.</small>}</div> : <p>Chưa có hóa đơn được đính kèm cho lô này.</p>}</section><div className="lot-detail-actions"><button onClick={() => { setDetailLot(undefined); openEdit(detailLot); }}>Sửa thông tin lô</button><button onClick={() => setHistoryItem(detailLot)}>Xem lịch sử</button>{canDeleteInventory && <button disabled={takenFromLot(detailLot.id) > 0 || deletingId === detailLot.id} title={takenFromLot(detailLot.id) > 0 ? "Không thể xóa phiếu đã có lần xuất sang Đang dùng" : undefined} onClick={() => removeItem(detailLot.id)}>{deletingId === detailLot.id ? "Đang xóa..." : "Xóa lô nhập kho"}</button>}</div></aside></div>}
 
-    {showForm && <div className="sheet-backdrop" role="presentation" onMouseDown={closeForm}><form className="sheet" onSubmit={saveIngredient} onMouseDown={(event) => event.stopPropagation()}><div className="sheet-handle" /><div className="sheet-title"><div><p>{editingId ? "CẬP NHẬT LÔ NHẬP" : "NHẬP KHO"}</p><h2>{editingId ? "Sửa nguyên liệu" : "Thêm nguyên liệu"}</h2></div><button type="button" className="close" onClick={closeForm}>×</button></div><label>Tên nguyên liệu<input required autoFocus value={form.name} onChange={(event) => updateForm("name", event.target.value)} placeholder="Ví dụ: Sữa tươi" /></label><div className="form-row"><label>Category<input required list="category-options" value={form.category} onChange={(event) => updateForm("category", event.target.value)} placeholder="Ví dụ: Sữa" /><datalist id="category-options">{categories.map((category) => <option value={category} key={category} />)}</datalist></label><label>Thương hiệu<input list="brand-options" value={form.brand} onChange={(event) => updateForm("brand", event.target.value)} placeholder="Gõ để chọn hoặc thêm mới" /><datalist id="brand-options">{brands.map((brand) => <option value={brand} key={brand} />)}</datalist></label></div><label>Mã hóa đơn<input value={form.invoiceCode} onChange={(event) => updateForm("invoiceCode", event.target.value)} placeholder="Ví dụ: HD-000123" /><small>Bắt buộc nhập. Nếu để trống, hệ thống sẽ hỏi trước khi dùng mã DDMMYY-STT.</small></label><div className="form-row"><label>SL tổng<input required min="0" step="0.01" inputMode="decimal" value={form.quantity} onChange={(event) => updateForm("quantity", event.target.value)} placeholder="Ví dụ: 3" /></label><label>Đơn vị<select value={form.unit} onChange={(event) => updateForm("unit", event.target.value)}><option>chai</option><option>gói</option><option>hộp</option><option>lon</option><option>túi</option><option>kg</option><option>lít</option></select></label></div><div className="form-row specification-row"><label>Định lượng mỗi đơn vị<input min="0" step="0.01" inputMode="decimal" type="number" value={form.specificationAmount} onChange={(event) => updateForm("specificationAmount", event.target.value)} placeholder="Ví dụ: 200" /></label><label>Đơn vị định lượng<select value={form.specificationUnit} onChange={(event) => updateForm("specificationUnit", event.target.value)}><option value="ml">ml</option><option value="l">lít (l)</option><option value="g">gram (g)</option><option value="kg">kilogram (kg)</option><option value="mg">milligram (mg)</option><option value="oz">ounce (oz)</option><option value="cái">cái</option><option value="viên">viên</option><option value="phần">phần</option></select></label></div><label>Đơn giá (VND)<input required inputMode="numeric" value={form.unitCost} onChange={(event) => updateForm("unitCost", formatPriceInput(event.target.value))} placeholder="Ví dụ: 53,000" /><small>Giá của một {form.unit}; có thể gõ theo dạng 53,000.</small></label><div className="form-row"><label>Ngày mua<VietnameseDateInput required value={form.purchasedOn} onChange={updatePurchasedOn} /><small>Định dạng: dd/mm/yyyy</small></label><label>Hạn sử dụng<VietnameseDateInput value={form.expiresOn} onChange={(expiresOn) => updateForm("expiresOn", expiresOn)} /><small>Định dạng: dd/mm/yyyy</small></label></div><div className="form-row shelf-life-row"><label>Dùng trong vòng sau mở<input min="0" type="number" inputMode="decimal" value={form.shelfLifeValue} onChange={(event) => updateForm("shelfLifeValue", event.target.value)} placeholder="Ví dụ: 3" /></label><label>Đơn vị thời gian<select value={form.shelfLifeUnit} onChange={(event) => updateForm("shelfLifeUnit", event.target.value as ShelfLifeUnit)}><option value="minutes">Phút</option><option value="hours">Giờ</option><option value="days">Ngày</option><option value="weeks">Tuần</option></select></label></div><div className="form-row"><label>Nhà cung cấp<input list="supplier-options" value={form.supplier} onChange={(event) => updateForm("supplier", event.target.value)} placeholder="Gõ để chọn hoặc thêm mới" /><datalist id="supplier-options">{suppliers.map((supplier) => <option value={supplier} key={supplier} />)}</datalist></label><label>Nơi bảo quản<select value={form.storageLocation} onChange={(event) => updateForm("storageLocation", event.target.value)}><option>Tủ mát</option><option>Tủ đông</option><option>Kho khô</option><option>Quầy bar</option><option>Khác</option></select></label></div><fieldset className="receipt-fieldset"><legend>Đính kèm hóa đơn</legend><div className="receipt-options"><label className="receipt-choice camera-choice"><input type="file" accept="image/*" capture="environment" onChange={attachReceipt} /><span className="receipt-icon">◎</span><b>Chụp bằng camera</b><small>Mở camera sau trên điện thoại</small></label><label className="receipt-choice"><input type="file" accept="image/*,.pdf" onChange={attachReceipt} /><span className="receipt-icon">⇧</span><b>Chọn ảnh / PDF</b><small>Tải file có sẵn từ thiết bị</small></label></div>{receipt && <div className="selected-receipt">✓ Đã chọn: <b>{receipt.name}</b></div>}</fieldset><p className="uat-note">{cloudLifecycleReady ? "HSD, nơi bảo quản và trạng thái active đang đồng bộ qua Supabase." : "Cần chạy migration 003 để bật đồng bộ lifecycle giữa các thiết bị."}</p><button className="save-button" type="submit">{editingId ? "Lưu thay đổi" : "Lưu lần nhập kho"}</button></form></div>}
+    {showForm && <div className="sheet-backdrop" role="presentation" onMouseDown={closeForm}><form className="sheet" onSubmit={saveIngredient} onMouseDown={(event) => event.stopPropagation()}><div className="sheet-handle" /><div className="sheet-title"><div><p>{editingId ? "CẬP NHẬT LÔ NHẬP" : "NHẬP KHO"}</p><h2>{editingId ? "Sửa nguyên liệu" : "Thêm nguyên liệu"}</h2></div><button type="button" className="close" onClick={closeForm}>×</button></div><label>Tên nguyên liệu<input required autoFocus value={form.name} onChange={(event) => updateForm("name", event.target.value)} placeholder="Ví dụ: Sữa tươi" /></label><div className="form-row"><label>Category<input required list="category-options" value={form.category} onChange={(event) => updateForm("category", event.target.value)} placeholder="Ví dụ: Sữa" /><datalist id="category-options">{categories.map((category) => <option value={category} key={category} />)}</datalist></label><label>Thương hiệu<input list="brand-options" value={form.brand} onChange={(event) => updateForm("brand", event.target.value)} placeholder="Gõ để chọn hoặc thêm mới" /><datalist id="brand-options">{brands.map((brand) => <option value={brand} key={brand} />)}</datalist></label></div><label>Mã hóa đơn<input value={form.invoiceCode} onChange={(event) => updateForm("invoiceCode", event.target.value)} placeholder="Ví dụ: HD-000123" /><small>Bắt buộc nhập. Nếu để trống, hệ thống sẽ hỏi trước khi dùng mã DDMMYY-STT.</small></label><div className="form-row"><label>SL tổng<input required min="0" step="0.01" inputMode="decimal" value={form.quantity} onChange={(event) => updateForm("quantity", event.target.value)} placeholder="Ví dụ: 3" /></label><label>Đơn vị<select value={form.unit} onChange={(event) => updateForm("unit", event.target.value)}><option>chai</option><option>gói</option><option>hộp</option><option>lon</option><option>túi</option><option>kg</option><option>lít</option></select></label></div><div className="form-row specification-row"><label>Định lượng mỗi đơn vị<input min="0" step="0.01" inputMode="decimal" type="number" value={form.specificationAmount} onChange={(event) => updateForm("specificationAmount", event.target.value)} placeholder="Ví dụ: 200" /></label><label>Đơn vị định lượng<select value={form.specificationUnit} onChange={(event) => updateForm("specificationUnit", event.target.value)}><option value="ml">ml</option><option value="l">lít (l)</option><option value="g">gram (g)</option><option value="kg">kilogram (kg)</option><option value="mg">milligram (mg)</option><option value="oz">ounce (oz)</option><option value="cái">cái</option><option value="viên">viên</option><option value="phần">phần</option></select></label></div><label>Đơn giá (VND)<input required inputMode="numeric" value={form.unitCost} onChange={(event) => updateForm("unitCost", formatPriceInput(event.target.value))} placeholder="Ví dụ: 53,000" /><small>Giá của một {form.unit}; có thể gõ theo dạng 53,000.</small></label><div className="form-row"><label>Ngày mua<VietnameseDateInput required value={form.purchasedOn} onChange={updatePurchasedOn} /><small>Định dạng: dd/mm/yyyy</small></label><label>Hạn sử dụng<VietnameseDateInput value={form.expiresOn} onChange={(expiresOn) => updateForm("expiresOn", expiresOn)} /><small>Định dạng: dd/mm/yyyy</small></label></div><div className="form-row shelf-life-row"><label>Dùng trong vòng sau mở<input min="0" type="number" inputMode="decimal" value={form.shelfLifeValue} onChange={(event) => updateForm("shelfLifeValue", event.target.value)} placeholder="Ví dụ: 3" /></label><label>Đơn vị thời gian<select value={form.shelfLifeUnit} onChange={(event) => updateForm("shelfLifeUnit", event.target.value as ShelfLifeUnit)}><option value="minutes">Phút</option><option value="hours">Giờ</option><option value="days">Ngày</option><option value="weeks">Tuần</option></select></label></div><div className="form-row"><label>Nhà cung cấp<input list="supplier-options" value={form.supplier} onChange={(event) => updateForm("supplier", event.target.value)} placeholder="Gõ để chọn hoặc thêm mới" /><datalist id="supplier-options">{suppliers.map((supplier) => <option value={supplier} key={supplier} />)}</datalist></label><label>Nơi bảo quản<select value={form.storageLocation} onChange={(event) => updateForm("storageLocation", event.target.value)}><option>Tủ mát</option><option>Tủ đông</option><option>Kho khô</option><option>Quầy bar</option><option>Khác</option></select></label></div><fieldset className="receipt-fieldset"><legend>Đính kèm hóa đơn</legend><div className="receipt-options"><label className="receipt-choice camera-choice"><input type="file" accept="image/*" capture="environment" onChange={attachReceipt} /><span className="receipt-icon">◎</span><b>Chụp bằng camera</b><small>Mở camera sau trên điện thoại</small></label><label className="receipt-choice"><input type="file" accept="image/*,.pdf" onChange={attachReceipt} /><span className="receipt-icon">⇧</span><b>Chọn ảnh / PDF</b><small>Tải file có sẵn từ thiết bị</small></label></div>{receipt && <div className="selected-receipt">✓ Đã chọn: <b>{receipt.name}</b></div>}</fieldset><p className="uat-note">{IS_LOCAL_UAT ? "Dữ liệu UAT đang lưu riêng trên trình duyệt và không đồng bộ lên production." : cloudLifecycleReady ? "HSD, nơi bảo quản và trạng thái active đang đồng bộ qua Supabase." : "Cần chạy migration 003 để bật đồng bộ lifecycle giữa các thiết bị."}</p><button className="save-button" type="submit">{editingId ? "Lưu thay đổi" : "Lưu lần nhập kho"}</button></form></div>}
 
     {activationCandidate && <div className="sheet-backdrop action-backdrop" role="presentation" onMouseDown={() => setActivationCandidate(undefined)}><form className="sheet action-sheet" onSubmit={confirmActivation} onMouseDown={(event) => event.stopPropagation()}><div className="sheet-handle" /><div className="sheet-title"><div><p>CROSS-CHECK TRƯỚC KHI MỞ</p><h2>Đang có {activeInGroup(activationCandidate.group).length} {activationCandidate.group.unit} active</h2></div><button type="button" className="close" onClick={() => setActivationCandidate(undefined)}>×</button></div><div className="cross-check-alert"><b>{activationCandidate.group.name}</b><span>Hộp cũ chưa được đánh dấu là đã sử dụng hết. Chọn tình huống thực tế trước khi mở thêm.</span></div><label>Tình huống<select required value={activationReason} onChange={(event) => setActivationReason(event.target.value)}><option value="">Chọn một lý do</option><optgroup label="Hộp cũ đã kết thúc"><option value="previous_used">Hộp cũ đã sử dụng hết</option>{closeReasons.filter(([key]) => key !== "used_up").map(([key, label]) => <option value={`previous_waste_${key}`} key={key}>Hộp cũ: {label}</option>)}</optgroup><optgroup label="Giữ hộp cũ và mở thêm">{activationReasons.map(([key, label]) => <option value={key} key={key}>{label}</option>)}</optgroup></select></label><label>Ghi chú {activationReason.endsWith("other") ? "(bắt buộc)" : "(không bắt buộc)"}<textarea required={activationReason.endsWith("other")} value={activationNote} onChange={(event) => setActivationNote(event.target.value)} placeholder="Mô tả ngắn nếu cần" /></label><button className="save-button" type="submit">Xác nhận mở thêm 1 {activationCandidate.group.unit}</button></form></div>}
 
     {closeCandidate && <div className="sheet-backdrop action-backdrop" role="presentation" onMouseDown={() => setCloseCandidate(undefined)}><form className="sheet action-sheet" onSubmit={confirmClose} onMouseDown={(event) => event.stopPropagation()}><div className="sheet-handle" /><div className="sheet-title"><div><p>KẾT THÚC ACTIVE</p><h2>{closeCandidate.status === "used" ? "Xác nhận đã dùng hết" : "Ghi nhận hư hỏng"}</h2></div><button type="button" className="close" onClick={() => setCloseCandidate(undefined)}>×</button></div>{closeCandidate.status === "wasted" && <label>Lý do<select required value={closeReason} onChange={(event) => setCloseReason(event.target.value)}><option value="">Chọn lý do</option>{closeReasons.filter(([key]) => key !== "used_up").map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></label>}<label>Ghi chú {closeReason === "other" ? "(bắt buộc)" : "(không bắt buộc)"}<textarea required={closeReason === "other"} value={closeNote} onChange={(event) => setCloseNote(event.target.value)} placeholder="Mô tả ngắn nếu cần" /></label><button className={`save-button ${closeCandidate.status === "wasted" ? "danger-button" : ""}`} type="submit">{closeCandidate.status === "used" ? "Đánh dấu đã dùng hết" : "Ghi nhận hư/hủy"}</button></form></div>}
 
     {historyItem && <div className="sheet-backdrop" role="presentation" onMouseDown={() => setHistoryItem(undefined)}><aside className="sheet history-sheet" onMouseDown={(event) => event.stopPropagation()}><div className="sheet-handle" /><div className="sheet-title"><div><p>NHẬT KÝ THAY ĐỔI</p><h2>{historyItem.name}</h2></div><button type="button" className="close" onClick={() => setHistoryItem(undefined)}>×</button></div><div className="history-list">{historyItem.history.map((event) => <article className="history-event" key={event.id}><div><strong>{event.action === "created" ? "Tạo lần nhập" : "Đã cập nhật"}</strong><span>{formatTime(event.at)}</span></div>{event.action === "created" ? <p>Đã ghi nhận lần nhập kho đầu tiên.</p> : event.changes.map((change) => <p key={change.field}><b>{fieldLabels[change.field]}</b><del>{change.from}</del><ins>{change.to}</ins></p>)}</article>)}</div></aside></div>}
+    </>}
   </main>;
 }
