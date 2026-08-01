@@ -65,8 +65,7 @@ type RevenueRecord = {
 type FinanceState = {
   expenses: ExpenseRecord[];
   revenues: RevenueRecord[];
-  monthlyRevenueTarget: number;
-  monthlyCupTarget: number;
+  growthTargetPercent: number;
   closedPeriods: string[];
 };
 
@@ -101,7 +100,9 @@ type RevenueForm = {
 
 type PeriodBounds = { start: string; end: string; label: string; key: string };
 
-const FINANCE_STORAGE_KEY = "nha-ops-finance-uat-v1";
+const FINANCE_STORAGE_KEY = "nha-ops-finance-v1";
+const FINANCE_UAT_STORAGE_KEY = "nha-ops-finance-uat-v2";
+const FINANCE_LEGACY_UAT_STORAGE_KEY = "nha-ops-finance-uat-v1";
 const categoryLabels: Record<ExpenseCategory, string> = {
   fixed: "Chi phí cố định",
   operating: "Chi phí vận hành",
@@ -138,6 +139,16 @@ function periodBounds(mode: PeriodMode, selectedMonth: string, quarter: number, 
   return { start: dateAt(year, 1, 1), end: dateAt(year, 12, 31), label: `Năm ${year}`, key: String(year) };
 }
 
+function previousPeriodBounds(bounds: PeriodBounds, mode: PeriodMode): PeriodBounds {
+  const months = mode === "month" ? 1 : mode === "quarter" ? 3 : 12;
+  const currentStart = new Date(`${bounds.start}T00:00:00Z`);
+  const previousStart = new Date(Date.UTC(currentStart.getUTCFullYear(), currentStart.getUTCMonth() - months, 1));
+  const previousEnd = new Date(currentStart.getTime() - 86_400_000);
+  const start = previousStart.toISOString().slice(0, 10);
+  const end = previousEnd.toISOString().slice(0, 10);
+  return { start, end, label: `${dateLabel(start)} - ${dateLabel(end)}`, key: `${start}:${end}` };
+}
+
 function expenseFormDefaults(category: ExpenseCategory = "fixed"): ExpenseForm {
   const today = todayISO();
   return { name: "", category, subcategory: "", amount: "", incurredOn: today, recurrence: category === "fixed" ? "monthly" : "once", paymentStatus: "paid", paymentDate: today, invoiceCode: "", vendor: "", note: "", usefulLifeMonths: "36", salvageValue: "0", inServiceOn: today };
@@ -147,20 +158,45 @@ function revenueFormDefaults(): RevenueForm {
   return { date: todayISO(), storeRevenue: "", appRevenue: "", discounts: "", platformFees: "", cashReceived: "", orders: "", cups: "", note: "" };
 }
 
+function emptyFinanceState(): FinanceState {
+  return { expenses: [], revenues: [], growthTargetPercent: 10, closedPeriods: [] };
+}
+
+function normalizeFinanceState(value: unknown, uatMode: boolean): FinanceState {
+  if (!value || typeof value !== "object") return uatMode ? seedFinanceState() : emptyFinanceState();
+  const stored = value as Partial<FinanceState>;
+  const expenses = Array.isArray(stored.expenses) ? stored.expenses : [];
+  const revenues = Array.isArray(stored.revenues) ? stored.revenues : [];
+  const isUatSample = (record: ExpenseRecord | RevenueRecord) => record.id.startsWith("uat-") || record.note?.includes("Dữ liệu mẫu UAT");
+  return {
+    expenses: uatMode ? expenses : expenses.filter((record) => !isUatSample(record)),
+    revenues: uatMode ? revenues : revenues.filter((record) => !isUatSample(record)),
+    growthTargetPercent: Number.isFinite(Number(stored.growthTargetPercent)) ? Number(stored.growthTargetPercent) : 10,
+    closedPeriods: Array.isArray(stored.closedPeriods) ? stored.closedPeriods : [],
+  };
+}
+
 function seedFinanceState(): FinanceState {
   const today = new Date();
   const year = today.getFullYear();
   const month = today.getMonth() + 1;
   const maxDay = Math.min(today.getDate(), 24);
-  const revenues: RevenueRecord[] = Array.from({ length: maxDay }, (_, index) => {
+  const makeRevenues = (seedYear: number, seedMonth: number, days: number, prefix: string, scale: number): RevenueRecord[] => Array.from({ length: days }, (_, index) => {
     const day = index + 1;
-    const storeRevenue = 2_700_000 + (day % 5) * 170_000;
-    const appRevenue = 1_100_000 + (day % 4) * 120_000;
+    const storeRevenue = Math.round((2_700_000 + (day % 5) * 170_000) * scale);
+    const appRevenue = Math.round((1_100_000 + (day % 4) * 120_000) * scale);
     const discounts = day % 6 === 0 ? 240_000 : 90_000;
     const platformFees = Math.round(appRevenue * 0.21);
     const net = storeRevenue + appRevenue - discounts;
-    return { id: `uat-revenue-${day}`, date: dateAt(year, month, day), storeRevenue, appRevenue, discounts, platformFees, cashReceived: net - platformFees, orders: 72 + (day % 7) * 5, cups: 91 + (day % 6) * 7, note: "Dữ liệu mẫu UAT" };
+    return { id: `${prefix}-${day}`, date: dateAt(seedYear, seedMonth, day), storeRevenue, appRevenue, discounts, platformFees, cashReceived: net - platformFees, orders: Math.round((72 + (day % 7) * 5) * scale), cups: Math.round((91 + (day % 6) * 7) * scale), note: "Dữ liệu mẫu UAT" };
   });
+  const previousMonth = new Date(Date.UTC(year, month - 2, 1));
+  const previousYear = previousMonth.getUTCFullYear();
+  const previousMonthNumber = previousMonth.getUTCMonth() + 1;
+  const revenues = [
+    ...makeRevenues(year, month, maxDay, "uat-revenue-current", 1),
+    ...makeRevenues(previousYear, previousMonthNumber, Math.min(24, daysInMonth(previousYear, previousMonthNumber)), "uat-revenue-previous", 0.9),
+  ];
   return {
     expenses: [
       { id: "uat-rent", name: "Tiền thuê mặt bằng", category: "fixed", subcategory: "Mặt bằng", amount: 15_000_000, incurredOn: dateAt(year, month, 1), recurrence: "monthly", paymentStatus: "paid", paymentDate: dateAt(year, month, 3), invoiceCode: "HD-THUE-UAT", vendor: "Chủ nhà", note: "Dữ liệu mẫu UAT", status: "active" },
@@ -171,8 +207,7 @@ function seedFinanceState(): FinanceState {
       { id: "uat-fridge", name: "Tủ mát quầy bar", category: "investment", subcategory: "Thiết bị bảo quản", amount: 24_000_000, incurredOn: dateAt(year, Math.max(1, month - 2), 12), recurrence: "once", paymentStatus: "paid", paymentDate: dateAt(year, Math.max(1, month - 2), 12), invoiceCode: "CAPEX-UAT-02", usefulLifeMonths: 36, salvageValue: 0, inServiceOn: dateAt(year, Math.max(1, month - 2), 15), note: "Dữ liệu mẫu UAT", status: "active" },
     ],
     revenues,
-    monthlyRevenueTarget: 160_000_000,
-    monthlyCupTarget: 3_600,
+    growthTargetPercent: 12,
     closedPeriods: [],
   };
 }
@@ -219,9 +254,10 @@ function MiniBars({ values, target }: { values: Array<{ label: string; value: nu
   return <div className={styles.miniBars}>{values.map((entry) => <div className={styles.barColumn} key={entry.label}><div className={styles.barTrack}><i style={{ height: `${Math.max(3, (entry.value / max) * 100)}%` }} /></div><span>{entry.label}</span></div>)}</div>;
 }
 
-export default function FinanceModule({ inventoryLots, inventorySessions, onOpenInventoryLot }: { inventoryLots: FinanceInventoryLot[]; inventorySessions: FinanceInventorySession[]; onOpenInventoryLot: (id: string) => void }) {
+export default function FinanceModule({ inventoryLots, inventorySessions, onOpenInventoryLot, uatMode }: { inventoryLots: FinanceInventoryLot[]; inventorySessions: FinanceInventorySession[]; onOpenInventoryLot: (id: string) => void; uatMode: boolean }) {
   const today = todayISO();
-  const [state, setState] = useState<FinanceState>(seedFinanceState);
+  const storageKey = uatMode ? FINANCE_UAT_STORAGE_KEY : FINANCE_STORAGE_KEY;
+  const [state, setState] = useState<FinanceState>(() => uatMode ? seedFinanceState() : emptyFinanceState());
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState<FinanceTab>("entry");
   const [periodMode, setPeriodMode] = useState<PeriodMode>("month");
@@ -237,19 +273,21 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const [revenueForm, setRevenueForm] = useState<RevenueForm>(revenueFormDefaults());
 
   useEffect(() => {
-    const stored = window.localStorage.getItem(FINANCE_STORAGE_KEY);
+    const stored = window.localStorage.getItem(storageKey) || (!uatMode ? window.localStorage.getItem(FINANCE_LEGACY_UAT_STORAGE_KEY) : null);
     if (stored) {
-      try { setState(JSON.parse(stored) as FinanceState); } catch { setState(seedFinanceState()); }
-    }
+      try { setState(normalizeFinanceState(JSON.parse(stored), uatMode)); } catch { setState(uatMode ? seedFinanceState() : emptyFinanceState()); }
+    } else setState(uatMode ? seedFinanceState() : emptyFinanceState());
     setLoaded(true);
-  }, []);
-  useEffect(() => { if (loaded) window.localStorage.setItem(FINANCE_STORAGE_KEY, JSON.stringify(state)); }, [state, loaded]);
+  }, [storageKey, uatMode]);
+  useEffect(() => { if (loaded) window.localStorage.setItem(storageKey, JSON.stringify(state)); }, [state, loaded, storageKey]);
 
   const bounds = useMemo(() => periodBounds(periodMode, selectedMonth, selectedQuarter, selectedYear), [periodMode, selectedMonth, selectedQuarter, selectedYear]);
+  const previousBounds = useMemo(() => previousPeriodBounds(bounds, periodMode), [bounds, periodMode]);
   const currentPeriodClosed = periodMode === "month" && state.closedPeriods.includes(bounds.key);
   const activeExpenses = state.expenses.filter((expense) => expense.status === "active");
   const manualOccurrences = useMemo(() => activeExpenses.flatMap((expense) => expenseOccurrences(expense, bounds).map((date) => ({ expense, date, amount: expense.amount }))), [activeExpenses, bounds]);
   const periodRevenues = useMemo(() => state.revenues.filter((entry) => inRange(entry.date, bounds)), [state.revenues, bounds]);
+  const previousPeriodRevenues = useMemo(() => state.revenues.filter((entry) => inRange(entry.date, previousBounds)), [state.revenues, previousBounds]);
   const inventoryEvents = useMemo(() => inventorySessions.flatMap((session) => {
     const lot = inventoryLots.find((entry) => entry.id === session.sourceReceiptId);
     if (!lot) return [];
@@ -269,6 +307,10 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const cups = periodRevenues.reduce((sum, entry) => sum + entry.cups, 0);
   const orders = periodRevenues.reduce((sum, entry) => sum + entry.orders, 0);
   const platformFees = periodRevenues.reduce((sum, entry) => sum + entry.platformFees, 0);
+  const previousNetRevenue = previousPeriodRevenues.reduce((sum, entry) => sum + entry.storeRevenue + entry.appRevenue - entry.discounts, 0);
+  const previousCups = previousPeriodRevenues.reduce((sum, entry) => sum + entry.cups, 0);
+  const currentAveragePerCup = cups ? netRevenue / cups : 0;
+  const baselineAveragePerCup = previousCups ? previousNetRevenue / previousCups : currentAveragePerCup;
   const inventoryIssued = inventoryEvents.filter((entry) => entry.kind === "cogs").reduce((sum, entry) => sum + entry.amount, 0);
   const inventoryWaste = inventoryEvents.filter((entry) => entry.kind === "waste").reduce((sum, entry) => sum + entry.amount, 0);
   const inventoryCogs = inventoryIssued - inventoryWaste;
@@ -299,9 +341,9 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     return sum + Math.max(0, lot.quantity - issuedByEnd) * lot.unitCost;
   }, 0);
 
-  const periodMultiplier = periodMode === "month" ? 1 : periodMode === "quarter" ? 3 : 12;
-  const revenueTarget = state.monthlyRevenueTarget * periodMultiplier;
-  const cupTarget = state.monthlyCupTarget * periodMultiplier;
+  const growthTargetPercent = Math.max(0, state.growthTargetPercent || 0);
+  const revenueTarget = previousNetRevenue * (1 + growthTargetPercent / 100);
+  const cupTarget = baselineAveragePerCup ? Math.ceil(revenueTarget / baselineAveragePerCup) : 0;
   const revenueRemaining = Math.max(0, revenueTarget - netRevenue);
   const cupRemaining = Math.max(0, cupTarget - cups);
   const totalDays = dateDiff(bounds.start, bounds.end) + 1;
@@ -311,7 +353,6 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const currentRunRate = elapsedDays ? netRevenue / elapsedDays : 0;
   const requiredRunRate = remainingDays ? revenueRemaining / remainingDays : revenueRemaining;
   const requiredCupsPerDay = remainingDays ? Math.ceil(cupRemaining / remainingDays) : cupRemaining;
-  const averageTicket = cups ? netRevenue / cups : 50_000;
   const targetProgress = revenueTarget ? Math.min(100, (netRevenue / revenueTarget) * 100) : 0;
   const grossMargin = netRevenue ? (grossProfit / netRevenue) * 100 : 0;
 
@@ -354,7 +395,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
 
   function voidExpense(expense: ExpenseRecord) {
     if (currentPeriodClosed) { window.alert("Kỳ này đã khóa sổ và không thể huỷ giao dịch."); return; }
-    if (!window.confirm(`Huỷ giao dịch “${expense.name}”? Lịch sử UAT vẫn được giữ trong local storage.`)) return;
+    if (!window.confirm(`Huỷ giao dịch “${expense.name}”? Giao dịch sẽ được giữ lại trong lịch sử.`)) return;
     setState((current) => ({ ...current, expenses: current.expenses.map((entry) => entry.id === expense.id ? { ...entry, status: "voided" } : entry) }));
   }
 
@@ -379,7 +420,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   function togglePeriodClose() {
     if (periodMode !== "month") { window.alert("Khóa sổ được thực hiện theo từng tháng."); return; }
     const closing = !currentPeriodClosed;
-    if (!window.confirm(closing ? `Khóa sổ ${bounds.label}? Các giao dịch thủ công trong kỳ sẽ không sửa trực tiếp được.` : `Mở lại ${bounds.label} để chỉnh sửa dữ liệu UAT?`)) return;
+    if (!window.confirm(closing ? `Khóa sổ ${bounds.label}? Các giao dịch thủ công trong kỳ sẽ không sửa trực tiếp được.` : `Mở lại ${bounds.label} để chỉnh sửa dữ liệu?`)) return;
     setState((current) => ({ ...current, closedPeriods: closing ? [...new Set([...current.closedPeriods, bounds.key])] : current.closedPeriods.filter((key) => key !== bounds.key) }));
   }
 
@@ -397,7 +438,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
 
   return <div className={styles.finance}>
     <header className={styles.financeHero}>
-      <span className={styles.eyebrow}>NHA COFFEE & TEA · UAT LOCAL</span>
+      <span className={styles.eyebrow}>NHA COFFEE & TEA{uatMode ? " · UAT LOCAL" : ""}</span>
       <div className={styles.financeHeroRow}><div><h1>Chi phí & tài chính</h1><p>Theo dõi dòng tiền, giá vốn và sức khỏe vận hành trên cùng một màn hình.</p></div><div className={styles.logo}><Image src="/nha-coffee-logo-transparent.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div></div>
       <div className={styles.heroMetric}><span>Lợi nhuận hoạt động · {bounds.label}</span><strong>{money(operatingProfit)}</strong><small>{netRevenue ? `${((operatingProfit / netRevenue) * 100).toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% doanh thu thuần` : "Chưa có doanh thu trong kỳ"}</small></div>
     </header>
@@ -419,7 +460,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         {filteredManualExpenses.map((expense) => <article className={styles.expenseCard} key={expense.id}><div className={styles.expenseMain}><div className={styles.sourceIcon}>{expense.category === "fixed" ? "C" : expense.category === "operating" ? "V" : expense.category === "sales" ? "B" : "Đ"}</div><div><span className={styles.sourceLabel}>{categoryLabels[expense.category].toUpperCase()}</span><h3>{expense.name}</h3><p>{expense.subcategory} · {recurrenceLabels[expense.recurrence]} · {dateLabel(expense.incurredOn)}</p></div></div><div className={styles.expenseValue}><strong>{money(expense.amount)}</strong><span className={expense.paymentStatus === "paid" ? styles.paid : styles.unpaid}>{paymentLabels[expense.paymentStatus]}</span></div><div className={styles.cardActions}>{expense.paymentStatus !== "paid" && <button onClick={() => markPaid(expense)}>Đã trả</button>}<button onClick={() => openEditExpense(expense)}>Sửa</button><button onClick={() => voidExpense(expense)}>Huỷ</button></div></article>)}
         {!selectedInventoryEvents.length && !filteredManualExpenses.length && <div className={styles.empty}><b>Chưa có chi phí trong nhóm này</b><span>Nhấn “Thêm chi phí” để tạo giao dịch đầu tiên.</span></div>}
       </div>
-      <div className={styles.uatTools}><span>Dữ liệu tài chính hiện chỉ lưu trong trình duyệt để UAT.</span><button onClick={resetUat}>Nạp lại dữ liệu mẫu</button></div>
+      {uatMode && <div className={styles.uatTools}><span>Dữ liệu tài chính UAT chỉ lưu trong trình duyệt này.</span><button onClick={resetUat}>Nạp lại dữ liệu mẫu</button></div>}
     </section>}
 
     {tab === "report" && <section className={styles.content}>
@@ -433,10 +474,10 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
 
     {tab === "dashboard" && <section className={`${styles.content} ${styles.dashboard}`}>
       <div className={styles.dashboardActions}><div><span>DASHBOARD ĐIỀU HÀNH</span><h2>Tiến độ {bounds.label.toLowerCase()}</h2></div><button onClick={openRevenueEntry}>+ Cập nhật hôm nay</button></div>
-      <div className={styles.targetCard}><div><span>MỤC TIÊU DOANH THU</span><strong>{money(revenueTarget)}</strong><p>Đã đạt {money(netRevenue)} · còn thiếu {money(revenueRemaining)}</p></div><div className={styles.targetPercent}>{targetProgress.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%</div><div className={styles.progressTrack}><i style={{ width: `${targetProgress}%` }} /></div><div className={styles.targetInputs}><label>Mục tiêu tháng<input value={amountInput(String(state.monthlyRevenueTarget))} onChange={(event) => setState((current) => ({ ...current, monthlyRevenueTarget: parseAmount(event.target.value) }))} /></label><label>Mục tiêu ly<input type="number" value={state.monthlyCupTarget} onChange={(event) => setState((current) => ({ ...current, monthlyCupTarget: Number(event.target.value) || 0 }))} /></label></div></div>
-      <div className={styles.kpiGrid}><article><span>Run rate hiện tại</span><strong>{money(currentRunRate)}</strong><small>mỗi ngày</small></article><article className={requiredRunRate > currentRunRate ? styles.attention : ""}><span>Run rate cần đạt</span><strong>{money(requiredRunRate)}</strong><small>{remainingDays} ngày còn lại</small></article><article><span>Ly đã bán</span><strong>{cups.toLocaleString("vi-VN")}</strong><small>{orders.toLocaleString("vi-VN")} đơn hàng</small></article><article className={styles.cupsNeeded}><span>Ly còn thiếu</span><strong>{cupRemaining.toLocaleString("vi-VN")}</strong><small>≈ {requiredCupsPerDay.toLocaleString("vi-VN")} ly/ngày</small></article></div>
+      <div className={styles.targetCard}><div><span>MỤC TIÊU DOANH THU</span><strong>{money(revenueTarget)}</strong><p>{previousNetRevenue ? `Tăng ${growthTargetPercent.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% từ ${money(previousNetRevenue)} kỳ trước` : "Chưa có doanh thu kỳ trước để tự tính mục tiêu."}</p></div><div className={styles.targetPercent}>{targetProgress.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%</div><div className={styles.progressTrack}><i style={{ width: `${targetProgress}%` }} /></div><div className={styles.targetInputs}><label>Tăng trưởng so với kỳ trước (%)<input min="0" step="0.1" type="number" value={state.growthTargetPercent} onChange={(event) => setState((current) => ({ ...current, growthTargetPercent: Math.max(0, Number(event.target.value) || 0) }))} /></label><div className={styles.targetAuto}><span>MỤC TIÊU TỰ TÍNH</span><strong>{cupTarget.toLocaleString("vi-VN")} ly</strong><small>≈ {money(baselineAveragePerCup)}/ly theo kỳ trước</small></div></div><p>Đã đạt {money(netRevenue)} · còn thiếu {money(revenueRemaining)}</p></div>
+      <div className={styles.kpiGrid}><article className={styles.averageCup}><span>Trung bình 1 ly</span><strong>{money(currentAveragePerCup)}</strong><small>Doanh thu thuần / {cups.toLocaleString("vi-VN")} ly</small></article><article><span>Run rate hiện tại</span><strong>{money(currentRunRate)}</strong><small>mỗi ngày</small></article><article className={requiredRunRate > currentRunRate ? styles.attention : ""}><span>Run rate cần đạt</span><strong>{money(requiredRunRate)}</strong><small>{remainingDays} ngày còn lại</small></article><article><span>Ly đã bán</span><strong>{cups.toLocaleString("vi-VN")}</strong><small>{orders.toLocaleString("vi-VN")} đơn hàng</small></article><article className={styles.cupsNeeded}><span>Ly còn thiếu</span><strong>{cupRemaining.toLocaleString("vi-VN")}</strong><small>≈ {requiredCupsPerDay.toLocaleString("vi-VN")} ly/ngày</small></article></div>
       <div className={styles.chartGrid}><article className={styles.chartCard}><div><span>DOANH THU THEO {periodMode === "month" ? "NGÀY" : "THÁNG"}</span><strong>{money(netRevenue)}</strong></div><MiniBars values={chartValues} target={periodMode === "month" ? requiredRunRate : revenueTarget / Math.max(1, chartValues.length)} /></article><article className={styles.runRateCard}><span>RUN RATE</span><div className={styles.runRateCompare}><div><b>{compactMoney(currentRunRate)}</b><small>Hiện tại</small></div><div><b>{compactMoney(requiredRunRate)}</b><small>Cần đạt</small></div></div><div className={styles.runRateTrack}><i style={{ width: `${requiredRunRate ? Math.min(100, currentRunRate / requiredRunRate * 100) : 100}%` }} /></div><p>{currentRunRate >= requiredRunRate ? "Đang đi đúng hoặc vượt nhịp mục tiêu." : `Cần tăng thêm ${money(requiredRunRate - currentRunRate)} mỗi ngày.`}</p></article></div>
-      <div className={styles.chartGrid}><article className={styles.costMixCard}><div><span>CƠ CẤU CHI PHÍ</span><strong>{money(totalPeriodExpense)}</strong></div><div className={styles.donut} style={{ background: `conic-gradient(#171916 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste) / totalPeriodExpense * 100 : 0}%, #887a5d 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste + fixedCost) / totalPeriodExpense * 100 : 0}%, #c9b896 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste + fixedCost + operatingCost) / totalPeriodExpense * 100 : 0}%, #e9dfca 0 100%)` }}><i>{grossMargin.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%<small>gross margin</small></i></div><div className={styles.legend}><span><i className={styles.legendDark} />NVL {money(inventoryCogs + inventoryWaste)}</span><span><i className={styles.legendBrown} />Cố định {money(fixedCost)}</span><span><i className={styles.legendSand} />Vận hành {money(operatingCost)}</span><span><i className={styles.legendCream} />Bán hàng {money(salesCost)}</span></div></article><article className={styles.forecastCard}><span>DỰ BÁO CUỐI KỲ</span><strong>{money(netRevenue + currentRunRate * remainingDays)}</strong><p>Dựa trên run rate trung bình hiện tại.</p><div><span>Giá trị TB/ly</span><b>{money(averageTicket)}</b></div><div><span>EBITDA hiện tại</span><b className={ebitda < 0 ? styles.redText : ""}>{money(ebitda)}</b></div><div><span>Khấu hao kỳ</span><b>{money(depreciation)}</b></div><div><span>Tồn kho hiện tại</span><b>{money(closingInventory)}</b></div></article></div>
+      <div className={styles.chartGrid}><article className={styles.costMixCard}><div><span>CƠ CẤU CHI PHÍ</span><strong>{money(totalPeriodExpense)}</strong></div><div className={styles.donut} style={{ background: `conic-gradient(#171916 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste) / totalPeriodExpense * 100 : 0}%, #887a5d 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste + fixedCost) / totalPeriodExpense * 100 : 0}%, #c9b896 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste + fixedCost + operatingCost) / totalPeriodExpense * 100 : 0}%, #e9dfca 0 100%)` }}><i>{grossMargin.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%<small>gross margin</small></i></div><div className={styles.legend}><span><i className={styles.legendDark} />NVL {money(inventoryCogs + inventoryWaste)}</span><span><i className={styles.legendBrown} />Cố định {money(fixedCost)}</span><span><i className={styles.legendSand} />Vận hành {money(operatingCost)}</span><span><i className={styles.legendCream} />Bán hàng {money(salesCost)}</span></div></article><article className={styles.forecastCard}><span>DỰ BÁO CUỐI KỲ</span><strong>{money(netRevenue + currentRunRate * remainingDays)}</strong><p>Dựa trên run rate trung bình hiện tại.</p><div><span>Trung bình 1 ly</span><b>{money(currentAveragePerCup)}</b></div><div><span>EBITDA hiện tại</span><b className={ebitda < 0 ? styles.redText : ""}>{money(ebitda)}</b></div><div><span>Khấu hao kỳ</span><b>{money(depreciation)}</b></div><div><span>Tồn kho hiện tại</span><b>{money(closingInventory)}</b></div></article></div>
     </section>}
 
     {showExpenseForm && <div className={styles.backdrop} role="presentation" onMouseDown={() => setShowExpenseForm(false)}><form className={styles.sheet} onSubmit={saveExpense} onMouseDown={(event) => event.stopPropagation()}><div className={styles.sheetHandle} /><div className={styles.sheetTitle}><div><span>{editingExpenseId ? "CẬP NHẬT" : "GHI NHẬN"}</span><h2>{categoryLabels[expenseForm.category]}</h2></div><button type="button" onClick={() => setShowExpenseForm(false)}>×</button></div><label>Category<select value={expenseForm.category} onChange={(event) => setExpenseForm((current) => ({ ...current, category: event.target.value as ExpenseCategory, recurrence: event.target.value === "fixed" ? "monthly" : "once" }))}>{(Object.keys(categoryLabels) as ExpenseCategory[]).map((category) => <option value={category} key={category}>{categoryLabels[category]}</option>)}</select></label><label>Tên chi phí / tài sản<input autoFocus required value={expenseForm.name} onChange={(event) => setExpenseForm((current) => ({ ...current, name: event.target.value }))} placeholder="Ví dụ: Tiền thuê mặt bằng" /></label><div className={styles.formRow}><label>Subcategory<input value={expenseForm.subcategory} onChange={(event) => setExpenseForm((current) => ({ ...current, subcategory: event.target.value }))} placeholder="Ví dụ: Mặt bằng" /></label><label>Số tiền<input required inputMode="numeric" value={expenseForm.amount} onChange={(event) => setExpenseForm((current) => ({ ...current, amount: amountInput(event.target.value) }))} placeholder="15,000,000" /></label></div><div className={styles.formRow}><label>Ngày ghi nhận<input required type="date" value={expenseForm.incurredOn} onChange={(event) => setExpenseForm((current) => ({ ...current, incurredOn: event.target.value }))} /></label>{expenseForm.category !== "investment" && <label>Chu kỳ<select value={expenseForm.recurrence} onChange={(event) => setExpenseForm((current) => ({ ...current, recurrence: event.target.value as Recurrence }))}>{(Object.keys(recurrenceLabels) as Recurrence[]).map((recurrence) => <option value={recurrence} key={recurrence}>{recurrenceLabels[recurrence]}</option>)}</select></label>}</div>{expenseForm.category === "investment" && <><div className={styles.formRow}><label>Ngày sử dụng<input type="date" value={expenseForm.inServiceOn} onChange={(event) => setExpenseForm((current) => ({ ...current, inServiceOn: event.target.value }))} /></label><label>Khấu hao (tháng)<input min="1" type="number" value={expenseForm.usefulLifeMonths} onChange={(event) => setExpenseForm((current) => ({ ...current, usefulLifeMonths: event.target.value }))} /></label></div><label>Giá trị thu hồi<input inputMode="numeric" value={expenseForm.salvageValue} onChange={(event) => setExpenseForm((current) => ({ ...current, salvageValue: amountInput(event.target.value) }))} /></label></>}<div className={styles.formRow}><label>Thanh toán<select value={expenseForm.paymentStatus} onChange={(event) => setExpenseForm((current) => ({ ...current, paymentStatus: event.target.value as PaymentStatus }))}>{(Object.keys(paymentLabels) as PaymentStatus[]).map((status) => <option value={status} key={status}>{paymentLabels[status]}</option>)}</select></label>{expenseForm.paymentStatus === "paid" && <label>Ngày thanh toán<input type="date" value={expenseForm.paymentDate} onChange={(event) => setExpenseForm((current) => ({ ...current, paymentDate: event.target.value }))} /></label>}</div><div className={styles.formRow}><label>Mã hóa đơn<input value={expenseForm.invoiceCode} onChange={(event) => setExpenseForm((current) => ({ ...current, invoiceCode: event.target.value }))} /></label><label>Nhà cung cấp<input value={expenseForm.vendor} onChange={(event) => setExpenseForm((current) => ({ ...current, vendor: event.target.value }))} /></label></div><label>Note<textarea value={expenseForm.note} onChange={(event) => setExpenseForm((current) => ({ ...current, note: event.target.value }))} placeholder="Ghi chú nội bộ" /></label><button className={styles.primaryButton} type="submit">{editingExpenseId ? "Lưu thay đổi" : "Ghi nhận chi phí"}</button></form></div>}

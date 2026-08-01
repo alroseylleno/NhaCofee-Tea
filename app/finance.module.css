@@ -141,12 +141,19 @@
 .targetInputs { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .targetInputs label { color: #c9c1b3; font: 9px Arial, sans-serif; }
 .targetInputs input { width: 100%; margin-top: 5px; padding: 9px; border: 1px solid #ffffff26; border-radius: 8px; color: #fff; background: #ffffff0d; font: 700 11px Arial, sans-serif; }
+.targetAuto { min-width: 0; padding: 9px 10px; border: 1px solid #ffffff26; border-radius: 8px; background: #ffffff0d; }
+.targetAuto span, .targetAuto strong, .targetAuto small { display: block; }
+.targetAuto span { color: #c9c1b3; font: 700 8px Arial, sans-serif; letter-spacing: .08em; }
+.targetAuto strong { margin-top: 4px; font-size: 14px; }
+.targetAuto small { margin-top: 3px; color: #d9d2c5; font: 9px/1.35 Arial, sans-serif; }
+.targetCard > p { grid-column: 1 / -1; }
 .kpiGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 9px 0; }
 .kpiGrid article { padding: 13px; border: 1px solid var(--line); border-radius: 13px; background: #fff; }
 .kpiGrid span { color: var(--muted); font: 10px Arial, sans-serif; }
 .kpiGrid strong { display: block; margin: 5px 0 3px; font-size: 16px; }
 .kpiGrid small { color: var(--muted); font: 9px Arial, sans-serif; }
 .kpiGrid .attention, .kpiGrid .cupsNeeded { border-color: #d7c49c; background: #fff9eb; }
+.kpiGrid .averageCup { grid-column: 1 / -1; border-color: #cadbc9; background: #eef5e9; }
 .chartGrid { display: grid; gap: 9px; margin-top: 9px; }
 .chartCard, .runRateCard, .costMixCard, .forecastCard { min-width: 0; padding: 15px; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
 .chartCard > div:first-child > span, .runRateCard > span, .costMixCard > div:first-child span, .forecastCard > span { color: #8d7b59; font: 700 9px Arial, sans-serif; letter-spacing: .11em; }
