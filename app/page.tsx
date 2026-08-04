@@ -448,7 +448,7 @@ export default function Home() {
     </form>
   </main>;
   return <main>
-    {canAccessFinance && <nav className="module-switcher" aria-label="Khu vực quản lý"><button className={workspace === "inventory" ? "active" : ""} onClick={() => setWorkspace("inventory")}>Kho NVL</button><button className={workspace === "finance" ? "active" : ""} onClick={() => setWorkspace("finance")}>Chi phí</button></nav>}
+    {canAccessFinance && <nav className="module-switcher" aria-label="Khu vực quản lý"><button className={workspace === "inventory" ? "active" : ""} onClick={() => setWorkspace("inventory")}>Kho NVL</button><button className={workspace === "finance" ? "active" : ""} onClick={() => setWorkspace("finance")}>Tài chính</button></nav>}
     {workspace === "finance" && canAccessFinance ? <FinanceModule
       uatMode={IS_LOCAL_UAT}
       inventoryLots={items.map((item) => ({ id: item.id, name: item.name, quantity: item.quantity, unit: item.unit, unitCost: item.unitCost, purchasedOn: item.purchasedOn, receiptCode: item.receiptCode }))}

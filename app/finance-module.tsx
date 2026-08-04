@@ -1,7 +1,16 @@
 "use client";
 
 import Image from "next/image";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import {
+  loadFinanceImports,
+  replaceFinanceImportBundle,
+  type FinanceImportMeta,
+  type FinanceProductRecord,
+  type FinanceRevenueRecord,
+  type FinanceServiceRecord,
+} from "@/lib/finance-store";
+import { isSupabaseConfigured } from "@/lib/supabase";
 import styles from "./finance.module.css";
 
 export type FinanceInventoryLot = {
@@ -23,12 +32,13 @@ export type FinanceInventorySession = {
   reason: string;
 };
 
-type FinanceTab = "entry" | "report" | "dashboard";
+type FinanceTab = "entry" | "revenue" | "report" | "dashboard";
 type PeriodMode = "month" | "quarter" | "year";
 type ExpenseCategory = "fixed" | "operating" | "sales" | "investment";
 type Recurrence = "once" | "weekly" | "monthly" | "quarterly" | "yearly";
 type PaymentStatus = "unpaid" | "partial" | "paid";
 type ReportView = "pnl" | "cash" | "inventory" | "assets";
+type RevenueSubTab = "overview" | "products";
 
 type ExpenseRecord = {
   id: string;
@@ -49,23 +59,14 @@ type ExpenseRecord = {
   status: "active" | "voided";
 };
 
-type RevenueRecord = {
-  id: string;
-  date: string;
-  storeRevenue: number;
-  appRevenue: number;
-  discounts: number;
-  platformFees: number;
-  cashReceived: number;
-  orders: number;
-  cups: number;
-  note?: string;
-};
-
 type FinanceState = {
   expenses: ExpenseRecord[];
-  revenues: RevenueRecord[];
+  revenues: FinanceRevenueRecord[];
+  products: FinanceProductRecord[];
+  services: FinanceServiceRecord[];
+  imports: FinanceImportMeta[];
   growthTargetPercent: number;
+  revenueTargetAmount: number;
   closedPeriods: string[];
 };
 
@@ -86,19 +87,12 @@ type ExpenseForm = {
   inServiceOn: string;
 };
 
-type RevenueForm = {
-  date: string;
-  storeRevenue: string;
-  appRevenue: string;
-  discounts: string;
-  platformFees: string;
-  cashReceived: string;
-  orders: string;
-  cups: string;
-  note: string;
-};
-
 type PeriodBounds = { start: string; end: string; label: string; key: string };
+type ImportMetaInput = Omit<FinanceImportMeta, "dataType" | "importedAt">;
+type ParsedRevenueImport = { type: "revenue"; meta: ImportMetaInput; importMeta: FinanceImportMeta; records: FinanceRevenueRecord[]; latestDate: string };
+type ParsedProductImport = { type: "products"; meta: ImportMetaInput; importMeta: FinanceImportMeta; records: FinanceProductRecord[] };
+type ParsedServiceImport = { type: "service"; meta: ImportMetaInput; importMeta: FinanceImportMeta; records: FinanceServiceRecord[] };
+type ParsedFinanceImport = ParsedRevenueImport | ParsedProductImport | ParsedServiceImport;
 
 const FINANCE_STORAGE_KEY = "nha-ops-finance-v1";
 const FINANCE_UAT_STORAGE_KEY = "nha-ops-finance-uat-v2";
@@ -115,16 +109,201 @@ const recurrenceLabels: Record<Recurrence, string> = { once: "Một lần", week
 function todayISO() { return new Date().toISOString().slice(0, 10); }
 function monthKey(value: string) { return value.slice(0, 7); }
 function money(value: number) { return new Intl.NumberFormat("vi-VN", { style: "currency", currency: "VND", maximumFractionDigits: 0 }).format(value || 0); }
-function compactMoney(value: number) { return new Intl.NumberFormat("vi-VN", { notation: "compact", maximumFractionDigits: 1 }).format(value || 0); }
 function dateLabel(value: string) { const [year, month, day] = value.split("-"); return day && month && year ? `${day}/${month}/${year}` : value; }
 function parseAmount(value: string) { return Number(value.replace(/\D/g, "")); }
 function amountInput(value: string) { const digits = value.replace(/\D/g, ""); return digits ? Number(digits).toLocaleString("en-US") : ""; }
 function dateAt(year: number, month: number, day: number) { return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`; }
 function daysInMonth(year: number, month: number) { return new Date(Date.UTC(year, month, 0)).getUTCDate(); }
 function addDaysISO(value: string, days: number) { const date = new Date(`${value}T00:00:00Z`); date.setUTCDate(date.getUTCDate() + days); return date.toISOString().slice(0, 10); }
-function dateDiff(start: string, end: string) { return Math.max(0, Math.floor((new Date(`${end}T00:00:00Z`).getTime() - new Date(`${start}T00:00:00Z`).getTime()) / 86_400_000)); }
 function monthDiff(start: string, end: string) { const [sy, sm] = start.slice(0, 7).split("-").map(Number); const [ey, em] = end.slice(0, 7).split("-").map(Number); return (ey - sy) * 12 + em - sm; }
 function inRange(value: string, bounds: PeriodBounds) { return value >= bounds.start && value <= bounds.end; }
+function percent(value: number) { return `${value.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%`; }
+function normalizedHeader(value: unknown) { return String(value ?? "").trim().toLocaleLowerCase("vi").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").replace(/\s+/g, " "); }
+function numericCell(value: unknown) { if (typeof value === "number") return Number.isFinite(value) ? value : 0; const parsed = Number(String(value ?? "").replace(/,/g, "").replace(/[^\d.-]/g, "")); return Number.isFinite(parsed) ? parsed : 0; }
+function excelDateCell(value: unknown) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return dateAt(value.getFullYear(), value.getMonth() + 1, value.getDate());
+  if (typeof value === "number" && Number.isFinite(value)) return new Date(Date.UTC(1899, 11, 30) + Math.round(value) * 86_400_000).toISOString().slice(0, 10);
+  const text = String(value ?? "").trim();
+  const vietnamese = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (vietnamese) return dateAt(Number(vietnamese[3]), Number(vietnamese[2]), Number(vietnamese[1]));
+  const iso = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  return iso ? dateAt(Number(iso[1]), Number(iso[2]), Number(iso[3])) : undefined;
+}
+
+function reportPeriod(text?: string) {
+  const matches = [...String(text || "").matchAll(/(\d{1,2})\/(\d{1,2})\/(\d{4})/g)];
+  if (matches.length < 2) return undefined;
+  return {
+    start: dateAt(Number(matches[0][3]), Number(matches[0][2]), Number(matches[0][1])),
+    end: dateAt(Number(matches[1][3]), Number(matches[1][2]), Number(matches[1][1])),
+  };
+}
+
+function financeTemplateType(rows: unknown[][]) {
+  for (const row of rows) {
+    const headers = row.map(normalizedHeader);
+    if (headers.includes("ngay") && headers.includes("sl don hang") && headers.includes("doanh thu thuc")) return "revenue" as const;
+    if (headers.includes("ten danh muc") && headers.includes("ma mat hang") && headers.includes("ten mat hang") && headers.includes("tong tien")) return "products" as const;
+    if (headers.includes("loai don hang") && headers.includes("sl don hang") && headers.includes("so don huy") && headers.includes("tien thu duoc")) return "service" as const;
+  }
+  return undefined;
+}
+
+function parseRevenueRows(file: File, rows: unknown[][]): ParsedRevenueImport {
+  const headerRowIndex = rows.findIndex((row) => {
+    const headers = row.map(normalizedHeader);
+    return headers.includes("ngay") && headers.includes("sl don hang") && headers.includes("doanh thu thuc");
+  });
+  if (headerRowIndex < 0) throw new Error(`${file.name}: không tìm thấy bảng Doanh thu tổng quan.`);
+  const headers = rows[headerRowIndex].map(normalizedHeader);
+  const column = (name: string) => headers.indexOf(name);
+  const requiredColumns = ["ngay", "sl don hang", "so luong hang", "doanh thu thuc"];
+  if (requiredColumns.some((name) => column(name) < 0)) throw new Error(`${file.name}: thiếu cột bắt buộc của báo cáo doanh thu.`);
+  const periodText = rows.slice(0, headerRowIndex).flat().map((value) => String(value ?? "").trim()).find((value) => value.startsWith("Từ ngày"));
+  const importedAt = new Date().toISOString();
+  const records: FinanceRevenueRecord[] = [];
+  const read = (row: unknown[], name: string) => { const index = column(name); return index >= 0 ? numericCell(row[index]) : 0; };
+  for (const row of rows.slice(headerRowIndex + 1)) {
+    if (normalizedHeader(row[0]) === "tong") break;
+    const date = excelDateCell(row[column("ngay")]);
+    if (!date) continue;
+    const totalOrders = read(row, "sl don hang");
+    const cancelledOrdersForDay = read(row, "so don huy");
+    const actualRevenue = read(row, "doanh thu thuc");
+    const partnerFee = read(row, "phi tra doi tac");
+    const platformTaxCollected = read(row, "tien thue san thu ho");
+    const serviceFeeBeforeTax = read(row, "phi dich vu truoc thue");
+    const deliveryFee = read(row, "phi giao hang");
+    const totalPlatformFees = partnerFee + platformTaxCollected + serviceFeeBeforeTax + deliveryFee;
+    records.push({
+      id: `excel-revenue-${date}`,
+      date,
+      storeRevenue: actualRevenue,
+      appRevenue: 0,
+      discounts: 0,
+      platformFees: totalPlatformFees,
+      cashReceived: Math.max(0, actualRevenue - totalPlatformFees),
+      orders: Math.max(0, totalOrders - cancelledOrdersForDay),
+      cups: read(row, "so luong hang"),
+      note: `Import từ ${file.name}`,
+      source: "excel",
+      importedAt,
+      importFileName: file.name,
+      importPeriod: periodText,
+      reported: {
+        totalOrders,
+        cancelledOrders: cancelledOrdersForDay,
+        itemQuantity: read(row, "so luong hang"),
+        averageItemsPerOrder: read(row, "so luong hang tb"),
+        averageOrderValue: read(row, "trung binh/don hang"),
+        goodsAmount: read(row, "tien hang"),
+        cancelledAmount: read(row, "tien huy"),
+        returnedAmount: read(row, "tien tra lai"),
+        discountAmount: read(row, "giam gia"),
+        taxAmount: read(row, "thue"),
+        serviceFeeBeforeTax,
+        deliveryFee,
+        partnerFee,
+        platformTaxCollected,
+        tips: read(row, "tien tip"),
+        customerDebt: read(row, "cong no kh"),
+        actualRevenue,
+        sales: read(row, "doanh so"),
+      },
+    });
+  }
+  if (!records.length) throw new Error(`${file.name}: không có dòng doanh thu hợp lệ.`);
+  const orderedDates = records.map((record) => record.date).sort();
+  const latestDate = orderedDates[orderedDates.length - 1];
+  const parsedPeriod = reportPeriod(periodText) || { start: orderedDates[0], end: latestDate };
+  const meta = { fileName: file.name, periodStart: parsedPeriod.start, periodEnd: parsedPeriod.end, rowCount: records.length };
+  return { type: "revenue", meta, importMeta: { dataType: "revenue", ...meta, importedAt }, records: records.sort((a, b) => b.date.localeCompare(a.date)), latestDate };
+}
+
+function parseProductRows(file: File, rows: unknown[][]): ParsedProductImport {
+  const headerRowIndex = rows.findIndex((row) => {
+    const headers = row.map(normalizedHeader);
+    return headers.includes("ten danh muc") && headers.includes("ma mat hang") && headers.includes("ten mat hang") && headers.includes("tong tien");
+  });
+  if (headerRowIndex < 0) throw new Error(`${file.name}: không tìm thấy bảng Báo cáo mặt hàng.`);
+  const headers = rows[headerRowIndex].map(normalizedHeader);
+  const column = (name: string) => headers.indexOf(name);
+  const requiredColumns = ["ten danh muc", "ma mat hang", "ten mat hang", "so luong", "tien hang", "tong tien"];
+  if (requiredColumns.some((name) => column(name) < 0)) throw new Error(`${file.name}: thiếu cột bắt buộc của báo cáo mặt hàng.`);
+  const periodText = rows.slice(0, headerRowIndex).flat().map((value) => String(value ?? "").trim()).find((value) => value.startsWith("Từ ngày"));
+  const parsedPeriod = reportPeriod(periodText);
+  if (!parsedPeriod) throw new Error(`${file.name}: không đọc được khoảng thời gian báo cáo.`);
+  const read = (row: unknown[], name: string) => { const index = column(name); return index >= 0 ? numericCell(row[index]) : 0; };
+  const readText = (row: unknown[], name: string) => { const index = column(name); return index >= 0 ? String(row[index] ?? "").trim() : ""; };
+  const records: FinanceProductRecord[] = [];
+  for (const [index, row] of rows.slice(headerRowIndex + 1).entries()) {
+    if (normalizedHeader(row[0]) === "tong") break;
+    const name = readText(row, "ten mat hang");
+    if (!name) continue;
+    const sourceRow = headerRowIndex + index + 2;
+    const sku = readText(row, "ma mat hang") || `ROW-${sourceRow}`;
+    records.push({
+      id: `excel-product-${sourceRow}-${sku}`,
+      sourceRow,
+      category: readText(row, "ten danh muc") || "Khác",
+      sku,
+      name,
+      variant: readText(row, "gia mat hang"),
+      unit: readText(row, "ten don vi"),
+      quantity: read(row, "so luong"),
+      weight: read(row, "trong luong"),
+      usageTime: readText(row, "thoi gian su dung"),
+      quantityRatio: read(row, "ti le so luong"),
+      goodsAmount: read(row, "tien hang"),
+      goodsRatio: read(row, "ti le tien hang"),
+      discountAmount: read(row, "tong giam gia"),
+      amountAfterDiscount: read(row, "tien sau giam gia"),
+      taxAmount: read(row, "thue"),
+      totalAmount: read(row, "tong tien"),
+    });
+  }
+  if (!records.length) throw new Error(`${file.name}: không có mặt hàng hợp lệ.`);
+  const importedAt = new Date().toISOString();
+  const meta = { fileName: file.name, periodStart: parsedPeriod.start, periodEnd: parsedPeriod.end, rowCount: records.length };
+  return { type: "products", meta, importMeta: { dataType: "products", ...meta, importedAt }, records };
+}
+
+function parseServiceRows(file: File, rows: unknown[][]): ParsedServiceImport {
+  const headerRowIndex = rows.findIndex((row) => {
+    const headers = row.map(normalizedHeader);
+    return headers.includes("loai don hang") && headers.includes("sl don hang") && headers.includes("so don huy") && headers.includes("tien thu duoc");
+  });
+  if (headerRowIndex < 0) throw new Error(`${file.name}: không tìm thấy bảng Hình thức phục vụ.`);
+  const headers = rows[headerRowIndex].map(normalizedHeader);
+  const column = (name: string) => headers.indexOf(name);
+  const periodText = rows.slice(0, headerRowIndex).flat().map((value) => String(value ?? "").trim()).find((value) => value.startsWith("Từ ngày"));
+  const parsedPeriod = reportPeriod(periodText);
+  if (!parsedPeriod) throw new Error(`${file.name}: không đọc được khoảng thời gian báo cáo.`);
+  const records: FinanceServiceRecord[] = [];
+  for (const [index, row] of rows.slice(headerRowIndex + 1).entries()) {
+    if (normalizedHeader(row[0]) === "tong") break;
+    const serviceName = String(row[column("loai don hang")] ?? "").trim();
+    if (!serviceName) continue;
+    const sourceRow = headerRowIndex + index + 2;
+    records.push({
+      id: `excel-service-${sourceRow}-${normalizedHeader(serviceName).replace(/\s+/g, "-")}`,
+      sourceRow,
+      serviceName,
+      totalOrders: numericCell(row[column("sl don hang")]),
+      cancelledOrders: numericCell(row[column("so don huy")]),
+      revenue: numericCell(row[column("tien thu duoc")]),
+    });
+  }
+  if (!records.length) throw new Error(`${file.name}: không có hình thức phục vụ hợp lệ.`);
+  const importedAt = new Date().toISOString();
+  const meta = { fileName: file.name, periodStart: parsedPeriod.start, periodEnd: parsedPeriod.end, rowCount: records.length };
+  return { type: "service", meta, importMeta: { dataType: "service", ...meta, importedAt }, records };
+}
+
+function importTimeLabel(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("vi-VN", { dateStyle: "short", timeStyle: "short" });
+}
 
 function periodBounds(mode: PeriodMode, selectedMonth: string, quarter: number, year: number): PeriodBounds {
   if (mode === "month") {
@@ -154,12 +333,8 @@ function expenseFormDefaults(category: ExpenseCategory = "fixed"): ExpenseForm {
   return { name: "", category, subcategory: "", amount: "", incurredOn: today, recurrence: category === "fixed" ? "monthly" : "once", paymentStatus: "paid", paymentDate: today, invoiceCode: "", vendor: "", note: "", usefulLifeMonths: "36", salvageValue: "0", inServiceOn: today };
 }
 
-function revenueFormDefaults(): RevenueForm {
-  return { date: todayISO(), storeRevenue: "", appRevenue: "", discounts: "", platformFees: "", cashReceived: "", orders: "", cups: "", note: "" };
-}
-
 function emptyFinanceState(): FinanceState {
-  return { expenses: [], revenues: [], growthTargetPercent: 10, closedPeriods: [] };
+  return { expenses: [], revenues: [], products: [], services: [], imports: [], growthTargetPercent: 10, revenueTargetAmount: 0, closedPeriods: [] };
 }
 
 function normalizeFinanceState(value: unknown, uatMode: boolean): FinanceState {
@@ -167,11 +342,18 @@ function normalizeFinanceState(value: unknown, uatMode: boolean): FinanceState {
   const stored = value as Partial<FinanceState>;
   const expenses = Array.isArray(stored.expenses) ? stored.expenses : [];
   const revenues = Array.isArray(stored.revenues) ? stored.revenues : [];
-  const isUatSample = (record: ExpenseRecord | RevenueRecord) => record.id.startsWith("uat-") || record.note?.includes("Dữ liệu mẫu UAT");
+  const products = Array.isArray(stored.products) ? stored.products : [];
+  const services = Array.isArray(stored.services) ? stored.services : [];
+  const imports = Array.isArray(stored.imports) ? stored.imports : [];
+  const isUatSample = (record: ExpenseRecord | FinanceRevenueRecord) => record.id.startsWith("uat-") || record.note?.includes("Dữ liệu mẫu UAT");
   return {
     expenses: uatMode ? expenses : expenses.filter((record) => !isUatSample(record)),
     revenues: uatMode ? revenues : revenues.filter((record) => !isUatSample(record)),
+    products,
+    services,
+    imports,
     growthTargetPercent: Number.isFinite(Number(stored.growthTargetPercent)) ? Number(stored.growthTargetPercent) : 10,
+    revenueTargetAmount: Number.isFinite(Number(stored.revenueTargetAmount)) ? Math.max(0, Number(stored.revenueTargetAmount)) : 0,
     closedPeriods: Array.isArray(stored.closedPeriods) ? stored.closedPeriods : [],
   };
 }
@@ -181,7 +363,7 @@ function seedFinanceState(): FinanceState {
   const year = today.getFullYear();
   const month = today.getMonth() + 1;
   const maxDay = Math.min(today.getDate(), 24);
-  const makeRevenues = (seedYear: number, seedMonth: number, days: number, prefix: string, scale: number): RevenueRecord[] => Array.from({ length: days }, (_, index) => {
+  const makeRevenues = (seedYear: number, seedMonth: number, days: number, prefix: string, scale: number): FinanceRevenueRecord[] => Array.from({ length: days }, (_, index) => {
     const day = index + 1;
     const storeRevenue = Math.round((2_700_000 + (day % 5) * 170_000) * scale);
     const appRevenue = Math.round((1_100_000 + (day % 4) * 120_000) * scale);
@@ -207,7 +389,11 @@ function seedFinanceState(): FinanceState {
       { id: "uat-fridge", name: "Tủ mát quầy bar", category: "investment", subcategory: "Thiết bị bảo quản", amount: 24_000_000, incurredOn: dateAt(year, Math.max(1, month - 2), 12), recurrence: "once", paymentStatus: "paid", paymentDate: dateAt(year, Math.max(1, month - 2), 12), invoiceCode: "CAPEX-UAT-02", usefulLifeMonths: 36, salvageValue: 0, inServiceOn: dateAt(year, Math.max(1, month - 2), 15), note: "Dữ liệu mẫu UAT", status: "active" },
     ],
     revenues,
+    products: [],
+    services: [],
+    imports: [],
     growthTargetPercent: 12,
+    revenueTargetAmount: 0,
     closedPeriods: [],
   };
 }
@@ -249,11 +435,6 @@ function depreciationForAsset(asset: ExpenseRecord, bounds: PeriodBounds) {
   return monthly * months;
 }
 
-function MiniBars({ values, target }: { values: Array<{ label: string; value: number }>; target: number }) {
-  const max = Math.max(target, ...values.map((entry) => entry.value), 1);
-  return <div className={styles.miniBars}>{values.map((entry) => <div className={styles.barColumn} key={entry.label}><div className={styles.barTrack}><i style={{ height: `${Math.max(3, (entry.value / max) * 100)}%` }} /></div><span>{entry.label}</span></div>)}</div>;
-}
-
 export default function FinanceModule({ inventoryLots, inventorySessions, onOpenInventoryLot, uatMode }: { inventoryLots: FinanceInventoryLot[]; inventorySessions: FinanceInventorySession[]; onOpenInventoryLot: (id: string) => void; uatMode: boolean }) {
   const today = todayISO();
   const storageKey = uatMode ? FINANCE_UAT_STORAGE_KEY : FINANCE_STORAGE_KEY;
@@ -266,18 +447,37 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const [selectedYear, setSelectedYear] = useState(Number(today.slice(0, 4)));
   const [expenseCategory, setExpenseCategory] = useState<ExpenseCategory>("fixed");
   const [reportView, setReportView] = useState<ReportView>("pnl");
+  const [revenueSubTab, setRevenueSubTab] = useState<RevenueSubTab>("overview");
   const [showExpenseForm, setShowExpenseForm] = useState(false);
-  const [showRevenueForm, setShowRevenueForm] = useState(false);
+  const [importingFinance, setImportingFinance] = useState(false);
+  const [financeImportNotice, setFinanceImportNotice] = useState<string | undefined>();
+  const [financeSyncError, setFinanceSyncError] = useState<string | undefined>();
   const [editingExpenseId, setEditingExpenseId] = useState<string | undefined>();
   const [expenseForm, setExpenseForm] = useState<ExpenseForm>(expenseFormDefaults());
-  const [revenueForm, setRevenueForm] = useState<RevenueForm>(revenueFormDefaults());
 
   useEffect(() => {
-    const stored = window.localStorage.getItem(storageKey) || (!uatMode ? window.localStorage.getItem(FINANCE_LEGACY_UAT_STORAGE_KEY) : null);
-    if (stored) {
-      try { setState(normalizeFinanceState(JSON.parse(stored), uatMode)); } catch { setState(uatMode ? seedFinanceState() : emptyFinanceState()); }
-    } else setState(uatMode ? seedFinanceState() : emptyFinanceState());
-    setLoaded(true);
+    let cancelled = false;
+    async function loadState() {
+      const stored = window.localStorage.getItem(storageKey) || (!uatMode ? window.localStorage.getItem(FINANCE_LEGACY_UAT_STORAGE_KEY) : null);
+      let nextState = uatMode ? seedFinanceState() : emptyFinanceState();
+      if (stored) {
+        try { nextState = normalizeFinanceState(JSON.parse(stored), uatMode); } catch { nextState = uatMode ? seedFinanceState() : emptyFinanceState(); }
+      }
+      if (!uatMode && isSupabaseConfigured) {
+        try {
+          const cloud = await loadFinanceImports();
+          nextState = { ...nextState, revenues: cloud.revenues, products: cloud.products, services: cloud.services, imports: cloud.imports };
+        } catch (error) {
+          setFinanceSyncError(error instanceof Error ? error.message : "Không thể tải dữ liệu tài chính từ Supabase.");
+        }
+      }
+      if (!cancelled) {
+        setState(nextState);
+        setLoaded(true);
+      }
+    }
+    loadState();
+    return () => { cancelled = true; };
   }, [storageKey, uatMode]);
   useEffect(() => { if (loaded) window.localStorage.setItem(storageKey, JSON.stringify(state)); }, [state, loaded, storageKey]);
 
@@ -288,6 +488,10 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const manualOccurrences = useMemo(() => activeExpenses.flatMap((expense) => expenseOccurrences(expense, bounds).map((date) => ({ expense, date, amount: expense.amount }))), [activeExpenses, bounds]);
   const periodRevenues = useMemo(() => state.revenues.filter((entry) => inRange(entry.date, bounds)), [state.revenues, bounds]);
   const previousPeriodRevenues = useMemo(() => state.revenues.filter((entry) => inRange(entry.date, previousBounds)), [state.revenues, previousBounds]);
+  const revenueImport = state.imports.find((entry) => entry.dataType === "revenue");
+  const productsImport = state.imports.find((entry) => entry.dataType === "products");
+  const serviceImport = state.imports.find((entry) => entry.dataType === "service");
+  const revenueDataset = revenueImport ? state.revenues.filter((entry) => entry.date >= revenueImport.periodStart && entry.date <= revenueImport.periodEnd) : periodRevenues;
   const inventoryEvents = useMemo(() => inventorySessions.flatMap((session) => {
     const lot = inventoryLots.find((entry) => entry.id === session.sourceReceiptId);
     if (!lot) return [];
@@ -305,11 +509,30 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const discounts = periodRevenues.reduce((sum, entry) => sum + entry.discounts, 0);
   const netRevenue = grossRevenue - discounts;
   const cups = periodRevenues.reduce((sum, entry) => sum + entry.cups, 0);
-  const orders = periodRevenues.reduce((sum, entry) => sum + entry.orders, 0);
   const platformFees = periodRevenues.reduce((sum, entry) => sum + entry.platformFees, 0);
+  const datasetRevenue = revenueDataset.reduce((sum, entry) => sum + entry.storeRevenue + entry.appRevenue - entry.discounts, 0);
+  const datasetItems = revenueDataset.reduce((sum, entry) => sum + entry.cups, 0);
+  const reportedGoodsAmount = revenueDataset.reduce((sum, entry) => sum + (entry.reported?.goodsAmount ?? entry.storeRevenue + entry.appRevenue + entry.discounts), 0);
+  const reportedDiscountAmount = revenueDataset.reduce((sum, entry) => sum + (entry.reported?.discountAmount ?? entry.discounts), 0);
+  const reportedCancelledAmount = revenueDataset.reduce((sum, entry) => sum + (entry.reported?.cancelledAmount || 0), 0);
+  const reportedReturnedAmount = revenueDataset.reduce((sum, entry) => sum + (entry.reported?.returnedAmount || 0), 0);
+  const reportedPartnerCommission = revenueDataset.reduce((sum, entry) => sum + (entry.reported?.partnerFee || 0), 0);
+  const reportedPlatformTax = revenueDataset.reduce((sum, entry) => sum + (entry.reported?.platformTaxCollected || 0), 0);
+  const reportedServiceFees = revenueDataset.reduce((sum, entry) => sum + (entry.reported?.serviceFeeBeforeTax || 0), 0);
+  const reportedDeliveryFees = revenueDataset.reduce((sum, entry) => sum + (entry.reported?.deliveryFee || 0), 0);
+  const reportedPartnerFees = revenueDataset.reduce((sum, entry) => sum + (entry.reported ? entry.reported.partnerFee + entry.reported.platformTaxCollected + entry.reported.serviceFeeBeforeTax + entry.reported.deliveryFee : entry.platformFees), 0);
+  const totalReportedOrders = revenueDataset.reduce((sum, entry) => sum + (entry.reported?.totalOrders ?? entry.orders), 0);
+  const cancelledOrders = revenueDataset.reduce((sum, entry) => sum + (entry.reported?.cancelledOrders || 0), 0);
+  const successfulOrders = revenueDataset.reduce((sum, entry) => sum + entry.orders, 0);
+  const importedRevenueRows = revenueDataset.filter((entry) => entry.source === "excel");
   const previousNetRevenue = previousPeriodRevenues.reduce((sum, entry) => sum + entry.storeRevenue + entry.appRevenue - entry.discounts, 0);
   const previousCups = previousPeriodRevenues.reduce((sum, entry) => sum + entry.cups, 0);
   const currentAveragePerCup = cups ? netRevenue / cups : 0;
+  const averagePerOrder = successfulOrders ? datasetRevenue / successfulOrders : 0;
+  const averageItemsPerOrder = totalReportedOrders ? datasetItems / totalReportedOrders : 0;
+  const averagePerItem = datasetItems ? datasetRevenue / datasetItems : 0;
+  const cancellationRate = totalReportedOrders ? cancelledOrders / totalReportedOrders * 100 : 0;
+  const discountRate = reportedGoodsAmount ? reportedDiscountAmount / reportedGoodsAmount * 100 : 0;
   const baselineAveragePerCup = previousCups ? previousNetRevenue / previousCups : currentAveragePerCup;
   const inventoryIssued = inventoryEvents.filter((entry) => entry.kind === "cogs").reduce((sum, entry) => sum + entry.amount, 0);
   const inventoryWaste = inventoryEvents.filter((entry) => entry.kind === "waste").reduce((sum, entry) => sum + entry.amount, 0);
@@ -342,28 +565,72 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   }, 0);
 
   const growthTargetPercent = Math.max(0, state.growthTargetPercent || 0);
-  const revenueTarget = previousNetRevenue * (1 + growthTargetPercent / 100);
+  const autoRevenueTarget = previousNetRevenue * (1 + growthTargetPercent / 100);
+  const revenueTarget = Math.max(0, state.revenueTargetAmount || autoRevenueTarget);
+  const targetGrowthRate = previousNetRevenue ? (revenueTarget / previousNetRevenue - 1) * 100 : 0;
   const cupTarget = baselineAveragePerCup ? Math.ceil(revenueTarget / baselineAveragePerCup) : 0;
   const revenueRemaining = Math.max(0, revenueTarget - netRevenue);
-  const cupRemaining = Math.max(0, cupTarget - cups);
-  const totalDays = dateDiff(bounds.start, bounds.end) + 1;
-  const asOf = today < bounds.start ? bounds.start : today > bounds.end ? bounds.end : today;
-  const elapsedDays = today < bounds.start ? 0 : dateDiff(bounds.start, asOf) + 1;
-  const remainingDays = Math.max(0, totalDays - elapsedDays);
-  const currentRunRate = elapsedDays ? netRevenue / elapsedDays : 0;
-  const requiredRunRate = remainingDays ? revenueRemaining / remainingDays : revenueRemaining;
-  const requiredCupsPerDay = remainingDays ? Math.ceil(cupRemaining / remainingDays) : cupRemaining;
   const targetProgress = revenueTarget ? Math.min(100, (netRevenue / revenueTarget) * 100) : 0;
   const grossMargin = netRevenue ? (grossProfit / netRevenue) * 100 : 0;
 
-  const chartValues = useMemo(() => {
-    const grouped = new Map<string, number>();
-    for (const entry of periodRevenues) {
-      const key = periodMode === "month" ? entry.date.slice(8, 10) : entry.date.slice(0, 7);
-      grouped.set(key, (grouped.get(key) || 0) + entry.storeRevenue + entry.appRevenue - entry.discounts);
+  const productQuantity = state.products.reduce((sum, entry) => sum + entry.quantity, 0);
+  const productGoodsAmount = state.products.reduce((sum, entry) => sum + entry.goodsAmount, 0);
+  const productDiscountAmount = state.products.reduce((sum, entry) => sum + entry.discountAmount, 0);
+  const productNetAmount = state.products.reduce((sum, entry) => sum + entry.totalAmount, 0);
+  const productDiscountRate = productGoodsAmount ? productDiscountAmount / productGoodsAmount * 100 : 0;
+  const averageProductValue = productQuantity ? productNetAmount / productQuantity : 0;
+  const categoryPerformance = useMemo(() => {
+    const grouped = new Map<string, { quantity: number; revenue: number; discount: number; skuCount: number }>();
+    for (const product of state.products) {
+      const current = grouped.get(product.category) || { quantity: 0, revenue: 0, discount: 0, skuCount: 0 };
+      current.quantity += product.quantity;
+      current.revenue += product.totalAmount;
+      current.discount += product.discountAmount;
+      current.skuCount += 1;
+      grouped.set(product.category, current);
     }
-    return [...grouped.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([label, value]) => ({ label: periodMode === "month" ? String(Number(label)) : label.slice(5, 7), value }));
-  }, [periodRevenues, periodMode]);
+    return [...grouped.entries()].map(([name, values]) => ({ name, ...values })).sort((a, b) => b.revenue - a.revenue);
+  }, [state.products]);
+  const topProducts = useMemo(() => [...state.products].sort((a, b) => b.totalAmount - a.totalAmount).slice(0, 8), [state.products]);
+  const highDiscountProducts = useMemo(() => [...state.products].filter((entry) => entry.goodsAmount > 0 && entry.discountAmount > 0).sort((a, b) => b.discountAmount / b.goodsAmount - a.discountAmount / a.goodsAmount).slice(0, 6), [state.products]);
+  const maxCategoryRevenue = Math.max(...categoryPerformance.map((entry) => entry.revenue), 1);
+  const revenueProductGap = datasetRevenue - productNetAmount;
+  const offlineServiceNames = new Set(["an tai ban", "mang di"]);
+  const offlineServices = state.services.filter((entry) => offlineServiceNames.has(normalizedHeader(entry.serviceName)));
+  const deliveryServices = state.services.filter((entry) => !offlineServiceNames.has(normalizedHeader(entry.serviceName)));
+  const grabService = state.services.find((entry) => normalizedHeader(entry.serviceName).includes("grab"));
+  const serviceOrders = state.services.reduce((sum, entry) => sum + entry.totalOrders, 0);
+  const serviceCancelledOrders = state.services.reduce((sum, entry) => sum + entry.cancelledOrders, 0);
+  const serviceRevenue = state.services.reduce((sum, entry) => sum + entry.revenue, 0);
+  const offlineOrders = offlineServices.reduce((sum, entry) => sum + entry.totalOrders, 0);
+  const offlineRevenue = offlineServices.reduce((sum, entry) => sum + entry.revenue, 0);
+  const deliveryOrders = deliveryServices.reduce((sum, entry) => sum + entry.totalOrders, 0);
+  const deliveryRevenue = deliveryServices.reduce((sum, entry) => sum + entry.revenue, 0);
+  const offlineOrderShare = serviceOrders ? offlineOrders / serviceOrders * 100 : 0;
+  const deliveryOrderShare = serviceOrders ? deliveryOrders / serviceOrders * 100 : 0;
+  const offlineRevenueShare = serviceRevenue ? offlineRevenue / serviceRevenue * 100 : 0;
+  const deliveryRevenueShare = serviceRevenue ? deliveryRevenue / serviceRevenue * 100 : 0;
+  const maxServiceRevenue = Math.max(...state.services.map((entry) => entry.revenue), 1);
+  const serviceRevenueGap = serviceRevenue - datasetRevenue;
+  const revenueAdjustments = [
+    { label: "Tiền hủy", value: reportedCancelledAmount },
+    { label: "Tiền trả lại", value: reportedReturnedAmount },
+    { label: "Giảm giá", value: reportedDiscountAmount },
+    { label: "Phí đối tác & sàn", value: reportedPartnerFees },
+  ];
+  const maxRevenueAdjustment = Math.max(...revenueAdjustments.map((entry) => entry.value), 1);
+  const platformTakeBase = deliveryRevenue || datasetRevenue;
+  const platformTakeRate = platformTakeBase ? reportedPartnerFees / platformTakeBase * 100 : 0;
+  const partnerCommissionRate = reportedGoodsAmount ? reportedPartnerCommission / reportedGoodsAmount * 100 : 0;
+  const revenueAfterPlatformFees = Math.max(0, platformTakeBase - reportedPartnerFees);
+  const platformFeeDays = revenueDataset.filter((entry) => entry.reported ? entry.reported.partnerFee + entry.reported.platformTaxCollected + entry.reported.serviceFeeBeforeTax + entry.reported.deliveryFee > 0 : entry.platformFees > 0).length;
+  const platformFeeComponents = [
+    { label: "Phí trả đối tác", value: reportedPartnerCommission },
+    { label: "Thuế sàn thu hộ", value: reportedPlatformTax },
+    { label: "Phí dịch vụ", value: reportedServiceFees },
+    { label: "Phí giao hàng", value: reportedDeliveryFees },
+  ].filter((entry) => entry.value > 0);
+  const maxPlatformFeeComponent = Math.max(...platformFeeComponents.map((entry) => entry.value), 1);
 
   const filteredManualExpenses = activeExpenses.filter((expense) => expense.category === expenseCategory && (expense.category === "investment" ? inRange(expense.incurredOn, bounds) || expense.incurredOn <= bounds.end : expenseOccurrences(expense, bounds).length > 0));
   const selectedInventoryEvents = expenseCategory === "operating" ? inventoryEvents : [];
@@ -404,17 +671,63 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     setState((current) => ({ ...current, expenses: current.expenses.map((entry) => entry.id === expense.id ? { ...entry, paymentStatus: "paid", paymentDate: today } : entry) }));
   }
 
-  function openRevenueEntry() {
-    const existing = state.revenues.find((entry) => entry.date === today);
-    setRevenueForm(existing ? { date: existing.date, storeRevenue: amountInput(String(existing.storeRevenue)), appRevenue: amountInput(String(existing.appRevenue)), discounts: amountInput(String(existing.discounts)), platformFees: amountInput(String(existing.platformFees)), cashReceived: amountInput(String(existing.cashReceived)), orders: String(existing.orders), cups: String(existing.cups), note: existing.note || "" } : revenueFormDefaults());
-    setShowRevenueForm(true);
-  }
-
-  function saveRevenue(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const record: RevenueRecord = { id: state.revenues.find((entry) => entry.date === revenueForm.date)?.id || crypto.randomUUID(), date: revenueForm.date, storeRevenue: parseAmount(revenueForm.storeRevenue), appRevenue: parseAmount(revenueForm.appRevenue), discounts: parseAmount(revenueForm.discounts), platformFees: parseAmount(revenueForm.platformFees), cashReceived: parseAmount(revenueForm.cashReceived), orders: Number(revenueForm.orders) || 0, cups: Number(revenueForm.cups) || 0, note: revenueForm.note.trim() || undefined };
-    setState((current) => ({ ...current, revenues: current.revenues.some((entry) => entry.date === record.date) ? current.revenues.map((entry) => entry.date === record.date ? record : entry) : [record, ...current.revenues] }));
-    setShowRevenueForm(false);
+  async function importFinanceExcel(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!files.length) return;
+    if (files.length > 8) { window.alert("Mỗi lần chỉ nên import tối đa 8 file Excel."); return; }
+    const invalidFile = files.find((file) => !/\.(xls|xlsx)$/i.test(file.name) || file.size > 10 * 1024 * 1024);
+    if (invalidFile) { window.alert(`${invalidFile.name}: chỉ hỗ trợ Excel .xls/.xlsx và tối đa 10 MB mỗi file.`); return; }
+    setImportingFinance(true);
+    setFinanceImportNotice(undefined);
+    try {
+      const XLSX = await import("xlsx");
+      const parsed: ParsedFinanceImport[] = [];
+      for (const file of files) {
+        const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        if (!sheet) throw new Error(`${file.name}: không tìm thấy sheet dữ liệu.`);
+        const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: true, defval: null });
+        const templateType = financeTemplateType(rows);
+        if (!templateType) throw new Error(`${file.name}: chưa nhận diện được template. Hệ thống hiện hỗ trợ Doanh thu tổng quan, Mặt hàng và Hình thức phục vụ.`);
+        parsed.push(templateType === "revenue" ? parseRevenueRows(file, rows) : templateType === "products" ? parseProductRows(file, rows) : parseServiceRows(file, rows));
+      }
+      const revenueImports = parsed.filter((entry): entry is ParsedRevenueImport => entry.type === "revenue");
+      const productImports = parsed.filter((entry): entry is ParsedProductImport => entry.type === "products");
+      const serviceImports = parsed.filter((entry): entry is ParsedServiceImport => entry.type === "service");
+      if (revenueImports.length > 1 || productImports.length > 1 || serviceImports.length > 1) throw new Error("Mỗi lần chỉ chọn tối đa 1 file cho từng loại báo cáo để tránh ghi đè không rõ ràng.");
+      const replacing = [revenueImports.length && state.revenues.length ? "Doanh thu" : "", productImports.length && state.products.length ? "Mặt hàng" : "", serviceImports.length && state.services.length ? "Hình thức phục vụ" : ""].filter(Boolean);
+      if (replacing.length && !window.confirm(`Import mới sẽ thay toàn bộ dữ liệu ${replacing.join(" và ")} hiện tại. Tiếp tục?`)) return;
+      const revenue = revenueImports[0];
+      const products = productImports[0];
+      const service = serviceImports[0];
+      if (!uatMode && isSupabaseConfigured) await replaceFinanceImportBundle({
+        revenue: revenue ? { meta: revenue.meta, records: revenue.records } : undefined,
+        products: products ? { meta: products.meta, records: products.records } : undefined,
+        service: service ? { meta: service.meta, records: service.records } : undefined,
+      });
+      setState((current) => {
+        let imports = current.imports;
+        if (revenue) imports = [...imports.filter((entry) => entry.dataType !== "revenue"), revenue.importMeta];
+        if (products) imports = [...imports.filter((entry) => entry.dataType !== "products"), products.importMeta];
+        if (service) imports = [...imports.filter((entry) => entry.dataType !== "service"), service.importMeta];
+        return { ...current, revenues: revenue?.records || current.revenues, products: products?.records || current.products, services: service?.records || current.services, imports };
+      });
+      if (revenue) {
+        setPeriodMode("month");
+        setSelectedMonth(revenue.latestDate.slice(0, 7));
+        setSelectedYear(Number(revenue.latestDate.slice(0, 4)));
+      }
+      setRevenueSubTab(revenue || service ? "overview" : "products");
+      setFinanceSyncError(undefined);
+      setFinanceImportNotice(`Đã tự nhận diện và map ${parsed.map((entry) => entry.type === "revenue" ? `Doanh thu (${entry.meta.rowCount} ngày)` : entry.type === "products" ? `Mặt hàng (${entry.meta.rowCount} SKU)` : `Hình thức phục vụ (${entry.meta.rowCount} kênh)`).join(" + ")}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Không thể phân tích các file Excel.";
+      setFinanceSyncError(message);
+      window.alert(message);
+    } finally {
+      setImportingFinance(false);
+    }
   }
 
   function togglePeriodClose() {
@@ -439,17 +752,22 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   return <div className={styles.finance}>
     <header className={styles.financeHero}>
       <span className={styles.eyebrow}>NHA COFFEE & TEA{uatMode ? " · UAT LOCAL" : ""}</span>
-      <div className={styles.financeHeroRow}><div><h1>Chi phí & tài chính</h1><p>Theo dõi dòng tiền, giá vốn và sức khỏe vận hành trên cùng một màn hình.</p></div><div className={styles.logo}><Image src="/nha-coffee-logo-transparent.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div></div>
-      <div className={styles.heroMetric}><span>Lợi nhuận hoạt động · {bounds.label}</span><strong>{money(operatingProfit)}</strong><small>{netRevenue ? `${((operatingProfit / netRevenue) * 100).toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% doanh thu thuần` : "Chưa có doanh thu trong kỳ"}</small></div>
+      <div className={styles.financeHeroRow}><div><h1>Tài chính</h1><p>Theo dõi doanh thu, chi phí, dòng tiền và sức khỏe vận hành trên cùng một màn hình.</p></div><div className={styles.logo}><Image src="/nha-coffee-logo-transparent.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div></div>
+      <div className={styles.heroMetric}><span>{tab === "revenue" ? "Doanh thu thực · kỳ import" : `Lợi nhuận hoạt động · ${bounds.label}`}</span><strong>{money(tab === "revenue" ? datasetRevenue : operatingProfit)}</strong><small>{tab === "revenue" ? revenueImport ? `${dateLabel(revenueImport.periodStart)} – ${dateLabel(revenueImport.periodEnd)}` : "Chưa có file doanh thu" : netRevenue ? `${((operatingProfit / netRevenue) * 100).toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% doanh thu thuần` : "Chưa có doanh thu trong kỳ"}</small></div>
     </header>
 
-    <section className={styles.periodPanel}>
+    {tab !== "revenue" && <section className={styles.periodPanel}>
       <div className={styles.periodModes}>{(["month", "quarter", "year"] as PeriodMode[]).map((mode) => <button className={periodMode === mode ? styles.selected : ""} key={mode} onClick={() => setPeriodMode(mode)}>{mode === "month" ? "Tháng" : mode === "quarter" ? "Quý" : "Năm"}</button>)}</div>
       <div className={styles.periodPicker}>{periodMode === "month" ? <input type="month" value={selectedMonth} onChange={(event) => { setSelectedMonth(event.target.value); setSelectedYear(Number(event.target.value.slice(0, 4))); }} /> : <><select value={selectedYear} onChange={(event) => setSelectedYear(Number(event.target.value))}>{Array.from({ length: 5 }, (_, index) => new Date().getFullYear() - 2 + index).map((year) => <option key={year}>{year}</option>)}</select>{periodMode === "quarter" && <select value={selectedQuarter} onChange={(event) => setSelectedQuarter(Number(event.target.value))}><option value={1}>Quý 1</option><option value={2}>Quý 2</option><option value={3}>Quý 3</option><option value={4}>Quý 4</option></select>}</>}</div>
       <div className={styles.periodStatus}><b>{bounds.label}</b><span>{currentPeriodClosed ? "● Đã khóa sổ" : "● Đang mở"}</span></div>
-    </section>
+    </section>}
 
-    <nav className={styles.financeTabs}><button className={tab === "entry" ? styles.active : ""} onClick={() => setTab("entry")}>Ghi nhận chi phí</button><button className={tab === "report" ? styles.active : ""} onClick={() => setTab("report")}>Báo cáo tài chính</button><button className={tab === "dashboard" ? styles.active : ""} onClick={() => setTab("dashboard")}>Dashboard</button></nav>
+    <nav className={styles.financeTabs} aria-label="Điều hướng tài chính">
+      <button className={tab === "entry" ? styles.active : ""} onClick={() => setTab("entry")}>Ghi nhận chi phí</button>
+      <button className={tab === "revenue" ? styles.active : ""} onClick={() => setTab("revenue")}>Doanh thu</button>
+      <button className={tab === "report" ? styles.active : ""} onClick={() => setTab("report")}>Báo cáo tài chính</button>
+      <button className={tab === "dashboard" ? styles.active : ""} onClick={() => setTab("dashboard")}>Dashboard</button>
+    </nav>
 
     {tab === "entry" && <section className={styles.content}>
       <div className={styles.summaryStrip}><div><span>Tổng chi phí kỳ</span><strong>{money(totalPeriodExpense)}</strong></div><div><span>Đã thanh toán</span><strong>{money(paidManual + inventoryPurchases + paidInvestments)}</strong></div><div><span>Chưa thanh toán</span><strong>{money(unpaidManual)}</strong></div><div><span>Từ Kho NVL</span><strong>{money(inventoryCogs + inventoryWaste)}</strong></div></div>
@@ -463,6 +781,85 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       {uatMode && <div className={styles.uatTools}><span>Dữ liệu tài chính UAT chỉ lưu trong trình duyệt này.</span><button onClick={resetUat}>Nạp lại dữ liệu mẫu</button></div>}
     </section>}
 
+    {tab === "revenue" && <section className={`${styles.content} ${styles.revenueContent}`}>
+      <div className={styles.revenueSubTabs}>
+        <button className={revenueSubTab === "overview" ? styles.selected : ""} onClick={() => setRevenueSubTab("overview")}><span>Tổng quan</span><small>{revenueImport?.rowCount || 0} ngày</small></button>
+        <button className={revenueSubTab === "products" ? styles.selected : ""} onClick={() => setRevenueSubTab("products")}><span>Mặt hàng</span><small>{productsImport?.rowCount || 0} SKU</small></button>
+      </div>
+
+      <section className={styles.financeImportHub}>
+        <div className={styles.importHubCopy}><span>IMPORT CENTER</span><h2>Một nơi cho tất cả file Excel</h2><p>Chọn cùng lúc file Doanh thu tổng quan, Mặt hàng và Hình thức phục vụ. Hệ thống tự đọc header, nhận diện template và map vào đúng dashboard.</p></div>
+        <label className={`${styles.importHubButton} ${importingFinance ? styles.importing : ""}`}><input type="file" accept=".xls,.xlsx" multiple disabled={importingFinance} onChange={importFinanceExcel} /><span>{importingFinance ? "Đang phân tích & đồng bộ…" : "⇧ Chọn nhiều file Excel"}</span><small>.xls / .xlsx · tối đa 10 MB mỗi file</small></label>
+        <div className={styles.importHubTypes}><span><i>DT</i>Doanh thu tổng quan</span><span><i>MH</i>Báo cáo mặt hàng</span><span><i>PV</i>Hình thức phục vụ</span><b>Tự nhận diện bằng header</b></div>
+        {financeImportNotice && <div className={styles.importHubSuccess}><b>Import hoàn tất</b><span>{financeImportNotice}</span></div>}
+      </section>
+
+      {financeSyncError && <div className={styles.syncError}><b>Không thể import hoặc đồng bộ dữ liệu</b><span>{financeSyncError}</span></div>}
+
+      {revenueSubTab === "overview" && <>
+        <div className={styles.revenueHeader}>
+          <div><span>DOANH THU TỔNG QUAN</span><h2>{revenueImport ? `${dateLabel(revenueImport.periodStart)} – ${dateLabel(revenueImport.periodEnd)}` : bounds.label}</h2><p>Import file Doanh thu tổng quan. Mỗi file mới sẽ thay toàn bộ bộ dữ liệu doanh thu cũ.</p></div>
+        </div>
+        {revenueImport && <div className={styles.datasetStatus}><div><span>FILE DOANH THU ĐANG DÙNG</span><b>{revenueImport.fileName}</b></div><div><span>DỮ LIỆU</span><b>{revenueImport.rowCount} ngày</b></div><div><span>CẬP NHẬT</span><b>{importTimeLabel(revenueImport.importedAt)}</b></div><i>{uatMode || !isSupabaseConfigured ? "Local UAT" : "Supabase synced"}</i></div>}
+        {serviceImport && <div className={`${styles.datasetStatus} ${styles.serviceDatasetStatus}`}><div><span>FILE HÌNH THỨC PHỤC VỤ</span><b>{serviceImport.fileName}</b></div><div><span>DỮ LIỆU</span><b>{serviceImport.rowCount} kênh</b></div><div><span>KỲ BÁO CÁO</span><b>{dateLabel(serviceImport.periodStart)} – {dateLabel(serviceImport.periodEnd)}</b></div><i>{uatMode || !isSupabaseConfigured ? "Local UAT" : "Supabase synced"}</i></div>}
+        {!revenueDataset.length && !state.services.length ? <div className={styles.revenueEmpty}><div>DT</div><h3>Chưa có báo cáo doanh thu</h3><p>Chọn file tại Import Center phía trên. Hệ thống sẽ tự đưa báo cáo vào tab Tổng quan.</p></div> : <>
+          <div className={styles.revenueKpis}>
+            <article className={styles.primaryRevenueKpi}><span>DOANH THU THỰC</span><strong>{money(datasetRevenue)}</strong><small>{importedRevenueRows.length.toLocaleString("vi-VN")} dòng báo cáo</small></article>
+            <article><span>Đơn thành công</span><strong>{successfulOrders.toLocaleString("vi-VN")}</strong><small>/ {totalReportedOrders.toLocaleString("vi-VN")} tổng đơn</small></article>
+            <article><span>Số lượng hàng</span><strong>{datasetItems.toLocaleString("vi-VN")}</strong><small>{averageItemsPerOrder.toLocaleString("vi-VN", { maximumFractionDigits: 2 })} SP/đơn</small></article>
+            <article><span>Trung bình/đơn</span><strong>{money(averagePerOrder)}</strong><small>trên đơn thành công</small></article>
+            <article><span>Trung bình/sản phẩm</span><strong>{money(averagePerItem)}</strong><small>doanh thu thực / số lượng hàng</small></article>
+            <article className={cancellationRate > 3 ? styles.warningKpi : ""}><span>Tỷ lệ hủy</span><strong>{percent(cancellationRate)}</strong><small>{cancelledOrders.toLocaleString("vi-VN")} đơn · {money(reportedCancelledAmount)}</small></article>
+          </div>
+          <div className={styles.revenueInsightGrid}>
+            <article className={`${styles.revenuePanel} ${styles.platformTakeCard}`}>
+              <div className={styles.revenuePanelTitle}><div><span>PHÍ NỀN TẢNG / GIAO HÀNG</span><strong>{money(reportedPartnerFees)}</strong></div><small>{percent(platformTakeRate)} {deliveryRevenue ? "doanh thu giao hàng" : "doanh thu thực"}</small></div>
+              <div className={styles.platformTakeBody}>
+                <div className={styles.platformTakeRing} style={{ background: `conic-gradient(#e87d5c 0 ${Math.min(100, platformTakeRate)}%, #e8ede5 ${Math.min(100, platformTakeRate)}% 100%)` }}><i><strong>{percent(platformTakeRate)}</strong><small>bị giữ lại</small></i></div>
+                <div className={styles.platformTakeStats}><div><span>{deliveryRevenue ? "DT giao hàng/nền tảng" : "DT thực làm mẫu số"}</span><b>{money(platformTakeBase)}</b></div><div><span>Doanh thu sau nhóm phí</span><b>{money(revenueAfterPlatformFees)}</b></div>{grabService && <div><span>Riêng Grab Food</span><b>{money(grabService.revenue)}</b></div>}<div><span>Ngày phát sinh phí</span><b>{revenueDataset.length ? `${platformFeeDays}/${revenueDataset.length}` : "—"}</b></div><div><span>Phí đối tác / tiền hàng</span><b>{percent(partnerCommissionRate)}</b></div></div>
+              </div>
+              <div className={styles.platformFeeList}>{platformFeeComponents.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><div><i style={{ width: `${entry.value / maxPlatformFeeComponent * 100}%` }} /></div></div>)}</div>
+              <p className={styles.metricDisclaimer}>{deliveryRevenue ? "Tỷ lệ phí dùng doanh thu của các hình thức giao hàng/nền tảng làm mẫu số." : "Chưa có file Hình thức phục vụ nên tạm dùng toàn bộ doanh thu thực làm mẫu số."} Các cột phí trong báo cáo Sapo đang gộp nhiều đối tác, vì vậy không quy toàn bộ phí cho riêng Grab.</p>
+            </article>
+            <article className={`${styles.revenuePanel} ${styles.channelMixCard}`}>
+              <div className={styles.revenuePanelTitle}><div><span>PHÂN BỔ HÌNH THỨC PHỤC VỤ</span><strong>{serviceOrders ? `${serviceOrders.toLocaleString("vi-VN")} đơn` : "Chờ file phục vụ"}</strong></div><small>{serviceCancelledOrders ? `${serviceCancelledOrders.toLocaleString("vi-VN")} đơn hủy` : "Theo doanh thu & đơn"}</small></div>
+              {state.services.length ? <>
+                <div className={styles.serviceSegmentBar} aria-label={`Offline ${percent(offlineOrderShare)}, giao hàng và nền tảng ${percent(deliveryOrderShare)}`}><i style={{ width: `${offlineOrderShare}%` }} /><b style={{ width: `${deliveryOrderShare}%` }} /></div>
+                <div className={styles.serviceLegend}><span><i />Offline <b>{percent(offlineOrderShare)}</b></span><span><i />Giao hàng / nền tảng <b>{percent(deliveryOrderShare)}</b></span></div>
+                <div className={styles.serviceSummary}>
+                  <div><span>OFFLINE</span><b>{offlineOrders.toLocaleString("vi-VN")} đơn</b><strong>{money(offlineRevenue)}</strong><small>{percent(offlineRevenueShare)} doanh thu</small></div>
+                  <div><span>GIAO HÀNG / NỀN TẢNG</span><b>{deliveryOrders.toLocaleString("vi-VN")} đơn</b><strong>{money(deliveryRevenue)}</strong><small>{percent(deliveryRevenueShare)} doanh thu</small></div>
+                </div>
+                <div className={styles.serviceModeList}>{state.services.map((entry) => {
+                  const orderShare = serviceOrders ? entry.totalOrders / serviceOrders * 100 : 0;
+                  const isGrab = normalizedHeader(entry.serviceName).includes("grab");
+                  return <div className={isGrab ? styles.grabHighlight : ""} key={entry.id}><div><span><b>{entry.serviceName}</b><small>{entry.totalOrders.toLocaleString("vi-VN")} đơn · {percent(orderShare)} tổng đơn{entry.cancelledOrders ? ` · ${entry.cancelledOrders.toLocaleString("vi-VN")} hủy` : ""}</small></span><strong>{money(entry.revenue)}</strong></div><div className={styles.serviceModeTrack}><i style={{ width: `${entry.revenue / maxServiceRevenue * 100}%` }} /></div></div>;
+                })}</div>
+                <div className={`${styles.serviceReconciliation} ${revenueDataset.length && Math.abs(serviceRevenueGap) < 1 ? styles.reconciled : ""}`}><span>Đối soát với Doanh thu tổng quan</span><b>{!revenueDataset.length ? "Chờ file doanh thu" : Math.abs(serviceRevenueGap) < 1 ? "Khớp 100%" : `Lệch ${money(Math.abs(serviceRevenueGap))}`}</b></div>
+              </> : <div className={styles.panelEmpty}>Import file Hình thức phục vụ tại Import Center để xem phân bổ thật giữa tại bàn, mang đi, Grab Food và các kênh giao hàng.</div>}
+            </article>
+            <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>GROSS-TO-NET</span><strong>{money(reportedGoodsAmount)} tiền hàng</strong></div><small>{percent(discountRate)} giảm giá</small></div><div className={styles.adjustmentList}>{revenueAdjustments.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>-{money(entry.value)}</b></div><div className={styles.adjustmentTrack}><i style={{ width: `${entry.value / maxRevenueAdjustment * 100}%` }} /></div></div>)}<div className={styles.netRevenueRow}><span>Doanh thu thực</span><b>{money(datasetRevenue)}</b></div></div></article>
+            <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>ĐỐI SOÁT HAI BÁO CÁO</span><strong>{state.products.length ? money(Math.abs(revenueProductGap)) : "Chờ file mặt hàng"}</strong></div><small>Chênh lệch</small></div>{state.products.length ? <div className={styles.reconciliation}><div><span>Doanh thu thực</span><b>{money(datasetRevenue)}</b><i style={{ width: "100%" }} /></div><div><span>Tổng tiền mặt hàng</span><b>{money(productNetAmount)}</b><i style={{ width: `${datasetRevenue ? Math.min(100, productNetAmount / datasetRevenue * 100) : 0}%` }} /></div><p>Chênh lệch có thể đến từ đơn hủy, phí hoặc cấu hình báo cáo Sapo. Dùng ô này để kiểm tra hai file cùng kỳ.</p></div> : <div className={styles.panelEmpty}>Import thêm Báo cáo mặt hàng để đối soát doanh thu và cơ cấu sản phẩm.</div>}</article>
+          </div>
+        </>}
+      </>}
+
+      {revenueSubTab === "products" && <>
+        <div className={styles.revenueHeader}>
+          <div><span>BÁO CÁO MẶT HÀNG</span><h2>{productsImport ? `${dateLabel(productsImport.periodStart)} – ${dateLabel(productsImport.periodEnd)}` : "Cơ cấu sản phẩm"}</h2><p>Import file Danh mục mặt hàng. Mỗi file mới sẽ thay toàn bộ bộ dữ liệu mặt hàng cũ.</p></div>
+        </div>
+        {productsImport && <div className={styles.datasetStatus}><div><span>FILE ĐANG DÙNG</span><b>{productsImport.fileName}</b></div><div><span>DỮ LIỆU</span><b>{productsImport.rowCount} SKU</b></div><div><span>CẬP NHẬT</span><b>{importTimeLabel(productsImport.importedAt)}</b></div><i>{uatMode || !isSupabaseConfigured ? "Local UAT" : "Supabase synced"}</i></div>}
+        {!state.products.length ? <div className={styles.revenueEmpty}><div>MH</div><h3>Chưa có báo cáo mặt hàng</h3><p>Chọn file tại Import Center phía trên. Hệ thống sẽ tự đưa báo cáo vào tab Mặt hàng.</p></div> : <>
+          <div className={styles.productKpis}><article><span>TỔNG TIỀN MẶT HÀNG</span><strong>{money(productNetAmount)}</strong><small>sau giảm giá</small></article><article><span>SẢN PHẨM BÁN</span><strong>{productQuantity.toLocaleString("vi-VN")}</strong><small>{state.products.length} SKU</small></article><article><span>DANH MỤC</span><strong>{categoryPerformance.length}</strong><small>nhóm sản phẩm</small></article><article><span>GIẢM GIÁ</span><strong>{money(productDiscountAmount)}</strong><small>{percent(productDiscountRate)} tiền hàng</small></article><article><span>TB/SẢN PHẨM</span><strong>{money(averageProductValue)}</strong><small>sau giảm giá</small></article></div>
+          <div className={styles.productVisualGrid}>
+            <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>DOANH THU THEO DANH MỤC</span><strong>{categoryPerformance.length} danh mục</strong></div></div><div className={styles.categoryBars}>{categoryPerformance.map((entry) => <div key={entry.name}><div><span><b>{entry.name}</b><small>{entry.quantity.toLocaleString("vi-VN")} SP · {entry.skuCount} SKU</small></span><strong>{money(entry.revenue)}</strong></div><div><i style={{ width: `${entry.revenue / maxCategoryRevenue * 100}%` }} /></div></div>)}</div></article>
+            <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>TOP MẶT HÀNG</span><strong>Theo tổng tiền</strong></div></div><div className={styles.topRevenueList}>{topProducts.map((entry, index) => <div key={entry.id}><i>{index + 1}</i><span><b>{entry.name} {entry.variant ? `· ${entry.variant}` : ""}</b><small>{entry.category} · {entry.quantity.toLocaleString("vi-VN")} SP</small></span><strong>{money(entry.totalAmount)}</strong></div>)}</div></article>
+          </div>
+          <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>MẶT HÀNG GIẢM GIÁ CAO</span><strong>Cần kiểm tra biên lợi nhuận</strong></div><small>% trên tiền hàng</small></div><div className={styles.discountProductList}>{highDiscountProducts.map((entry) => <div key={entry.id}><span><b>{entry.name} {entry.variant ? `· ${entry.variant}` : ""}</b><small>{entry.sku} · {money(entry.goodsAmount)} tiền hàng</small></span><strong>{percent(entry.goodsAmount ? entry.discountAmount / entry.goodsAmount * 100 : 0)}<small>{money(entry.discountAmount)}</small></strong></div>)}</div></article>
+        </>}
+      </>}
+    </section>}
+
     {tab === "report" && <section className={styles.content}>
       <div className={styles.reportHeader}><div><span>BÁO CÁO QUẢN TRỊ F&B</span><h2>{bounds.label}</h2></div><button className={currentPeriodClosed ? styles.reopenButton : styles.closePeriodButton} onClick={togglePeriodClose}>{currentPeriodClosed ? "Mở lại kỳ" : "Khóa sổ kỳ"}</button></div>
       <div className={styles.reportTabs}>{(["pnl", "cash", "inventory", "assets"] as ReportView[]).map((view) => <button className={reportView === view ? styles.selected : ""} key={view} onClick={() => setReportView(view)}>{view === "pnl" ? "P&L" : view === "cash" ? "Dòng tiền" : view === "inventory" ? "Tồn kho" : "Tài sản & khấu hao"}</button>)}</div>
@@ -473,15 +870,21 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     </section>}
 
     {tab === "dashboard" && <section className={`${styles.content} ${styles.dashboard}`}>
-      <div className={styles.dashboardActions}><div><span>DASHBOARD ĐIỀU HÀNH</span><h2>Tiến độ {bounds.label.toLowerCase()}</h2></div><button onClick={openRevenueEntry}>+ Cập nhật hôm nay</button></div>
-      <div className={styles.targetCard}><div><span>MỤC TIÊU DOANH THU</span><strong>{money(revenueTarget)}</strong><p>{previousNetRevenue ? `Tăng ${growthTargetPercent.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% từ ${money(previousNetRevenue)} kỳ trước` : "Chưa có doanh thu kỳ trước để tự tính mục tiêu."}</p></div><div className={styles.targetPercent}>{targetProgress.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%</div><div className={styles.progressTrack}><i style={{ width: `${targetProgress}%` }} /></div><div className={styles.targetInputs}><label>Tăng trưởng so với kỳ trước (%)<input min="0" step="0.1" type="number" value={state.growthTargetPercent} onChange={(event) => setState((current) => ({ ...current, growthTargetPercent: Math.max(0, Number(event.target.value) || 0) }))} /></label><div className={styles.targetAuto}><span>MỤC TIÊU TỰ TÍNH</span><strong>{cupTarget.toLocaleString("vi-VN")} ly</strong><small>≈ {money(baselineAveragePerCup)}/ly theo kỳ trước</small></div></div><p>Đã đạt {money(netRevenue)} · còn thiếu {money(revenueRemaining)}</p></div>
-      <div className={styles.kpiGrid}><article className={styles.averageCup}><span>Trung bình 1 ly</span><strong>{money(currentAveragePerCup)}</strong><small>Doanh thu thuần / {cups.toLocaleString("vi-VN")} ly</small></article><article><span>Run rate hiện tại</span><strong>{money(currentRunRate)}</strong><small>mỗi ngày</small></article><article className={requiredRunRate > currentRunRate ? styles.attention : ""}><span>Run rate cần đạt</span><strong>{money(requiredRunRate)}</strong><small>{remainingDays} ngày còn lại</small></article><article><span>Ly đã bán</span><strong>{cups.toLocaleString("vi-VN")}</strong><small>{orders.toLocaleString("vi-VN")} đơn hàng</small></article><article className={styles.cupsNeeded}><span>Ly còn thiếu</span><strong>{cupRemaining.toLocaleString("vi-VN")}</strong><small>≈ {requiredCupsPerDay.toLocaleString("vi-VN")} ly/ngày</small></article></div>
-      <div className={styles.chartGrid}><article className={styles.chartCard}><div><span>DOANH THU THEO {periodMode === "month" ? "NGÀY" : "THÁNG"}</span><strong>{money(netRevenue)}</strong></div><MiniBars values={chartValues} target={periodMode === "month" ? requiredRunRate : revenueTarget / Math.max(1, chartValues.length)} /></article><article className={styles.runRateCard}><span>RUN RATE</span><div className={styles.runRateCompare}><div><b>{compactMoney(currentRunRate)}</b><small>Hiện tại</small></div><div><b>{compactMoney(requiredRunRate)}</b><small>Cần đạt</small></div></div><div className={styles.runRateTrack}><i style={{ width: `${requiredRunRate ? Math.min(100, currentRunRate / requiredRunRate * 100) : 100}%` }} /></div><p>{currentRunRate >= requiredRunRate ? "Đang đi đúng hoặc vượt nhịp mục tiêu." : `Cần tăng thêm ${money(requiredRunRate - currentRunRate)} mỗi ngày.`}</p></article></div>
-      <div className={styles.chartGrid}><article className={styles.costMixCard}><div><span>CƠ CẤU CHI PHÍ</span><strong>{money(totalPeriodExpense)}</strong></div><div className={styles.donut} style={{ background: `conic-gradient(#171916 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste) / totalPeriodExpense * 100 : 0}%, #887a5d 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste + fixedCost) / totalPeriodExpense * 100 : 0}%, #c9b896 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste + fixedCost + operatingCost) / totalPeriodExpense * 100 : 0}%, #e9dfca 0 100%)` }}><i>{grossMargin.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%<small>gross margin</small></i></div><div className={styles.legend}><span><i className={styles.legendDark} />NVL {money(inventoryCogs + inventoryWaste)}</span><span><i className={styles.legendBrown} />Cố định {money(fixedCost)}</span><span><i className={styles.legendSand} />Vận hành {money(operatingCost)}</span><span><i className={styles.legendCream} />Bán hàng {money(salesCost)}</span></div></article><article className={styles.forecastCard}><span>DỰ BÁO CUỐI KỲ</span><strong>{money(netRevenue + currentRunRate * remainingDays)}</strong><p>Dựa trên run rate trung bình hiện tại.</p><div><span>Trung bình 1 ly</span><b>{money(currentAveragePerCup)}</b></div><div><span>EBITDA hiện tại</span><b className={ebitda < 0 ? styles.redText : ""}>{money(ebitda)}</b></div><div><span>Khấu hao kỳ</span><b>{money(depreciation)}</b></div><div><span>Tồn kho hiện tại</span><b>{money(closingInventory)}</b></div></article></div>
+      <div className={styles.dashboardActions}><div><span>DASHBOARD ĐIỀU HÀNH</span><h2>Hiệu quả kinh doanh</h2></div><button onClick={() => { setTab("revenue"); setRevenueSubTab(!state.products.length ? "products" : "overview"); }}>Nhập dữ liệu Excel</button></div>
+      <div className={styles.targetCard}><div><span>MỤC TIÊU DOANH THU</span><strong>{money(revenueTarget)}</strong><p>{state.revenueTargetAmount ? previousNetRevenue ? `Mục tiêu nhập trực tiếp · tương đương ${targetGrowthRate.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% so với ${money(previousNetRevenue)} kỳ trước` : "Mục tiêu doanh thu nhập trực tiếp." : previousNetRevenue ? `Tự tính tăng ${growthTargetPercent.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% từ ${money(previousNetRevenue)} kỳ trước` : "Nhập mục tiêu doanh thu để bắt đầu theo dõi."}</p></div><div className={styles.targetPercent}>{targetProgress.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%</div><div className={styles.progressTrack}><i style={{ width: `${targetProgress}%` }} /></div><div className={styles.targetInputs}><label>Mục tiêu doanh thu (₫)<input inputMode="numeric" placeholder="Ví dụ: 50,000,000" value={state.revenueTargetAmount ? amountInput(String(state.revenueTargetAmount)) : ""} onChange={(event) => setState((current) => ({ ...current, revenueTargetAmount: parseAmount(event.target.value) }))} /></label><label>Tăng trưởng tự tính (%)<input min="0" step="0.1" type="number" value={state.growthTargetPercent} onChange={(event) => setState((current) => ({ ...current, growthTargetPercent: Math.max(0, Number(event.target.value) || 0), revenueTargetAmount: 0 }))} /></label><div className={styles.targetAuto}><span>MỤC TIÊU LY TỰ TÍNH</span><strong>{cupTarget.toLocaleString("vi-VN")} ly</strong><small>≈ {money(baselineAveragePerCup)}/ly theo kỳ trước</small></div></div><p>Đã đạt {money(netRevenue)} · còn thiếu {money(revenueRemaining)}</p></div>
+      <div className={styles.kpiGrid}><article className={styles.averageCup}><span>Trung bình/đơn</span><strong>{money(averagePerOrder)}</strong><small>{totalReportedOrders.toLocaleString("vi-VN")} đơn toàn báo cáo</small></article><article><span>Trung bình/sản phẩm</span><strong>{money(averageProductValue || averagePerItem)}</strong><small>sau giảm giá</small></article><article><span>Sản phẩm bán</span><strong>{(productQuantity || datasetItems).toLocaleString("vi-VN")}</strong><small>{state.products.length || importedRevenueRows.length} dòng dữ liệu</small></article><article className={cancellationRate > 3 ? styles.attention : ""}><span>Tỷ lệ hủy đơn</span><strong>{percent(cancellationRate)}</strong><small>{cancelledOrders.toLocaleString("vi-VN")} đơn hủy</small></article><article className={productDiscountRate > 15 ? styles.attention : ""}><span>Tỷ lệ giảm giá</span><strong>{percent(productDiscountRate || discountRate)}</strong><small>{money(productDiscountAmount || reportedDiscountAmount)}</small></article><article><span>Gross margin</span><strong>{percent(grossMargin)}</strong><small>{bounds.label}</small></article></div>
+
+      <div className={styles.dashboardDataNote}><span>Doanh thu: <b>{revenueImport ? `${dateLabel(revenueImport.periodStart)} – ${dateLabel(revenueImport.periodEnd)}` : "chưa import"}</b></span><span>Mặt hàng: <b>{productsImport ? `${dateLabel(productsImport.periodStart)} – ${dateLabel(productsImport.periodEnd)}` : "chưa import"}</b></span><span>Phục vụ: <b>{serviceImport ? `${dateLabel(serviceImport.periodStart)} – ${dateLabel(serviceImport.periodEnd)}` : "chưa import"}</b></span></div>
+
+      <div className={styles.productVisualGrid}>
+        <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>CƠ CẤU DOANH THU</span><strong>Theo danh mục</strong></div></div>{categoryPerformance.length ? <div className={styles.categoryBars}>{categoryPerformance.slice(0, 8).map((entry) => <div key={entry.name}><div><span><b>{entry.name}</b><small>{entry.quantity.toLocaleString("vi-VN")} sản phẩm</small></span><strong>{money(entry.revenue)}</strong></div><div><i style={{ width: `${entry.revenue / maxCategoryRevenue * 100}%` }} /></div></div>)}</div> : <div className={styles.panelEmpty}>Import Báo cáo mặt hàng để xem cơ cấu danh mục.</div>}</article>
+        <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>TOP SẢN PHẨM</span><strong>Đóng góp doanh thu cao</strong></div></div>{topProducts.length ? <div className={styles.topRevenueList}>{topProducts.slice(0, 6).map((entry, index) => <div key={entry.id}><i>{index + 1}</i><span><b>{entry.name}</b><small>{entry.category} · {entry.quantity.toLocaleString("vi-VN")} SP</small></span><strong>{money(entry.totalAmount)}</strong></div>)}</div> : <div className={styles.panelEmpty}>Chưa có dữ liệu mặt hàng.</div>}</article>
+      </div>
+
+      <div className={styles.chartGrid}><article className={styles.costMixCard}><div><span>CƠ CẤU CHI PHÍ · {bounds.label.toUpperCase()}</span><strong>{money(totalPeriodExpense)}</strong></div><div className={styles.donut} style={{ background: `conic-gradient(#171916 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste) / totalPeriodExpense * 100 : 0}%, #887a5d 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste + fixedCost) / totalPeriodExpense * 100 : 0}%, #c9b896 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste + fixedCost + operatingCost) / totalPeriodExpense * 100 : 0}%, #e9dfca 0 100%)` }}><i>{grossMargin.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%<small>gross margin</small></i></div><div className={styles.legend}><span><i className={styles.legendDark} />NVL {money(inventoryCogs + inventoryWaste)}</span><span><i className={styles.legendBrown} />Cố định {money(fixedCost)}</span><span><i className={styles.legendSand} />Vận hành {money(operatingCost)}</span><span><i className={styles.legendCream} />Bán hàng {money(salesCost)}</span></div></article><article className={styles.forecastCard}><span>ĐỐI SOÁT & SỨC KHỎE</span><strong>{state.products.length && revenueDataset.length ? money(Math.abs(revenueProductGap)) : "Chưa đủ dữ liệu"}</strong><p>Chênh lệch giữa Doanh thu thực và Tổng tiền mặt hàng.</p><div><span>Doanh thu thực</span><b>{money(datasetRevenue)}</b></div><div><span>Tổng tiền mặt hàng</span><b>{money(productNetAmount)}</b></div><div><span>EBITDA {bounds.label}</span><b className={ebitda < 0 ? styles.redText : ""}>{money(ebitda)}</b></div><div><span>Tồn kho hiện tại</span><b>{money(closingInventory)}</b></div></article></div>
     </section>}
 
     {showExpenseForm && <div className={styles.backdrop} role="presentation" onMouseDown={() => setShowExpenseForm(false)}><form className={styles.sheet} onSubmit={saveExpense} onMouseDown={(event) => event.stopPropagation()}><div className={styles.sheetHandle} /><div className={styles.sheetTitle}><div><span>{editingExpenseId ? "CẬP NHẬT" : "GHI NHẬN"}</span><h2>{categoryLabels[expenseForm.category]}</h2></div><button type="button" onClick={() => setShowExpenseForm(false)}>×</button></div><label>Category<select value={expenseForm.category} onChange={(event) => setExpenseForm((current) => ({ ...current, category: event.target.value as ExpenseCategory, recurrence: event.target.value === "fixed" ? "monthly" : "once" }))}>{(Object.keys(categoryLabels) as ExpenseCategory[]).map((category) => <option value={category} key={category}>{categoryLabels[category]}</option>)}</select></label><label>Tên chi phí / tài sản<input autoFocus required value={expenseForm.name} onChange={(event) => setExpenseForm((current) => ({ ...current, name: event.target.value }))} placeholder="Ví dụ: Tiền thuê mặt bằng" /></label><div className={styles.formRow}><label>Subcategory<input value={expenseForm.subcategory} onChange={(event) => setExpenseForm((current) => ({ ...current, subcategory: event.target.value }))} placeholder="Ví dụ: Mặt bằng" /></label><label>Số tiền<input required inputMode="numeric" value={expenseForm.amount} onChange={(event) => setExpenseForm((current) => ({ ...current, amount: amountInput(event.target.value) }))} placeholder="15,000,000" /></label></div><div className={styles.formRow}><label>Ngày ghi nhận<input required type="date" value={expenseForm.incurredOn} onChange={(event) => setExpenseForm((current) => ({ ...current, incurredOn: event.target.value }))} /></label>{expenseForm.category !== "investment" && <label>Chu kỳ<select value={expenseForm.recurrence} onChange={(event) => setExpenseForm((current) => ({ ...current, recurrence: event.target.value as Recurrence }))}>{(Object.keys(recurrenceLabels) as Recurrence[]).map((recurrence) => <option value={recurrence} key={recurrence}>{recurrenceLabels[recurrence]}</option>)}</select></label>}</div>{expenseForm.category === "investment" && <><div className={styles.formRow}><label>Ngày sử dụng<input type="date" value={expenseForm.inServiceOn} onChange={(event) => setExpenseForm((current) => ({ ...current, inServiceOn: event.target.value }))} /></label><label>Khấu hao (tháng)<input min="1" type="number" value={expenseForm.usefulLifeMonths} onChange={(event) => setExpenseForm((current) => ({ ...current, usefulLifeMonths: event.target.value }))} /></label></div><label>Giá trị thu hồi<input inputMode="numeric" value={expenseForm.salvageValue} onChange={(event) => setExpenseForm((current) => ({ ...current, salvageValue: amountInput(event.target.value) }))} /></label></>}<div className={styles.formRow}><label>Thanh toán<select value={expenseForm.paymentStatus} onChange={(event) => setExpenseForm((current) => ({ ...current, paymentStatus: event.target.value as PaymentStatus }))}>{(Object.keys(paymentLabels) as PaymentStatus[]).map((status) => <option value={status} key={status}>{paymentLabels[status]}</option>)}</select></label>{expenseForm.paymentStatus === "paid" && <label>Ngày thanh toán<input type="date" value={expenseForm.paymentDate} onChange={(event) => setExpenseForm((current) => ({ ...current, paymentDate: event.target.value }))} /></label>}</div><div className={styles.formRow}><label>Mã hóa đơn<input value={expenseForm.invoiceCode} onChange={(event) => setExpenseForm((current) => ({ ...current, invoiceCode: event.target.value }))} /></label><label>Nhà cung cấp<input value={expenseForm.vendor} onChange={(event) => setExpenseForm((current) => ({ ...current, vendor: event.target.value }))} /></label></div><label>Note<textarea value={expenseForm.note} onChange={(event) => setExpenseForm((current) => ({ ...current, note: event.target.value }))} placeholder="Ghi chú nội bộ" /></label><button className={styles.primaryButton} type="submit">{editingExpenseId ? "Lưu thay đổi" : "Ghi nhận chi phí"}</button></form></div>}
 
-    {showRevenueForm && <div className={styles.backdrop} role="presentation" onMouseDown={() => setShowRevenueForm(false)}><form className={styles.sheet} onSubmit={saveRevenue} onMouseDown={(event) => event.stopPropagation()}><div className={styles.sheetHandle} /><div className={styles.sheetTitle}><div><span>CẬP NHẬT HẰNG NGÀY</span><h2>Doanh thu & số ly</h2></div><button type="button" onClick={() => setShowRevenueForm(false)}>×</button></div><label>Ngày<input required type="date" value={revenueForm.date} onChange={(event) => setRevenueForm((current) => ({ ...current, date: event.target.value }))} /></label><div className={styles.formRow}><label>Doanh thu tại quán<input inputMode="numeric" value={revenueForm.storeRevenue} onChange={(event) => setRevenueForm((current) => ({ ...current, storeRevenue: amountInput(event.target.value) }))} /></label><label>Doanh thu app<input inputMode="numeric" value={revenueForm.appRevenue} onChange={(event) => setRevenueForm((current) => ({ ...current, appRevenue: amountInput(event.target.value) }))} /></label></div><div className={styles.formRow}><label>Voucher quán chịu<input inputMode="numeric" value={revenueForm.discounts} onChange={(event) => setRevenueForm((current) => ({ ...current, discounts: amountInput(event.target.value) }))} /></label><label>Phí nền tảng<input inputMode="numeric" value={revenueForm.platformFees} onChange={(event) => setRevenueForm((current) => ({ ...current, platformFees: amountInput(event.target.value) }))} /></label></div><div className={styles.formRow}><label>Số đơn<input min="0" type="number" value={revenueForm.orders} onChange={(event) => setRevenueForm((current) => ({ ...current, orders: event.target.value }))} /></label><label>Số ly<input min="0" type="number" value={revenueForm.cups} onChange={(event) => setRevenueForm((current) => ({ ...current, cups: event.target.value }))} /></label></div><label>Tiền thực nhận<input inputMode="numeric" value={revenueForm.cashReceived} onChange={(event) => setRevenueForm((current) => ({ ...current, cashReceived: amountInput(event.target.value) }))} /><small>Để trống sẽ lấy doanh thu thuần trừ phí nền tảng.</small></label><label>Note<textarea value={revenueForm.note} onChange={(event) => setRevenueForm((current) => ({ ...current, note: event.target.value }))} /></label><button className={styles.primaryButton} type="submit">Lưu cập nhật hôm nay</button></form></div>}
   </div>;
 }
