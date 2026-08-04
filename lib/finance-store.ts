@@ -94,6 +94,14 @@ function numberValue(value: unknown) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function supabaseFailure(error: unknown, context: string) {
+  const detail = error && typeof error === "object" ? error as { code?: string; message?: string; details?: string; hint?: string } : {};
+  const rawMessage = [detail.message, detail.details, detail.hint].filter(Boolean).join(" · ");
+  const migrationMissing = detail.code === "PGRST202" || detail.code === "42P01" || /schema cache|could not find the function|does not exist/i.test(rawMessage);
+  if (migrationMissing) return new Error("Supabase Production chưa áp dụng migration Tài chính. Kiểm tra workflow Apply Supabase migrations trên GitHub Actions rồi thử import lại.");
+  return new Error(`${context}${rawMessage ? `: ${rawMessage}` : " thất bại."}${detail.code ? ` [${detail.code}]` : ""}`);
+}
+
 export async function loadFinanceImports(): Promise<FinanceCloudState> {
   const client = requireClient();
   const [importsResult, revenueResult, productsResult, servicesResult] = await Promise.all([
@@ -102,10 +110,10 @@ export async function loadFinanceImports(): Promise<FinanceCloudState> {
     client.from("finance_product_rows").select("*").order("source_row", { ascending: true }),
     client.from("finance_service_rows").select("*").order("source_row", { ascending: true }),
   ]);
-  if (importsResult.error) throw importsResult.error;
-  if (revenueResult.error) throw revenueResult.error;
-  if (productsResult.error) throw productsResult.error;
-  if (servicesResult.error) throw servicesResult.error;
+  if (importsResult.error) throw supabaseFailure(importsResult.error, "Không thể tải metadata import");
+  if (revenueResult.error) throw supabaseFailure(revenueResult.error, "Không thể tải dữ liệu doanh thu");
+  if (productsResult.error) throw supabaseFailure(productsResult.error, "Không thể tải dữ liệu mặt hàng");
+  if (servicesResult.error) throw supabaseFailure(servicesResult.error, "Không thể tải dữ liệu hình thức phục vụ");
 
   const imports: FinanceImportMeta[] = (importsResult.data || []).map((row) => ({
     dataType: row.data_type,
@@ -258,7 +266,7 @@ export async function replaceFinanceRevenueImport(meta: Omit<FinanceImportMeta, 
     p_period_end: meta.periodEnd,
     p_rows: revenueRpcRows(records),
   });
-  if (error) throw error;
+  if (error) throw supabaseFailure(error, "Không thể lưu báo cáo doanh thu");
 }
 
 export async function replaceFinanceProductImport(meta: Omit<FinanceImportMeta, "dataType" | "importedAt">, records: FinanceProductRecord[]) {
@@ -268,7 +276,7 @@ export async function replaceFinanceProductImport(meta: Omit<FinanceImportMeta, 
     p_period_end: meta.periodEnd,
     p_rows: productRpcRows(records),
   });
-  if (error) throw error;
+  if (error) throw supabaseFailure(error, "Không thể lưu báo cáo mặt hàng");
 }
 
 export async function replaceFinanceImportBundle(bundle: {
@@ -290,5 +298,5 @@ export async function replaceFinanceImportBundle(bundle: {
     p_service_period_end: bundle.service?.meta.periodEnd ?? null,
     p_service_rows: bundle.service ? serviceRpcRows(bundle.service.records) : null,
   });
-  if (error) throw error;
+  if (error) throw supabaseFailure(error, "Không thể lưu bộ file tài chính");
 }

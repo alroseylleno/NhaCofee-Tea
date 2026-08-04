@@ -701,12 +701,19 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       const revenue = revenueImports[0];
       const products = productImports[0];
       const service = serviceImports[0];
-      if (!uatMode && isSupabaseConfigured) await replaceFinanceImportBundle({
-        revenue: revenue ? { meta: revenue.meta, records: revenue.records } : undefined,
-        products: products ? { meta: products.meta, records: products.records } : undefined,
-        service: service ? { meta: service.meta, records: service.records } : undefined,
-      });
+      let verifiedCloudState: Awaited<ReturnType<typeof loadFinanceImports>> | undefined;
+      if (!uatMode) {
+        if (!isSupabaseConfigured) throw new Error("Production chưa cấu hình Supabase. Import đã dừng để tránh chỉ lưu dữ liệu trên trình duyệt.");
+        await replaceFinanceImportBundle({
+          revenue: revenue ? { meta: revenue.meta, records: revenue.records } : undefined,
+          products: products ? { meta: products.meta, records: products.records } : undefined,
+          service: service ? { meta: service.meta, records: service.records } : undefined,
+        });
+        // Read after write so the success state always reflects the latest committed Supabase snapshot.
+        verifiedCloudState = await loadFinanceImports();
+      }
       setState((current) => {
+        if (verifiedCloudState) return { ...current, ...verifiedCloudState };
         let imports = current.imports;
         if (revenue) imports = [...imports.filter((entry) => entry.dataType !== "revenue"), revenue.importMeta];
         if (products) imports = [...imports.filter((entry) => entry.dataType !== "products"), products.importMeta];
@@ -722,7 +729,8 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       setFinanceSyncError(undefined);
       setFinanceImportNotice(`Đã tự nhận diện và map ${parsed.map((entry) => entry.type === "revenue" ? `Doanh thu (${entry.meta.rowCount} ngày)` : entry.type === "products" ? `Mặt hàng (${entry.meta.rowCount} SKU)` : `Hình thức phục vụ (${entry.meta.rowCount} kênh)`).join(" + ")}.`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Không thể phân tích các file Excel.";
+      const objectMessage = error && typeof error === "object" && "message" in error ? String(error.message || "") : "";
+      const message = error instanceof Error ? error.message : objectMessage || "Không thể phân tích các file Excel.";
       setFinanceSyncError(message);
       window.alert(message);
     } finally {
