@@ -4,7 +4,7 @@ export type CloudReceipt = { name: string; dataUrl?: string; path?: string };
 export type CloudHistory = { id: string; at: string; action: "created" | "updated"; changes: unknown[] };
 export type CloudItem = { id: string; name: string; category: string; brand: string; unit: string; quantity: number; specification: string; unitCost: number; purchasedOn: string; supplier: string; receiptCode?: string; receipt?: CloudReceipt; history: CloudHistory[] };
 export type CloudLotMeta = { expiresOn: string; shelfLifeHours?: number; storageLocation: string };
-export type CloudActiveSession = { id: string; sourceReceiptId: string; ingredientKey: string; activatedAt: string; useBy?: string; status: "active" | "used" | "wasted"; closedAt?: string; reason: string; note?: string };
+export type CloudActiveSession = { id: string; sourceReceiptId: string; ingredientKey: string; activatedAt: string; costRecognitionMonth?: string; useBy?: string; status: "active" | "used" | "wasted"; closedAt?: string; reason: string; note?: string };
 export type CloudInventoryState = { items: CloudItem[]; lotMeta: Record<string, CloudLotMeta>; activeSessions: CloudActiveSession[]; lifecycleReady: boolean };
 
 function requireClient() { if (!supabase) throw new Error("Supabase chưa được cấu hình."); return supabase; }
@@ -28,7 +28,7 @@ export async function loadInventory(): Promise<CloudInventoryState> {
     const receipt = row.receipt_path ? await client.storage.from("bills").createSignedUrl(row.receipt_path, 3600) : { data: null };
     return { id: row.id, name: row.name, category: row.category, brand: row.brand, unit: row.unit, quantity: Number(row.total_quantity), specification: row.specification, unitCost: Number(row.unit_cost), purchasedOn: row.purchased_on, supplier: row.supplier, receiptCode: row.receipt_code || undefined, receipt: row.receipt_path ? { name: row.receipt_name || "Hóa đơn", path: row.receipt_path, dataUrl: receipt.data?.signedUrl } : undefined, history: histories.get(row.id) || [] };
   }));
-  const activeSessions: CloudActiveSession[] = (activeRows || []).map((row) => ({ id: row.id, sourceReceiptId: row.source_receipt_id, ingredientKey: row.ingredient_key, activatedAt: row.activated_at, useBy: row.use_by || undefined, status: row.status, closedAt: row.closed_at || undefined, reason: row.reason, note: row.note || undefined }));
+  const activeSessions: CloudActiveSession[] = (activeRows || []).map((row) => ({ id: row.id, sourceReceiptId: row.source_receipt_id, ingredientKey: row.ingredient_key, activatedAt: row.activated_at, costRecognitionMonth: row.cost_recognition_month ? String(row.cost_recognition_month).slice(0, 7) : undefined, useBy: row.use_by || undefined, status: row.status, closedAt: row.closed_at || undefined, reason: row.reason, note: row.note || undefined }));
   return { items, lotMeta, activeSessions, lifecycleReady };
 }
 
@@ -53,13 +53,25 @@ export async function saveInventory(item: CloudItem, event: CloudHistory, file?:
 }
 
 export async function createActiveSession(activeSession: CloudActiveSession) {
-  const { error } = await requireClient().from("inventory_active_sessions").insert({ id: activeSession.id, source_receipt_id: activeSession.sourceReceiptId, ingredient_key: activeSession.ingredientKey, activated_at: activeSession.activatedAt, use_by: activeSession.useBy || null, status: activeSession.status, closed_at: activeSession.closedAt || null, reason: activeSession.reason, note: activeSession.note || null });
-  if (error) throw error;
+  const client = requireClient();
+  const row = { id: activeSession.id, source_receipt_id: activeSession.sourceReceiptId, ingredient_key: activeSession.ingredientKey, activated_at: activeSession.activatedAt, cost_recognition_month: activeSession.costRecognitionMonth ? `${activeSession.costRecognitionMonth}-01` : activeSession.activatedAt.slice(0, 7) + "-01", use_by: activeSession.useBy || null, status: activeSession.status, closed_at: activeSession.closedAt || null, reason: activeSession.reason, note: activeSession.note || null };
+  let result = await client.from("inventory_active_sessions").insert(row);
+  if (result.error?.code === "PGRST204" && result.error.message.includes("cost_recognition_month")) {
+    const { cost_recognition_month: _costRecognitionMonth, ...legacyRow } = row;
+    result = await client.from("inventory_active_sessions").insert(legacyRow);
+  }
+  if (result.error) throw result.error;
 }
 
 export async function updateActiveSession(activeSession: CloudActiveSession) {
-  const { error } = await requireClient().from("inventory_active_sessions").update({ ingredient_key: activeSession.ingredientKey, use_by: activeSession.useBy || null, status: activeSession.status, closed_at: activeSession.closedAt || null, reason: activeSession.reason, note: activeSession.note || null, updated_at: new Date().toISOString() }).eq("id", activeSession.id);
-  if (error) throw error;
+  const client = requireClient();
+  const row = { ingredient_key: activeSession.ingredientKey, cost_recognition_month: activeSession.costRecognitionMonth ? `${activeSession.costRecognitionMonth}-01` : activeSession.activatedAt.slice(0, 7) + "-01", use_by: activeSession.useBy || null, status: activeSession.status, closed_at: activeSession.closedAt || null, reason: activeSession.reason, note: activeSession.note || null, updated_at: new Date().toISOString() };
+  let result = await client.from("inventory_active_sessions").update(row).eq("id", activeSession.id);
+  if (result.error?.code === "PGRST204" && result.error.message.includes("cost_recognition_month")) {
+    const { cost_recognition_month: _costRecognitionMonth, ...legacyRow } = row;
+    result = await client.from("inventory_active_sessions").update(legacyRow).eq("id", activeSession.id);
+  }
+  if (result.error) throw result.error;
 }
 
 export async function migrateLocalLifecycle(lotMeta: Record<string, CloudLotMeta>, activeSessions: CloudActiveSession[]) {
@@ -69,8 +81,12 @@ export async function migrateLocalLifecycle(lotMeta: Record<string, CloudLotMeta
     if (error) throw error;
   }
   if (activeSessions.length) {
-    const { error } = await client.from("inventory_active_sessions").upsert(activeSessions.map((activeSession) => ({ id: activeSession.id, source_receipt_id: activeSession.sourceReceiptId, ingredient_key: activeSession.ingredientKey, activated_at: activeSession.activatedAt, use_by: activeSession.useBy || null, status: activeSession.status, closed_at: activeSession.closedAt || null, reason: activeSession.reason, note: activeSession.note || null })));
-    if (error) throw error;
+    const rows = activeSessions.map((activeSession) => ({ id: activeSession.id, source_receipt_id: activeSession.sourceReceiptId, ingredient_key: activeSession.ingredientKey, activated_at: activeSession.activatedAt, cost_recognition_month: activeSession.costRecognitionMonth ? `${activeSession.costRecognitionMonth}-01` : activeSession.activatedAt.slice(0, 7) + "-01", use_by: activeSession.useBy || null, status: activeSession.status, closed_at: activeSession.closedAt || null, reason: activeSession.reason, note: activeSession.note || null }));
+    let result = await client.from("inventory_active_sessions").upsert(rows);
+    if (result.error?.code === "PGRST204" && result.error.message.includes("cost_recognition_month")) {
+      result = await client.from("inventory_active_sessions").upsert(rows.map(({ cost_recognition_month: _costRecognitionMonth, ...row }) => row));
+    }
+    if (result.error) throw result.error;
   }
 }
 

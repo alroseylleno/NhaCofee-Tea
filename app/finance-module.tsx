@@ -27,6 +27,7 @@ export type FinanceInventorySession = {
   id: string;
   sourceReceiptId: string;
   activatedAt: string;
+  costRecognitionMonth?: string;
   status: "active" | "used" | "wasted";
   closedAt?: string;
   reason: string;
@@ -496,7 +497,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     const lot = inventoryLots.find((entry) => entry.id === session.sourceReceiptId);
     if (!lot) return [];
     const events: Array<{ id: string; date: string; lot: FinanceInventoryLot; amount: number; kind: "cogs" | "waste"; reason: string }> = [];
-    const activatedOn = session.activatedAt.slice(0, 10);
+    const activatedOn = session.costRecognitionMonth ? `${session.costRecognitionMonth}-01` : session.activatedAt.slice(0, 10);
     if (inRange(activatedOn, bounds)) events.push({ id: `${session.id}-cogs`, date: activatedOn, lot, amount: lot.unitCost, kind: "cogs", reason: session.reason });
     const wastedOn = session.status === "wasted" ? session.closedAt?.slice(0, 10) : undefined;
     if (wastedOn && inRange(wastedOn, bounds)) events.push({ id: `${session.id}-waste`, date: wastedOn, lot, amount: lot.unitCost, kind: "waste", reason: session.reason });
@@ -556,11 +557,11 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const netCash = cashIn - cashOut;
 
   const openingInventory = inventoryLots.filter((lot) => lot.purchasedOn < bounds.start).reduce((sum, lot) => {
-    const issuedBefore = inventorySessions.filter((session) => session.sourceReceiptId === lot.id && session.activatedAt.slice(0, 10) < bounds.start).length;
+    const issuedBefore = inventorySessions.filter((session) => session.sourceReceiptId === lot.id && (session.costRecognitionMonth ? `${session.costRecognitionMonth}-01` : session.activatedAt.slice(0, 10)) < bounds.start).length;
     return sum + Math.max(0, lot.quantity - issuedBefore) * lot.unitCost;
   }, 0);
   const closingInventory = inventoryLots.filter((lot) => lot.purchasedOn <= bounds.end).reduce((sum, lot) => {
-    const issuedByEnd = inventorySessions.filter((session) => session.sourceReceiptId === lot.id && session.activatedAt.slice(0, 10) <= bounds.end).length;
+    const issuedByEnd = inventorySessions.filter((session) => session.sourceReceiptId === lot.id && (session.costRecognitionMonth ? `${session.costRecognitionMonth}-01` : session.activatedAt.slice(0, 10)) <= bounds.end).length;
     return sum + Math.max(0, lot.quantity - issuedByEnd) * lot.unitCost;
   }, 0);
 
