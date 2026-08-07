@@ -25,10 +25,16 @@
 .inventory-views { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin: 18px 0 -4px; padding: 4px; border-radius: 11px; background: #edf0e9; }
 .inventory-views button { padding: 9px; border: 0; border-radius: 8px; color: var(--muted); background: transparent; font: 700 12px Arial, sans-serif; }
 .inventory-views button.selected { color: var(--ink); background: #fff; box-shadow: 0 1px 4px #17312b18; }
-.inventory-category-tabs { display: flex; gap: 7px; margin: 14px -16px -3px; padding: 0 16px 4px; overflow-x: auto; scrollbar-width: none; }
-.inventory-category-tabs::-webkit-scrollbar { display: none; }
+.inventory-category-tabs { display: flex; gap: 7px; margin: 14px -16px -3px; padding: 0 16px 8px; overflow-x: auto; scrollbar-color: #9eaa9c #edf0e9; scrollbar-width: thin; }
+.inventory-category-tabs::-webkit-scrollbar { height: 6px; }
+.inventory-category-tabs::-webkit-scrollbar-track { border-radius: 99px; background: #edf0e9; }
+.inventory-category-tabs::-webkit-scrollbar-thumb { border-radius: 99px; background: #9eaa9c; }
 .inventory-category-tabs button { flex: 0 0 auto; padding: 8px 11px; border: 1px solid #d9ddd4; border-radius: 99px; color: var(--muted); background: #f7f8f3; font: 700 11px Arial, sans-serif; white-space: nowrap; }
 .inventory-category-tabs button.selected { border-color: var(--pine); color: #fff; background: var(--pine); box-shadow: 0 2px 6px #1e4b3f25; }
+.inventory-search-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; margin-top: 19px; }
+.inventory-search-controls .search { margin: 0; }
+.inventory-sort { display: grid; gap: 4px; color: var(--muted); font: 700 10px Arial, sans-serif; }
+.inventory-sort select { max-width: 138px; padding: 11px 8px; border: 1px solid var(--line); border-radius: 11px; outline: 0; color: var(--ink); background: #fbfaf5; font: 700 11px Arial, sans-serif; }
 
 /* Keep the stock status compact: sealed, active, and loss read as one line. */
 .ingredient-summary { grid-template-columns: minmax(0, 1fr); gap: 11px; padding-right: 42px; }
@@ -67,6 +73,7 @@
 .inventory-export-button:disabled { cursor: default; opacity: .45; }
 @media (max-width: 390px) { .inventory-actions { max-width: 155px; } .inventory-import-button, .inventory-export-button { padding: 6px 7px; font-size: 8px; } }
 @media (max-width: 440px) { .summary-counts { gap: 5px; } .summary-counts span { font-size: 9px; } .summary-name b { font-size: 13px; } }
+@media (max-width: 360px) { .inventory-search-controls { grid-template-columns: 1fr; } .inventory-sort select { max-width: none; width: 100%; } }
 
 .hero-row { min-height: 96px; }
 .hero-logo { flex: 0 0 156px; height: 90px; overflow: hidden; margin-top: -25px; margin-right: -10px; }
