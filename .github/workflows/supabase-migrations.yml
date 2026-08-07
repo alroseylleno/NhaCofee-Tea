@@ -29,7 +29,9 @@ jobs:
           test -n "$SUPABASE_DB_PASSWORD" || (echo "Missing SUPABASE_DB_PASSWORD repository secret." && exit 1)
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          # v2.112.0 rejects valid API-key timestamps returned by the Management API.
+          # Keep this pinned until the upstream link regression is fixed.
+          version: 2.111.0
       - name: Link production project
         run: supabase link --project-ref "$PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
       - name: Baseline manually applied migrations
