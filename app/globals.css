@@ -25,6 +25,48 @@
 .inventory-views { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin: 18px 0 -4px; padding: 4px; border-radius: 11px; background: #edf0e9; }
 .inventory-views button { padding: 9px; border: 0; border-radius: 8px; color: var(--muted); background: transparent; font: 700 12px Arial, sans-serif; }
 .inventory-views button.selected { color: var(--ink); background: #fff; box-shadow: 0 1px 4px #17312b18; }
+.inventory-category-tabs { display: flex; gap: 7px; margin: 14px -16px -3px; padding: 0 16px 4px; overflow-x: auto; scrollbar-width: none; }
+.inventory-category-tabs::-webkit-scrollbar { display: none; }
+.inventory-category-tabs button { flex: 0 0 auto; padding: 8px 11px; border: 1px solid #d9ddd4; border-radius: 99px; color: var(--muted); background: #f7f8f3; font: 700 11px Arial, sans-serif; white-space: nowrap; }
+.inventory-category-tabs button.selected { border-color: var(--pine); color: #fff; background: var(--pine); box-shadow: 0 2px 6px #1e4b3f25; }
+
+/* Keep the stock status compact: sealed, active, and loss read as one line. */
+.ingredient-summary { grid-template-columns: minmax(0, 1fr); gap: 11px; padding-right: 42px; }
+.summary-counts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; min-width: 0; }
+.summary-counts span { min-width: 0; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.summary-counts b { font-size: 14px; }
+.conversion-fieldset { margin: 18px 0 14px; padding: 13px; border: 1px dashed #b8c9b7; border-radius: 12px; background: #f6faf3; }
+.conversion-fieldset legend { padding: 0 4px; color: var(--pine); font: 700 12px Arial, sans-serif; }
+.conversion-fieldset legend small { color: var(--muted); font-weight: 400; }
+.conversion-fieldset > p { margin: 0 0 2px; color: var(--muted); font: 11px/1.45 Arial, sans-serif; }
+.conversion-fieldset label { margin-bottom: 0; }
+.field-hint { display: inline-flex; gap: 5px; align-items: center; }
+.field-help { position: relative; display: inline-grid; place-items: center; width: 16px; height: 16px; padding: 0; border: 1px solid #8ea596; border-radius: 50%; color: var(--pine); background: #f4f8f0; font: 700 10px Arial, sans-serif; line-height: 1; }
+.field-help::after { position: absolute; z-index: 8; bottom: calc(100% + 8px); left: 50%; display: none; width: min(230px, 66vw); padding: 9px 10px; border-radius: 9px; color: #f7f4eb; background: #1c332b; box-shadow: 0 6px 18px #10251f44; content: attr(data-tooltip); font: 400 11px/1.4 Arial, sans-serif; text-align: left; transform: translateX(-50%); }
+.field-help:hover::after, .field-help:focus-visible::after { display: block; }
+
+.inventory-value-metric > div { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+.inventory-value-metric section { min-width: 0; padding: 10px; border: 1px solid #4d7668; border-radius: 11px; background: #102f2899; }
+.inventory-value-metric section small { min-height: 27px; font-size: 10px; line-height: 1.3; }
+.inventory-value-metric section strong { overflow: hidden; margin-top: 5px; font-size: clamp(14px, 4.5vw, 20px); text-overflow: ellipsis; white-space: nowrap; }
+.inventory-value-metric > small { margin-top: 9px; }
+.ingredient-summary { display: grid; gap: 8px; padding: 11px; }
+.ingredient-summary-main { min-width: 0; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; }
+.summary-name { display: flex; min-width: 0; gap: 4px; align-items: baseline; overflow: hidden; white-space: nowrap; }
+.summary-name b { overflow: hidden; color: var(--ink); font: 700 14px Arial, sans-serif; text-overflow: ellipsis; }
+.summary-name small { overflow: hidden; color: var(--muted); font: 10px Arial, sans-serif; text-overflow: ellipsis; }
+.summary-footer { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.summary-counts { display: flex; flex: 1; gap: 8px; min-width: 0; overflow: hidden; }
+.summary-counts span { overflow: hidden; color: var(--muted); font: 10px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+.summary-counts b { color: var(--ink); font-size: inherit; }
+.copy-lot-button { flex: 0 0 auto; padding: 7px 8px; border: 1px solid #c4d3c3; border-radius: 8px; color: var(--pine); background: var(--soft); font: 700 10px Arial, sans-serif; }
+.copy-lot-button:active { transform: scale(.96); }
+.inventory-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.inventory-import-button, .inventory-export-button { display: grid; place-items: center; min-height: 31px; padding: 7px 8px; border: 1px solid #c4d3c3; border-radius: 8px; color: var(--pine); background: var(--soft); font: 700 9px Arial, sans-serif; white-space: nowrap; }
+.inventory-import-button input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); opacity: 0; }
+.inventory-export-button:disabled { cursor: default; opacity: .45; }
+@media (max-width: 390px) { .inventory-actions { max-width: 155px; } .inventory-import-button, .inventory-export-button { padding: 6px 7px; font-size: 8px; } }
+@media (max-width: 440px) { .summary-counts { gap: 5px; } .summary-counts span { font-size: 9px; } .summary-name b { font-size: 13px; } }
 
 .hero-row { min-height: 96px; }
 .hero-logo { flex: 0 0 156px; height: 90px; overflow: hidden; margin-top: -25px; margin-right: -10px; }
