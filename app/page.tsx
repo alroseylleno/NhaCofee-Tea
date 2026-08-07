@@ -142,6 +142,7 @@ export default function Home() {
   const [session, setSession] = useState<Session | null>(null);
   const [uatAuthenticated, setUatAuthenticated] = useState(false);
   const [isLocalUat, setIsLocalUat] = useState(DEFAULT_LOCAL_UAT);
+  const [runtimeModeReady, setRuntimeModeReady] = useState(DEFAULT_LOCAL_UAT);
   const [loginEmail, setLoginEmail] = useState(DEFAULT_LOCAL_UAT ? "UAT" : "");
   const [loginPassword, setLoginPassword] = useState(DEFAULT_LOCAL_UAT ? "Giang21c" : "");
   const [authError, setAuthError] = useState("");
@@ -230,14 +231,17 @@ export default function Home() {
     } finally { setLoaded(true); }
   }
   useEffect(() => {
-    const isLocalHost = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
-    if (isLocalHost && !isLocalUat) {
+    const hostname = window.location.hostname.toLocaleLowerCase();
+    const isUatHost = ["localhost", "127.0.0.1", "::1"].includes(hostname) || hostname.includes("-uat");
+    if (isUatHost) {
       setIsLocalUat(true);
       setLoginEmail("UAT");
       setLoginPassword("Giang21c");
     }
-  }, [isLocalUat]);
+    setRuntimeModeReady(true);
+  }, []);
   useEffect(() => {
+    if (!runtimeModeReady) return;
     if (isLocalUat) {
       loadLocalUatInventory();
       setUatAuthenticated(window.sessionStorage.getItem(LOCAL_UAT_AUTH_KEY) === "authenticated");
@@ -246,7 +250,7 @@ export default function Home() {
     if (!isSupabaseConfigured || !supabase) { const stored = window.localStorage.getItem(STORAGE_KEY); if (stored) setItems(safeItems(JSON.parse(stored))); setActiveSessions(JSON.parse(window.localStorage.getItem(ACTIVE_STORAGE_KEY) || "[]")); setLotMeta(JSON.parse(window.localStorage.getItem(LOT_META_STORAGE_KEY) || "{}")); setLoaded(true); return; }
     supabase.auth.getSession().then(({ data }) => { setSession(data.session); if (data.session) refreshCloud(); else setLoaded(true); });
     return supabase.auth.onAuthStateChange((_event, nextSession) => { setSession(nextSession); if (nextSession) refreshCloud(); }).data.subscription.unsubscribe;
-  }, [isLocalUat]);
+  }, [isLocalUat, runtimeModeReady]);
   useEffect(() => { if (loaded && (isLocalUat || !isSupabaseConfigured)) window.localStorage.setItem(isLocalUat ? LOCAL_UAT_STORAGE_KEY : STORAGE_KEY, JSON.stringify(items)); }, [items, loaded]);
   useEffect(() => { if (loaded && !cloudLifecycleReady) window.localStorage.setItem(isLocalUat ? LOCAL_UAT_ACTIVE_STORAGE_KEY : ACTIVE_STORAGE_KEY, JSON.stringify(activeSessions)); }, [activeSessions, loaded, cloudLifecycleReady]);
   useEffect(() => { if (loaded && !cloudLifecycleReady) window.localStorage.setItem(isLocalUat ? LOCAL_UAT_META_STORAGE_KEY : LOT_META_STORAGE_KEY, JSON.stringify(lotMeta)); }, [lotMeta, loaded, cloudLifecycleReady]);
@@ -611,6 +615,7 @@ export default function Home() {
     link.href = url; link.download = `bao-cao-nhap-kho-${new Date().toISOString().slice(0, 10)}.xls`; document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
   }
 
+  if (!runtimeModeReady) return <main className="login" />;
   if ((isLocalUat && !uatAuthenticated) || (!isLocalUat && isSupabaseConfigured && !session)) return <main className="login">
     <section className="login-visual">
       <div className="login-brand"><Image src="/nha-coffee-logo-transparent.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div>
