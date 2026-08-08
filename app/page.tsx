@@ -182,7 +182,7 @@ export default function Home() {
   const [sort, setSort] = useState<{ key: SortKey; direction: "asc" | "desc" }>({ key: "purchasedOn", direction: "desc" });
   const [loaded, setLoaded] = useState(false);
   const [deletingId, setDeletingId] = useState<string | undefined>();
-  const canDeleteInventory = isLocalUat || session?.user.email?.toLocaleLowerCase() === "cfo@nhacoffeentea.com";
+  const canDeleteInventory = isLocalUat || Boolean(session);
   const canAccessFinance = isLocalUat ? uatAuthenticated : !isSupabaseConfigured || Boolean(session);
 
   function loadLocalUatInventory() {
@@ -380,7 +380,7 @@ export default function Home() {
   async function returnToStock(session: ActiveSession) {
     if (!canDeleteInventory || !window.confirm("Trả đơn vị này về trạng thái tồn kho?")) return;
     if (isLocalUat) { setActiveSessions((current) => current.filter((activeSession) => activeSession.id !== session.id)); return; }
-    if (!cloudLifecycleReady || !session) { window.alert("Không thể xác nhận phiên CFO. Vui lòng tải lại trang và đăng nhập lại."); return; }
+    if (!cloudLifecycleReady || !session) { window.alert("Không thể xác nhận phiên đăng nhập. Vui lòng tải lại trang và đăng nhập lại."); return; }
     try { await removeActiveSession(session.id); await refreshCloud(); }
     catch (error) { await refreshCloud(); window.alert(error instanceof Error ? error.message : "Không thể trả nguyên liệu về tồn kho."); }
   }
@@ -447,7 +447,7 @@ export default function Home() {
   }
   async function removeItem(id: string) {
     if (!canDeleteInventory) {
-      window.alert("Chỉ tài khoản CFO mới có quyền xóa lô nhập kho.");
+      window.alert("Vui lòng đăng nhập để xóa lô nhập kho.");
       return;
     }
     if (takenFromLot(id) > 0) {
