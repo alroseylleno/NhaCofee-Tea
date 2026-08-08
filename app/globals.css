@@ -59,9 +59,9 @@
 .inventory-value-metric > small { margin-top: 9px; }
 .ingredient-summary { display: grid; gap: 8px; padding: 11px; }
 .ingredient-summary-main { min-width: 0; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; }
-.summary-name { display: flex; min-width: 0; gap: 4px; align-items: baseline; overflow: hidden; white-space: nowrap; }
-.summary-name b { overflow: hidden; color: var(--ink); font: 700 14px Arial, sans-serif; text-overflow: ellipsis; }
-.summary-name small { overflow: hidden; color: var(--muted); font: 10px Arial, sans-serif; text-overflow: ellipsis; }
+.summary-name { display: grid; min-width: 0; gap: 3px; }
+.summary-name b { color: var(--ink); font: 700 14px/1.25 Arial, sans-serif; overflow-wrap: anywhere; }
+.summary-name small { overflow: hidden; color: var(--muted); font: 10px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
 .summary-footer { display: flex; gap: 8px; align-items: center; min-width: 0; }
 .summary-counts { display: flex; flex: 1; gap: 6px; min-width: 0; overflow: hidden; }
 .summary-counts span { overflow: hidden; color: var(--muted); font: 10px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
