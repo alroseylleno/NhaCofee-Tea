@@ -1,20 +1,27 @@
-# Nhà Ops - Phần 1: Nhập kho NVL
+# Nhà Ops
 
-Web app mobile-first để ghi nhận mỗi lần nhập nguyên vật liệu: tên, số lượng, đơn vị, đơn giá, ngày mua, nhà cung cấp và ảnh/PDF hóa đơn.
+Web app mobile-first cho Kho NVL và Tài chính của Nhà Coffee & Tea. Production chạy trên Vercel, dùng Supabase cho dữ liệu dùng chung; localhost/UAT dùng kho dữ liệu trình duyệt tách biệt để kiểm thử.
+
+## Code map
+
+Đọc [`MOC.md`](./MOC.md) trước khi sửa code. File này định tuyến chức năng đến đúng UI, data store, Supabase migration và checklist UAT/Production.
 
 ## Chạy local
 
 ```bash
 npm install
-npm run dev
+npm run dev -- -p 3001
 ```
 
-Mở `http://localhost:3000`.
+Mở `http://localhost:3001`.
 
-## Lưu ý dữ liệu
+## Ranh giới dữ liệu
 
-Phiên bản đầu lưu dữ liệu và file đính kèm trong `localStorage` của trình duyệt hiện tại để có thể chạy ngay trên Vercel Free mà chưa cần database. Không dùng đây làm dữ liệu kế toán chính thức hoặc dữ liệu chia sẻ giữa nhân viên.
+- Localhost và hostname có `-uat` dùng local storage riêng, không ghi vào Production Supabase.
+- Production dùng Supabase Auth, Postgres và Storage.
+- Không đưa dữ liệu mẫu/nút reset UAT lên Production.
+- Nếu thay đổi schema/RLS/RPC, tạo migration timestamp mới trong `supabase/migrations/`.
 
-## Bước deploy sau
+## Deploy
 
-Project tương thích Vercel. Khi cần nhiều thiết bị và lưu hóa đơn thật, phần tiếp theo là thay `localStorage` bằng Supabase (Postgres + Storage), rồi deploy từ Git repository lên Vercel Free.
+GitHub `main` tự động redeploy project Vercel hiện có. Migration Supabase mới được GitHub Actions áp dụng khi push thay đổi trong `supabase/migrations/` hoặc workflow migration.

@@ -32,7 +32,7 @@
 .inventory-category-tabs::-webkit-scrollbar-thumb { border-radius: 99px; background: #9eaa9c; }
 .inventory-category-tabs button { flex: 0 0 auto; padding: 8px 11px; border: 1px solid #d9ddd4; border-radius: 99px; color: var(--muted); background: #f7f8f3; font: 700 11px Arial, sans-serif; white-space: nowrap; }
 .inventory-category-tabs button.selected { border-color: var(--pine); color: #fff; background: var(--pine); box-shadow: 0 2px 6px #1e4b3f25; }
-.inventory-search-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; margin-top: 19px; }
+.inventory-search-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: flex-end; margin-top: 19px; }
 .inventory-search-controls .search { margin: 0; }
 .inventory-sort { display: grid; gap: 4px; color: var(--muted); font: 700 10px Arial, sans-serif; }
 .inventory-sort select { max-width: 138px; padding: 11px 8px; border: 1px solid var(--line); border-radius: 11px; outline: 0; color: var(--ink); background: #fbfaf5; font: 700 11px Arial, sans-serif; }
@@ -99,7 +99,7 @@
 .waste-reason span { color: #a54c37; font: 700 12px Arial, sans-serif; }
 .waste-reason small { color: var(--muted); font: 11px/1.4 Arial, sans-serif; }
 
-.module-switcher { position: relative; z-index: 6; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 7px; border-bottom: 1px solid #d8d1c4; background: #f4efe5; }
+.module-switcher { position: relative; z-index: 6; display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: 4px; padding: 7px; border-bottom: 1px solid #d8d1c4; background: #f4efe5; }
 .module-switcher button { padding: 10px; border: 1px solid transparent; border-radius: 9px; color: #777269; background: transparent; font: 700 12px Arial, sans-serif; }
 .module-switcher button.active { border-color: #d7cdbb; color: #1a1a17; background: #fffdf8; box-shadow: 0 1px 5px #26221812; }
 .uat-local-banner { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 9px 16px; border-bottom: 1px solid #ead5a2; color: #765524; background: #fff7df; font: 10px/1.4 Arial, sans-serif; }

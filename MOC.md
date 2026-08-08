@@ -1,0 +1,202 @@
+# Nha Ops - Code Map
+
+> Last reviewed: 2026-08-09
+> Production branch: `main`
+> GitHub: `alroseylleno/NhaCofee-Tea`
+
+This is the mandatory routing map for code changes in `Operations/nha-ops/`. Read it before editing. Update it whenever a change adds a module, moves ownership between files, changes a data contract, adds a Supabase migration, or changes the UAT/Production boundary.
+
+## Current State
+
+- Production `main`: commit `7c1f6c5` (`feat: allow authenticated inventory deletion`).
+- Production deploy: Vercel tracks `main`; a normal Git push should redeploy the existing Vercel project.
+- Production inventory and finance Excel imports use Supabase.
+- Localhost and `-uat` hosts use isolated browser storage for UAT inventory. They must not write to Production Supabase.
+- Product Master source is shipped with the three-module workspace, but its UI and browser-local data remain deliberately gated to Local/UAT. Production navigation and persistence are not enabled yet.
+
+## Start Here
+
+| Change requested | Primary file | Supporting files | Data impact |
+|---|---|---|---|
+| Kho NVL UI, forms, category tabs, inventory cards, active lifecycle, reports | `app/page.tsx` | `app/globals.css` | Check `lib/inventory-store.ts`; add migration only for schema changes |
+| Inventory Supabase read/write, receipts, lifecycle sessions | `lib/inventory-store.ts` | `lib/supabase.ts` | `inventory_receipts`, `inventory_history`, `inventory_active_sessions`, Storage bucket `bills` |
+| Finance entry, revenue imports, reports, dashboard | `app/finance-module.tsx` | `app/finance.module.css`, `lib/finance-store.ts` | Finance import tables/RPCs; UAT local storage stays isolated |
+| Finance Excel persistence and replace-latest logic | `lib/finance-store.ts` | `app/finance-module.tsx` | `finance_imports`, `finance_revenue_rows`, `finance_product_rows`, `finance_service_rows` |
+| Product Master, ingredient master, recipes, theoretical COGS | `app/product-master.tsx` | `app/product-master.module.css`, `lib/master-data.ts` | Local/UAT browser storage; migration `20260805000100_cfo_master_data_foundation.sql` provisions the future Production tables |
+| Global mobile shell, login, shared inventory styling | `app/page.tsx` | `app/globals.css`, `public/` | UI-only unless fields/data contracts change |
+| Supabase client/environment variables | `lib/supabase.ts` | `.env.local`, Vercel environment variables | Never expose service-role or database credentials in browser code |
+| Database schema, RLS, RPCs, triggers | `supabase/migrations/` | `.github/workflows/supabase-migrations.yml` | Always add a new timestamped migration; never rewrite an applied migration |
+| Deployment/migration automation | `.github/workflows/supabase-migrations.yml` | `supabase/README.md` | Runs only when migrations/workflow change on `main` |
+
+## Runtime Map
+
+```text
+app/page.tsx
+  |- Authentication and runtime UAT/Prod detection
+  |- Kho NVL state, forms, lifecycle and reports
+  |- FinanceModule props from inventory lots/sessions
+  `- ProductMaster props when the Local/UAT workspace is enabled
+
+lib/inventory-store.ts <-> Supabase inventory tables + bills storage
+app/finance-module.tsx <-> lib/finance-store.ts <-> Supabase finance tables/RPCs
+app/product-master.tsx <-> lib/master-data.ts <-> future master-data persistence
+```
+
+There are no Next.js API routes. The client talks directly to Supabase using the publishable key and relies on Auth plus RLS.
+
+## Kho NVL Map
+
+### `app/page.tsx`
+
+Owns:
+
+- Inventory domain types used by the UI: `Ingredient`, `LotMeta`, `ActiveSession`, history and form types.
+- Local UAT seed data and local-storage keys.
+- UAT host detection: development, `localhost`, loopback hosts and hostnames containing `-uat`.
+- Login shell and module navigation.
+- Kho NVL tabs: inventory, active, report.
+- Stock/used-up views, category quick filters, search and sorting.
+- Category normalization: categories are uppercased and case-only duplicates collapse into one category.
+- Add/edit/copy/delete flows, invoice attachment UI, Excel import/export.
+- Sealed/active/used/wasted calculations and deletion guardrails.
+- Open-for-use flow, cost-recognition month, expiry-after-opening and waste closeout.
+
+When changing an inventory field, inspect all of these paths together:
+
+1. `Ingredient` and `FormValues` types.
+2. `safeItems()` compatibility normalization.
+3. Add/edit/copy form initialization.
+4. `saveIngredient()` and history diff generation.
+5. Excel import and Excel export columns.
+6. `lib/inventory-store.ts` row mapping.
+7. Supabase migration if a new database column is required.
+8. Detail drawer and report table display.
+
+### Inventory identity and quantity rules
+
+- A lot is identified by its `id`; receipt code is the human-facing import/update key.
+- Product grouping uses normalized name, brand, unit and specification.
+- Sealed quantity is total lot quantity minus every unit ever issued to an active session.
+- An active session has status `active`, `used`, or `wasted`.
+- A lot/receipt cannot be deleted after any unit has been issued, regardless of current active count.
+- Fully depleted groups move from `Tồn kho` to `Dùng hết` when sealed quantity and active quantity both reach zero.
+- Cost recognition uses `costRecognitionMonth`; operational opening time remains `activatedAt`.
+
+## Finance Map
+
+### `app/finance-module.tsx`
+
+Owns expense forms, period filters, Excel parsing, report/dashboard calculations and inventory-linked COGS/waste views. Current tabs are expense entry, revenue, financial report and dashboard.
+
+Important boundaries:
+
+- UAT finance data uses UAT-specific browser storage.
+- Production Excel imports load from and replace the latest matching datasets in Supabase.
+- Importing a new dataset replaces that dataset through database RPCs; it must not silently clear unrelated inventory or expense data.
+- Inventory costs use sessions and their recognition month, not merely the browser's current month.
+
+### `lib/finance-store.ts`
+
+Maps Supabase rows into revenue, product and service records and calls replace-import RPCs. If an import fails with missing table/function/schema cache errors, verify migrations before changing UI parsing.
+
+## Product Master
+
+The following files implement the current UAT-only Product Master workspace. Their source is present on `main`, while the runtime remains local/UAT-only until Production persistence is deliberately enabled:
+
+- `app/product-master.tsx`
+- `app/product-master.module.css`
+- `lib/master-data.ts`
+- `supabase/migrations/20260805000100_cfo_master_data_foundation.sql`
+- Integration edits also overlap `app/page.tsx`, `app/globals.css` and `app/finance-module.tsx`; use partial staging for unrelated fixes instead of staging these whole files.
+
+Current UAT data contract:
+
+- Product Master is rendered only when `isLocalUat` is true; Production has no Product Master navigation or runtime persistence.
+- Browser storage uses `nha-ops-master-data-uat-v3`; legacy v2/v1 data is normalized and migrated on load. V3 removes Mapping entities from the Product Master state contract.
+- Finance UAT product imports merge directly into Product Master by normalized SKU; the Product Master UI no longer exposes or requires a Mapping workflow.
+- Kho NVL lots feed Ingredient Master automatically with sealed-stock quantity, usable conversion, latest purchase price and a source-lot link for traceability.
+- Ingredient Master has no manual activation queue. Inventory ingredients are available to recipes as soon as they have appeared in Kho NVL, including historical out-of-stock options.
+- Multiple lots with the same name, category and brand are aggregated. Recipe selection prefers an in-stock ingredient whose oldest sealed lot has the earliest purchase date (FIFO), while theoretical cost keeps the latest purchase price.
+- Recipe edits stay only in the open screen until saved. `Lưu công thức` automatically creates the next immutable version and archives the prior version; there is no recipe activation action.
+- The UAT navigation label is `Sản phẩm`. It has three workspaces: Overview dashboard, waiting queue, and the combined Product/COGS catalog. The standalone Ingredient tab is intentionally removed; ingredients remain internal recipe choices sourced from Kho NVL.
+- Every SKU is normalized to `active` automatically on create, Finance merge and legacy local-data migration. SKU and recipe activation are not user workflows; saved recipes use the newest version automatically while prior versions remain archived for history.
+- The Overview dashboard combines theoretical COGS, gross-margin and inventory-capacity metrics with horizontal Top 5 charts for highest-cost and lowest-cost products, plus Top Items and Top Categories from the latest Finance product import.
+- The waiting queue is inventory-driven: an out-of-stock ingredient referenced by a recipe is flagged with in-stock replacement candidates from the same category and compatible unit family. Product recipe rows expose the same direct `Thay thế` action when an ingredient is red/out of stock.
+- Replacing or deleting an out-of-stock ingredient, or adding a new ingredient, updates the open local recipe draft only. Saving is the single action that creates the new formula version.
+- Product and theoretical COGS now share one catalog. Each recipe calculates an estimated serving capacity from current sealed inventory; the minimum ingredient capacity is the limiting number of cups.
+- Kho NVL category quick filters display the number of matching grouped ingredients after the current stock-state and search filters are applied. A custom Category remains uppercase while typing and accepts spaces; all `Khác` inputs preserve user-entered spaces and normalize only when persisted where applicable.
+- Product, ingredient and recipe changes append browser-local audit events for UAT traceability.
+- UAT reset and completed-sample controls are intentionally unavailable outside local/UAT.
+
+The intended chain is:
+
+```text
+Kho NVL lots -> Ingredient Master -> Recipe quantities -> Theoretical product COGS
+Finance product imports -> Product Master -> Product profitability
+```
+
+Do not stage these files in an unrelated Kho NVL hotfix. The current browser-local v3 model is not a Production persistence design. Before enabling Product Master in Production, separately verify the Supabase persistence implementation, RLS scope, finance integration and Production data safety.
+
+## Supabase Map
+
+| Area | Tables/functions | Key migrations |
+|---|---|---|
+| Inventory receipts/history | `inventory_receipts`, `inventory_history` | `20260701000000`, `20260701000001` |
+| Inventory lifecycle | `inventory_active_sessions`; expiry/storage fields | `20260728000000` |
+| Inventory deletion guardrails | authenticated-user RLS, active-session FK behavior and return-to-stock deletion | `20260728000100`, `20260808000200`, `20260809000100` |
+| Receipt codes | receipt code column, daily sequence, trigger | `20260728000200` |
+| Historical test cleanup | destructive one-time cleanup | `20260728000300` |
+| Finance imports | finance import/row tables and replace RPCs | `20260804000100` through `20260804000300` |
+| Cost recognition month | `inventory_active_sessions.cost_recognition_month` | `20260805000200` |
+| Inventory conversion | conversion amount/unit fields | `20260807000100` |
+| CFO master-data foundation | stores, masters, recipes and finance facts | `20260805000100` - additive tables, broad authenticated RLS during rollout |
+
+Migration rules:
+
+- Add a new timestamped SQL file for every schema/RLS/RPC/data migration change.
+- Never edit an already-applied migration to represent a new change.
+- Never add a migration for a UI-only change.
+- Flag destructive SQL clearly and verify its exact Production scope before push.
+- GitHub Actions uses Supabase CLI `2.111.0`; the pin avoids the known `2.112.0` link regression.
+
+## UAT vs Production
+
+| Concern | Local/UAT | Production |
+|---|---|---|
+| Inventory store | Browser-local isolated keys | Supabase |
+| Finance sample data | UAT-only local keys | Must not load UAT samples |
+| Authentication | Local UAT credentials are prefilled in the local login | Supabase Auth account |
+| Reset/sample controls | Allowed | Forbidden |
+| Delete receipt / return active unit to stock | Allowed in local data | Any authenticated account; receipt deletion remains blocked after its first issue and RLS only permits deleting an `active` session to return it to stock |
+| Excel import | Local update for UAT testing | Supabase persistence for shared data |
+| Deployment | Localhost or `-uat` Vercel project | Vercel project tracking `main` |
+
+Any change touching runtime detection, storage keys, imports or seed data must be tested in both modes. Production must never inherit UAT sample/reset behavior.
+
+## Verification Checklist
+
+Before a local handoff:
+
+1. Run `npm run build`.
+2. Test the changed flow at `http://localhost:3001/` when the UAT server is running.
+3. Verify mobile widths, especially forms, quick filters, cards and financial KPI boxes.
+4. Confirm local UAT changes do not call Production Supabase.
+
+Before pushing `main`:
+
+1. Review `git status` and preserve unrelated dirty work.
+2. Stage only files in the approved scope.
+3. Run `git diff --cached --check` and inspect the staged diff.
+4. If schema changed, include and review a new migration; otherwise include no SQL.
+5. Run `npm run build`.
+6. Push `main`, then confirm Vercel deployment and migration workflow when applicable.
+7. Do not delete or reseed Production data unless Long explicitly requests the exact destructive action.
+
+## MOC Maintenance Rule
+
+When Long says `update memory`:
+
+1. Determine whether the conversation or completed work touched `Operations/nha-ops/`.
+2. If yes, update this file with the new commit/status, routing, data contract, migration or guardrail.
+3. Also update the Nhà Coffee project memory and Context session/update log.
+4. If no Nha Ops behavior, architecture or status changed, record that the MOC was checked and required no content change.
