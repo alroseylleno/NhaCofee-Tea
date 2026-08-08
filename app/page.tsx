@@ -655,7 +655,7 @@ export default function Home() {
       <p className="login-help">{isLocalUat ? "Dữ liệu chỉ lưu trong trình duyệt này, không kết nối Supabase DB." : "Tên đăng nhập hiện dùng email của tài khoản vận hành."}</p>
     </form>
   </main>;
-  return <main>
+  return <main className="app-workspace">
     {canAccessFinance && <nav className="module-switcher" aria-label="Khu vực quản lý"><button className={workspace === "inventory" ? "active" : ""} onClick={() => setWorkspace("inventory")}>Kho NVL</button><button className={workspace === "finance" ? "active" : ""} onClick={() => setWorkspace("finance")}>Tài chính</button></nav>}
     {workspace === "finance" && canAccessFinance ? <FinanceModule
       uatMode={isLocalUat}
