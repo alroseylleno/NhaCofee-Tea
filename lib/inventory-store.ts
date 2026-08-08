@@ -98,3 +98,4 @@ export async function migrateLocalLifecycle(lotMeta: Record<string, CloudLotMeta
 }
 
 export async function removeInventory(id: string) { const { error } = await requireClient().from("inventory_receipts").delete().eq("id", id); if (error) throw error; }
+export async function removeActiveSession(id: string) { const { error } = await requireClient().from("inventory_active_sessions").delete().eq("id", id); if (error) throw error; }
