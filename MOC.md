@@ -8,7 +8,7 @@ This is the mandatory routing map for code changes in `Operations/nha-ops/`. Rea
 
 ## Current State
 
-- Production `main`: commit `7c1f6c5` (`feat: allow authenticated inventory deletion`).
+- Production `main`: includes the three-module UAT workspace (`feat: ship three-module UAT workspace`).
 - Production deploy: Vercel tracks `main`; a normal Git push should redeploy the existing Vercel project.
 - Production inventory and finance Excel imports use Supabase.
 - Localhost and `-uat` hosts use isolated browser storage for UAT inventory. They must not write to Production Supabase.
