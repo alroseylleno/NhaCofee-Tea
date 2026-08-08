@@ -36,9 +36,9 @@
 .inventory-sort { display: grid; gap: 4px; color: var(--muted); font: 700 10px Arial, sans-serif; }
 .inventory-sort select { max-width: 138px; padding: 11px 8px; border: 1px solid var(--line); border-radius: 11px; outline: 0; color: var(--ink); background: #fbfaf5; font: 700 11px Arial, sans-serif; }
 
-/* Keep the stock status compact: sealed, active, and loss read as one line. */
+/* Keep all four stock statuses visible without squeezing labels on mobile. */
 .ingredient-summary { grid-template-columns: minmax(0, 1fr); gap: 11px; padding-right: 42px; }
-.summary-counts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; min-width: 0; }
+.summary-counts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 8px; min-width: 0; }
 .summary-counts span { min-width: 0; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .summary-counts b { font-size: 14px; }
 .conversion-fieldset { margin: 18px 0 14px; padding: 13px; border: 1px dashed #b8c9b7; border-radius: 12px; background: #f6faf3; }
@@ -62,9 +62,10 @@
 .summary-name b { overflow: hidden; color: var(--ink); font: 700 14px Arial, sans-serif; text-overflow: ellipsis; }
 .summary-name small { overflow: hidden; color: var(--muted); font: 10px Arial, sans-serif; text-overflow: ellipsis; }
 .summary-footer { display: flex; gap: 8px; align-items: center; min-width: 0; }
-.summary-counts { display: flex; flex: 1; gap: 8px; min-width: 0; overflow: hidden; }
+.summary-counts { display: flex; flex: 1; gap: 6px; min-width: 0; overflow: hidden; }
 .summary-counts span { overflow: hidden; color: var(--muted); font: 10px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
 .summary-counts b { color: var(--ink); font-size: inherit; }
+.summary-counts .has-used, .summary-counts .has-used b { color: var(--pine); }
 .copy-lot-button { flex: 0 0 auto; padding: 7px 8px; border: 1px solid #c4d3c3; border-radius: 8px; color: var(--pine); background: var(--soft); font: 700 10px Arial, sans-serif; }
 .copy-lot-button:active { transform: scale(.96); }
 .inventory-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
@@ -72,7 +73,7 @@
 .inventory-import-button input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); opacity: 0; }
 .inventory-export-button:disabled { cursor: default; opacity: .45; }
 @media (max-width: 390px) { .inventory-actions { max-width: 155px; } .inventory-import-button, .inventory-export-button { padding: 6px 7px; font-size: 8px; } }
-@media (max-width: 440px) { .summary-counts { gap: 5px; } .summary-counts span { font-size: 9px; } .summary-name b { font-size: 13px; } }
+@media (max-width: 440px) { .summary-counts { gap: 4px; } .summary-counts span { font-size: 8px; } .summary-name b { font-size: 13px; } }
 @media (max-width: 360px) { .inventory-search-controls { grid-template-columns: 1fr; } .inventory-sort select { max-width: none; width: 100%; } }
 
 .hero-row { min-height: 96px; }
