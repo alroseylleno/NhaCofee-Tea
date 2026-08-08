@@ -659,13 +659,13 @@ export default function Home() {
     </form>
   </main>;
   return <main className="app-workspace">
-    {canAccessFinance && <nav className="module-switcher" aria-label="Khu vực quản lý"><button className={workspace === "inventory" ? "active" : ""} onClick={() => setWorkspace("inventory")}>Kho NVL</button><button className={workspace === "finance" ? "active" : ""} onClick={() => setWorkspace("finance")}>Tài chính</button>{isLocalUat && <button className={workspace === "products" ? "active" : ""} onClick={() => setWorkspace("products")}>Sản phẩm</button>}</nav>}
+    {canAccessFinance && <nav className="module-switcher" aria-label="Khu vực quản lý"><button className={workspace === "inventory" ? "active" : ""} onClick={() => setWorkspace("inventory")}>Kho NVL</button><button className={workspace === "finance" ? "active" : ""} onClick={() => setWorkspace("finance")}>Tài chính</button><button className={workspace === "products" ? "active" : ""} onClick={() => setWorkspace("products")}>Sản phẩm</button></nav>}
     {workspace === "finance" && canAccessFinance ? <FinanceModule
       uatMode={isLocalUat}
       inventoryLots={items.map((item) => ({ id: item.id, name: item.name, quantity: item.quantity, unit: item.unit, unitCost: item.unitCost, purchasedOn: item.purchasedOn, receiptCode: item.receiptCode }))}
       inventorySessions={activeSessions.map((entry) => ({ id: entry.id, sourceReceiptId: entry.sourceReceiptId, activatedAt: entry.activatedAt, costRecognitionMonth: entry.costRecognitionMonth, status: entry.status, closedAt: entry.closedAt, reason: entry.reason }))}
       onOpenInventoryLot={(id) => { const lot = items.find((item) => item.id === id); if (!lot) return; setWorkspace("inventory"); setTab("inventory"); setDetailLot(lot); }}
-    /> : workspace === "products" && canAccessFinance && isLocalUat ? <ProductMaster
+    /> : workspace === "products" && canAccessFinance ? <ProductMaster
       uatMode={isLocalUat}
       inventoryLots={items.map((item) => ({ id: item.id, name: item.name, category: item.category, brand: item.brand, unit: item.unit, quantity: item.quantity, stockQuantity: sealedInLot(item), specification: item.specification, conversion: item.conversion, unitCost: item.unitCost, purchasedOn: item.purchasedOn }))}
     /> : <>

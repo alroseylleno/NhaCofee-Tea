@@ -12,7 +12,7 @@ This is the mandatory routing map for code changes in `Operations/nha-ops/`. Rea
 - Production deploy: Vercel tracks `main`; a normal Git push should redeploy the existing Vercel project.
 - Production inventory and finance Excel imports use Supabase.
 - Localhost and `-uat` hosts use isolated browser storage for UAT inventory. They must not write to Production Supabase.
-- Product Master source is shipped with the three-module workspace, but its UI and browser-local data remain deliberately gated to Local/UAT. Production navigation and persistence are not enabled yet.
+- Product Master is available in both Local/UAT and Production. UAT uses isolated browser storage; Production reads and writes the shared Supabase Product Master tables.
 
 ## Start Here
 
@@ -22,7 +22,7 @@ This is the mandatory routing map for code changes in `Operations/nha-ops/`. Rea
 | Inventory Supabase read/write, receipts, lifecycle sessions | `lib/inventory-store.ts` | `lib/supabase.ts` | `inventory_receipts`, `inventory_history`, `inventory_active_sessions`, Storage bucket `bills` |
 | Finance entry, revenue imports, reports, dashboard | `app/finance-module.tsx` | `app/finance.module.css`, `lib/finance-store.ts` | Finance import tables/RPCs; UAT local storage stays isolated |
 | Finance Excel persistence and replace-latest logic | `lib/finance-store.ts` | `app/finance-module.tsx` | `finance_imports`, `finance_revenue_rows`, `finance_product_rows`, `finance_service_rows` |
-| Product Master, ingredient master, recipes, theoretical COGS | `app/product-master.tsx` | `app/product-master.module.css`, `lib/master-data.ts` | Local/UAT browser storage; migration `20260805000100_cfo_master_data_foundation.sql` provisions the future Production tables |
+| Product Master, ingredient master, recipes, theoretical COGS | `app/product-master.tsx` | `app/product-master.module.css`, `lib/master-data.ts`, `lib/master-data-store.ts` | UAT browser storage; Production Supabase master and versioned-recipe tables |
 | Global mobile shell, login, shared inventory styling | `app/page.tsx` | `app/globals.css`, `public/` | UI-only unless fields/data contracts change |
 | Supabase client/environment variables | `lib/supabase.ts` | `.env.local`, Vercel environment variables | Never expose service-role or database credentials in browser code |
 | Database schema, RLS, RPCs, triggers | `supabase/migrations/` | `.github/workflows/supabase-migrations.yml` | Always add a new timestamped migration; never rewrite an applied migration |
@@ -35,7 +35,7 @@ app/page.tsx
   |- Authentication and runtime UAT/Prod detection
   |- Kho NVL state, forms, lifecycle and reports
   |- FinanceModule props from inventory lots/sessions
-  `- ProductMaster props when the Local/UAT workspace is enabled
+  `- ProductMaster props in both Local/UAT and Production
 
 lib/inventory-store.ts <-> Supabase inventory tables + bills storage
 app/finance-module.tsx <-> lib/finance-store.ts <-> Supabase finance tables/RPCs
@@ -101,19 +101,20 @@ Maps Supabase rows into revenue, product and service records and calls replace-i
 
 ## Product Master
 
-The following files implement the current UAT-only Product Master workspace. Their source is present on `main`, while the runtime remains local/UAT-only until Production persistence is deliberately enabled:
+The following files implement Product Master. Local/UAT remains isolated in browser storage, while Production uses the Supabase persistence adapter:
 
 - `app/product-master.tsx`
 - `app/product-master.module.css`
 - `lib/master-data.ts`
+- `lib/master-data-store.ts`
 - `supabase/migrations/20260805000100_cfo_master_data_foundation.sql`
 - Integration edits also overlap `app/page.tsx`, `app/globals.css` and `app/finance-module.tsx`; use partial staging for unrelated fixes instead of staging these whole files.
 
 Current UAT data contract:
 
-- Product Master is rendered only when `isLocalUat` is true; Production has no Product Master navigation or runtime persistence.
-- Browser storage uses `nha-ops-master-data-uat-v3`; legacy v2/v1 data is normalized and migrated on load. V3 removes Mapping entities from the Product Master state contract.
-- Finance UAT product imports merge directly into Product Master by normalized SKU; the Product Master UI no longer exposes or requires a Mapping workflow.
+- Product Master is rendered in Local/UAT and Production. UAT browser storage uses `nha-ops-master-data-uat-v3`; Production uses `lib/master-data-store.ts` and Supabase.
+- Legacy UAT v2/v1 browser data is normalized on load. V3 removes Mapping entities from the Product Master state contract.
+- Finance product imports merge directly into Product Master by normalized SKU in both modes; the Product Master UI no longer exposes or requires a Mapping workflow.
 - Kho NVL lots feed Ingredient Master automatically with sealed-stock quantity, usable conversion, latest purchase price and a source-lot link for traceability.
 - Ingredient Master has no manual activation queue. Inventory ingredients are available to recipes as soon as they have appeared in Kho NVL, including historical out-of-stock options.
 - Multiple lots with the same name, category and brand are aggregated. Recipe selection prefers an in-stock ingredient whose oldest sealed lot has the earliest purchase date (FIFO), while theoretical cost keeps the latest purchase price.
@@ -149,7 +150,7 @@ Do not stage these files in an unrelated Kho NVL hotfix. The current browser-loc
 | Finance imports | finance import/row tables and replace RPCs | `20260804000100` through `20260804000300` |
 | Cost recognition month | `inventory_active_sessions.cost_recognition_month` | `20260805000200` |
 | Inventory conversion | conversion amount/unit fields | `20260807000100` |
-| CFO master-data foundation | stores, masters, recipes and finance facts | `20260805000100` - additive tables, broad authenticated RLS during rollout |
+| CFO master-data foundation | stores, masters, recipes and finance facts | `20260805000100`, `20260809000200` - additive tables, versioned recipes and broad authenticated RLS during rollout |
 
 Migration rules:
 
@@ -164,6 +165,7 @@ Migration rules:
 | Concern | Local/UAT | Production |
 |---|---|---|
 | Inventory store | Browser-local isolated keys | Supabase |
+| Product Master | Browser-local `nha-ops-master-data-uat-v3` | Shared Supabase master, recipe-version and audit tables |
 | Finance sample data | UAT-only local keys | Must not load UAT samples |
 | Authentication | Local UAT credentials are prefilled in the local login | Supabase Auth account |
 | Reset/sample controls | Allowed | Forbidden |

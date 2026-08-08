@@ -28,6 +28,7 @@ import {
   recipeVersionCost,
   theoreticalProductCost,
 } from "@/lib/master-data";
+import { loadCloudMasterData, saveCloudProduct, saveCloudRecipe } from "@/lib/master-data-store";
 import styles from "./product-master.module.css";
 
 type MasterTab = "overview" | "queue" | "products";
@@ -199,6 +200,20 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
   const [recipeDraftItems, setRecipeDraftItems] = useState<ProductRecipeItem[]>([]);
 
   useEffect(() => {
+    if (!uatMode) {
+      let cancelled = false;
+      loadCloudMasterData(inventoryLots).then((cloud) => {
+        if (cancelled) return;
+        setState(cloud.state);
+        setFinanceSnapshot({ products: cloud.products, imports: cloud.imports });
+        setSelectedProductId("");
+        setSelectedRecipeVersionId("");
+        setLoaded(true);
+      }).catch((error: unknown) => {
+        if (!cancelled) { window.alert(error instanceof Error ? error.message : "Không thể tải Sản phẩm từ Supabase."); setLoaded(true); }
+      });
+      return () => { cancelled = true; };
+    }
     let current = emptyMasterDataState();
     try {
       const stored = window.localStorage.getItem(MASTER_UAT_STORAGE_KEY) || MASTER_LEGACY_UAT_STORAGE_KEYS.map((key) => window.localStorage.getItem(key)).find(Boolean);
@@ -277,6 +292,14 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
   const productsImport = [...(financeSnapshot.importHistory || []), ...(financeSnapshot.imports || [])].filter((entry) => entry.dataType === "products").sort((left, right) => right.importedAt.localeCompare(left.importedAt))[0];
 
   function syncSources() {
+    if (!uatMode) {
+      setLoaded(false);
+      loadCloudMasterData(inventoryLots).then((cloud) => {
+        setState(cloud.state);
+        setFinanceSnapshot({ products: cloud.products, imports: cloud.imports });
+      }).catch((error: unknown) => window.alert(error instanceof Error ? error.message : "Không thể đồng bộ Product Master.")).finally(() => setLoaded(true));
+      return;
+    }
     setFinanceSnapshot(readFinanceLocalState());
     setState((current) => ({ ...mergeSourceData(current, inventoryLots), auditEvents: [auditEvent("ingredient", "sync", "sync", "Đồng bộ tồn Kho NVL và sản phẩm Finance local"), ...current.auditEvents] }));
   }
@@ -304,17 +327,18 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
     setShowProductForm(true);
   }
 
-  function saveProduct(event: FormEvent<HTMLFormElement>) {
+  async function saveProduct(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const sku = productForm.sku.trim();
     if (!sku || !productForm.name.trim()) return;
     if (state.products.some((product) => normalizedText(product.sku) === normalizedText(sku) && product.id !== editingProductId)) { window.alert("Mã SKU đã tồn tại."); return; }
     const id = editingProductId || crypto.randomUUID();
-    setState((current) => {
-      const existing = current.products.find((product) => product.id === editingProductId);
-      const product: ProductMaster = { id, storeId: DEFAULT_STORE.id, sku, name: productForm.name.trim(), aliases: parseAliases(productForm.aliases), category: productForm.category.trim() || "Chưa phân loại", sellingPrice: parseAmount(productForm.sellingPrice), packagingCost: parseAmount(productForm.packagingCost), status: "active", source: existing?.source || "manual", updatedAt: new Date().toISOString() };
-      return { ...current, products: existing ? current.products.map((entry) => entry.id === existing.id ? product : entry) : [product, ...current.products], auditEvents: [auditEvent("product", id, existing ? "update" : "create", existing ? "Cập nhật thông tin SKU" : "Tạo SKU thủ công"), ...current.auditEvents] };
-    });
+    const existing = state.products.find((product) => product.id === editingProductId);
+    const product: ProductMaster = { id, storeId: existing?.storeId || state.stores[0]?.id || DEFAULT_STORE.id, sku, name: productForm.name.trim(), aliases: parseAliases(productForm.aliases), category: productForm.category.trim() || "Chưa phân loại", sellingPrice: parseAmount(productForm.sellingPrice), packagingCost: parseAmount(productForm.packagingCost), status: "active", source: existing?.source || "manual", updatedAt: new Date().toISOString() };
+    try {
+      if (!uatMode) await saveCloudProduct(product);
+      setState((current) => ({ ...current, products: existing ? current.products.map((entry) => entry.id === existing.id ? product : entry) : [product, ...current.products], auditEvents: [auditEvent("product", id, existing ? "update" : "create", existing ? "Cập nhật thông tin SKU" : "Tạo SKU thủ công"), ...current.auditEvents] }));
+    } catch (error) { window.alert(error instanceof Error ? error.message : "Không thể lưu SKU."); return; }
     setShowProductForm(false);
     setSelectedProductId(id);
   }
@@ -357,7 +381,7 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
     setRecipeDraftItems((current) => current.filter((item) => item.id !== itemId));
   }
 
-  function saveRecipe() {
+  async function saveRecipe() {
     if (!selectedProduct || !isCurrentRecipe || !recipeDraftDirty) return;
     const invalidItem = recipeDraftItems.find((item) => {
       const ingredient = state.ingredients.find((entry) => entry.id === item.ingredientId);
@@ -369,6 +393,8 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
     const version: RecipeVersion = { id: crypto.randomUUID(), productId: selectedProduct.id, version: Math.max(0, ...state.recipeVersions.filter((entry) => entry.productId === selectedProduct.id).map((entry) => entry.version)) + 1, effectiveFrom, status: "active", items: recipeDraftItems.map((item) => ({ ...item, id: crypto.randomUUID() })), createdAt: now };
     const cost = recipeVersionCost(version, state.ingredients, selectedProduct.packagingCost);
     const margin = cost !== undefined && selectedProduct.sellingPrice ? (selectedProduct.sellingPrice - cost) / selectedProduct.sellingPrice * 100 : 0;
+    try { if (!uatMode) await saveCloudRecipe(version, selectedProduct.storeId, recipeDraftSourceId || undefined); }
+    catch (error) { window.alert(error instanceof Error ? error.message : "Không thể lưu công thức."); return; }
     setState((current) => ({
       ...current,
       recipeVersions: [version, ...current.recipeVersions.map((entry) => entry.productId === selectedProduct.id && entry.status === "active" ? { ...entry, status: "archived" as const, effectiveTo: effectiveFrom } : entry)],
@@ -402,16 +428,14 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
     setRecipeIngredientId("");
   }
 
-  if (!uatMode) return null;
-
   return <section className={styles.module}>
     <header className={styles.hero}>
-      <div><span className={styles.eyebrow}>SẢN PHẨM · UAT LOCAL</span><h1>Sản phẩm, giá vốn và sức bán trong một nơi.</h1><p>Công thức luôn soi chiếu trực tiếp với tồn Kho NVL để biết món nào đang bán được và ước tính làm được bao nhiêu ly.</p></div>
+      <div><span className={styles.eyebrow}>SẢN PHẨM · {uatMode ? "UAT LOCAL" : "PRODUCTION"}</span><h1>Sản phẩm, giá vốn và sức bán trong một nơi.</h1><p>Công thức luôn soi chiếu trực tiếp với tồn Kho NVL để biết món nào đang bán được và ước tính làm được bao nhiêu ly.</p></div>
       <div className={styles.logo}><Image src="/nha-coffee-logo-transparent.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div>
       <div className={styles.heroMetric}><span>SKU đang dùng</span><strong>{activeProducts.length}/{state.products.length}</strong><small>{stockIssues.length} công thức cần thay NVL · {numberLabel(totalEstimatedServings, 0)} ly ước tính</small></div>
     </header>
 
-    <div className={styles.uatBanner}><span><b>UAT LOCAL</b> · Dữ liệu Sản phẩm chỉ lưu trong trình duyệt này.</span><div><button onClick={syncSources}>Đồng bộ Kho</button><button onClick={loadCompleteSample}>Mẫu hoàn chỉnh</button><button onClick={resetUat}>Reset</button></div></div>
+    {uatMode ? <div className={styles.uatBanner}><span><b>UAT LOCAL</b> · Dữ liệu Sản phẩm chỉ lưu trong trình duyệt này.</span><div><button onClick={syncSources}>Đồng bộ Kho</button><button onClick={loadCompleteSample}>Mẫu hoàn chỉnh</button><button onClick={resetUat}>Reset</button></div></div> : <div className={styles.uatBanner}><span><b>PRODUCTION</b> · SKU và công thức được lưu dùng chung trên Supabase.</span><div><button onClick={syncSources}>Đồng bộ dữ liệu</button></div></div>}
 
     <nav className={styles.tabs} aria-label="Sản phẩm">
       <button className={tab === "overview" ? styles.active : ""} onClick={() => setTab("overview")}>Tổng quan</button>
