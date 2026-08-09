@@ -21,6 +21,8 @@ export type FinanceInventoryLot = {
   unitCost: number;
   purchasedOn: string;
   receiptCode?: string;
+  internalReturn?: boolean;
+  availableFrom?: string;
 };
 
 export type FinanceInventorySession = {
@@ -31,6 +33,7 @@ export type FinanceInventorySession = {
   status: "active" | "used" | "wasted";
   closedAt?: string;
   reason: string;
+  recognizedCost?: number;
 };
 
 type FinanceTab = "entry" | "revenue" | "report" | "dashboard";
@@ -542,7 +545,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     if (!lot) return [];
     const events: Array<{ id: string; date: string; lot: FinanceInventoryLot; amount: number; kind: "cogs" | "waste"; reason: string }> = [];
     const activatedOn = session.costRecognitionMonth ? `${session.costRecognitionMonth}-01` : session.activatedAt.slice(0, 10);
-    if (inRange(activatedOn, bounds)) events.push({ id: `${session.id}-cogs`, date: activatedOn, lot, amount: lot.unitCost, kind: "cogs", reason: session.reason });
+    if (inRange(activatedOn, bounds)) events.push({ id: `${session.id}-cogs`, date: activatedOn, lot, amount: session.recognizedCost ?? lot.unitCost, kind: "cogs", reason: session.reason });
     const wastedOn = session.status === "wasted" ? session.closedAt?.slice(0, 10) : undefined;
     if (wastedOn && inRange(wastedOn, bounds)) events.push({ id: `${session.id}-waste`, date: wastedOn, lot, amount: lot.unitCost, kind: "waste", reason: session.reason });
     return events;
@@ -593,18 +596,18 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const paidManual = manualOccurrences.filter((entry) => entry.expense.paymentStatus === "paid").reduce((sum, entry) => sum + entry.amount, 0);
   const unpaidManual = manualOccurrences.filter((entry) => entry.expense.paymentStatus !== "paid").reduce((sum, entry) => sum + entry.amount, 0);
 
-  const inventoryPurchases = inventoryLots.filter((lot) => inRange(lot.purchasedOn, bounds)).reduce((sum, lot) => sum + lot.quantity * lot.unitCost, 0);
+  const inventoryPurchases = inventoryLots.filter((lot) => !lot.internalReturn && inRange(lot.purchasedOn, bounds)).reduce((sum, lot) => sum + lot.quantity * lot.unitCost, 0);
   const cashIn = periodRevenues.reduce((sum, entry) => sum + (entry.cashReceived || entry.storeRevenue + entry.appRevenue - entry.discounts - entry.platformFees), 0);
   const paidInvestments = assetExpenses.filter((asset) => asset.paymentStatus === "paid" && inRange(asset.paymentDate || asset.incurredOn, bounds)).reduce((sum, asset) => sum + asset.amount, 0);
   // Platform fees are already withheld from the recorded cash received.
   const cashOut = inventoryPurchases + paidManual + paidInvestments;
   const netCash = cashIn - cashOut;
 
-  const openingInventory = inventoryLots.filter((lot) => lot.purchasedOn < bounds.start).reduce((sum, lot) => {
+  const openingInventory = inventoryLots.filter((lot) => (lot.availableFrom || lot.purchasedOn) < bounds.start).reduce((sum, lot) => {
     const issuedBefore = inventorySessions.filter((session) => session.sourceReceiptId === lot.id && (session.costRecognitionMonth ? `${session.costRecognitionMonth}-01` : session.activatedAt.slice(0, 10)) < bounds.start).length;
     return sum + Math.max(0, lot.quantity - issuedBefore) * lot.unitCost;
   }, 0);
-  const closingInventory = inventoryLots.filter((lot) => lot.purchasedOn <= bounds.end).reduce((sum, lot) => {
+  const closingInventory = inventoryLots.filter((lot) => (lot.availableFrom || lot.purchasedOn) <= bounds.end).reduce((sum, lot) => {
     const issuedByEnd = inventorySessions.filter((session) => session.sourceReceiptId === lot.id && (session.costRecognitionMonth ? `${session.costRecognitionMonth}-01` : session.activatedAt.slice(0, 10)) <= bounds.end).length;
     return sum + Math.max(0, lot.quantity - issuedByEnd) * lot.unitCost;
   }, 0);

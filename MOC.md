@@ -81,6 +81,7 @@ When changing an inventory field, inspect all of these paths together:
 - A lot/receipt cannot be deleted after any unit has been issued, regardless of current active count.
 - Fully depleted groups move from `Tồn kho` to `Dùng hết` when sealed quantity and active quantity both reach zero.
 - Cost recognition uses `costRecognitionMonth`; operational opening time remains `activatedAt`.
+- Local UAT supports period settlement for an active converted unit. The session keeps its provisional full cost until settlement, then stores `recognizedCost` for actual use and creates an internal `stockState: opened` return lot for the remaining quantity/value. Internal return lots are inventory assets, not new purchases, and preserve the first-open shelf-life clock.
 
 ## Finance Map
 
