@@ -34,6 +34,9 @@
 .inventory-category-tabs button.selected { border-color: var(--pine); color: #fff; background: var(--pine); box-shadow: 0 2px 6px #1e4b3f25; }
 .inventory-search-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: flex-end; margin-top: 19px; }
 .inventory-search-controls .search { margin: 0; }
+.inventory-month-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 8px 0 14px; }
+.inventory-month-filters label { display: grid; gap: 5px; min-width: 0; color: var(--muted); font: 700 9px Arial, sans-serif; }
+.inventory-month-filters select { width: 100%; min-width: 0; padding: 9px; border: 1px solid #cbd6ca; border-radius: 9px; color: var(--ink); background: #fbfaf5; font: 10px Arial, sans-serif; }
 .inventory-sort { display: grid; gap: 4px; color: var(--muted); font: 700 10px Arial, sans-serif; }
 .inventory-sort select { max-width: 138px; padding: 11px 8px; border: 1px solid var(--line); border-radius: 11px; outline: 0; color: var(--ink); background: #fbfaf5; font: 700 11px Arial, sans-serif; }
 
@@ -58,6 +61,16 @@
 .inventory-value-metric section strong { overflow: hidden; margin-top: 5px; font-size: clamp(14px, 4.5vw, 20px); text-overflow: ellipsis; white-space: nowrap; }
 .inventory-value-metric > small { margin-top: 9px; }
 .ingredient-summary { display: grid; gap: 8px; padding: 11px; }
+.ingredient-summary { overflow: hidden; padding: 0; border-color: #d6ded3; box-shadow: 0 5px 16px #17312b0b; transition: border-color .16s ease, box-shadow .16s ease; }
+.ingredient-summary:hover, .ingredient-summary[open] { border-color: #aac0ae; box-shadow: 0 8px 20px #17312b12; }
+.ingredient-summary > summary { display: grid; grid-template-columns: 23px minmax(0, 1fr) auto; gap: 9px; align-items: center; min-height: 58px; padding: 12px; cursor: pointer; list-style: none; background: linear-gradient(105deg, #f6faf3, #fffdf8 72%); }
+.ingredient-summary > summary::-webkit-details-marker { display: none; }
+.ingredient-summary > summary::before { content: "+"; display: grid; place-items: center; width: 23px; height: 23px; border-radius: 50%; color: #fff; background: #527765; font: 700 17px/1 Arial, sans-serif; }
+.ingredient-summary[open] > summary::before { content: "−"; background: #365f4d; }
+.ingredient-summary > summary .summary-counts { grid-column: 1 / -1; }
+.quick-activate-button { min-height: 29px; padding: 6px 8px; border: 0; border-radius: 8px; color: #fff; background: var(--pine); font: 800 9px Arial, sans-serif; white-space: nowrap; box-shadow: 0 3px 8px #1e4b3f2b; }
+.quick-activate-button b { display: block; margin-top: 2px; color: #dbead9; font-size: 8px; }
+.quick-activate-button:active, .lot-activate-button:active { transform: scale(.97); }
 .ingredient-summary-main { min-width: 0; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; }
 .summary-name { display: grid; min-width: 0; gap: 3px; }
 .summary-name b { color: var(--ink); font: 700 14px/1.25 Arial, sans-serif; overflow-wrap: anywhere; }
@@ -69,6 +82,14 @@
 .summary-counts .has-used, .summary-counts .has-used b { color: var(--pine); }
 .copy-lot-button { flex: 0 0 auto; padding: 7px 8px; border: 1px solid #c4d3c3; border-radius: 8px; color: var(--pine); background: var(--soft); font: 700 10px Arial, sans-serif; }
 .copy-lot-button:active { transform: scale(.96); }
+.ingredient-group-items { display: grid; gap: 1px; padding: 6px; border-top: 1px solid #dfe6dc; background: #f1f5ef; }
+.ingredient-lot-row { display: flex; justify-content: space-between; gap: 9px; align-items: center; min-width: 0; padding: 10px; border-radius: 9px; background: #fff; }
+.ingredient-lot-row > span { display: grid; min-width: 0; gap: 3px; }
+.ingredient-lot-row b { overflow: hidden; color: var(--ink); font: 700 10px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+.ingredient-lot-row small { overflow: hidden; color: var(--muted); font: 9px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+.ingredient-lot-row > div { display: flex; flex: 0 0 auto; gap: 5px; }
+.ingredient-lot-row button { padding: 7px 8px; border: 1px solid #c4d3c3; border-radius: 8px; color: var(--pine); background: var(--soft); font: 700 9px Arial, sans-serif; }
+.ingredient-lot-row .lot-activate-button { border-color: var(--pine); color: #fff; background: var(--pine); }
 .inventory-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .inventory-import-button, .inventory-export-button { display: grid; place-items: center; min-height: 31px; padding: 7px 8px; border: 1px solid #c4d3c3; border-radius: 8px; color: var(--pine); background: var(--soft); font: 700 9px Arial, sans-serif; white-space: nowrap; }
 .inventory-import-button input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); opacity: 0; }

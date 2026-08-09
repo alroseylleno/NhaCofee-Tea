@@ -430,7 +430,7 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
 
   return <section className={styles.module}>
     <header className={styles.hero}>
-      <div><span className={styles.eyebrow}>SẢN PHẨM · {uatMode ? "UAT LOCAL" : "PRODUCTION"}</span><h1>Sản phẩm, giá vốn và sức bán trong một nơi.</h1><p>Công thức luôn soi chiếu trực tiếp với tồn Kho NVL để biết món nào đang bán được và ước tính làm được bao nhiêu ly.</p></div>
+      <div><span className={styles.eyebrow}>SẢN PHẨM · {uatMode ? "UAT LOCAL" : "PRODUCTION"}</span><h1>Sản phẩm & giá vốn</h1></div>
       <div className={styles.logo}><Image src="/nha-coffee-logo-transparent.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div>
       <div className={styles.heroMetric}><span>SKU đang dùng</span><strong>{activeProducts.length}/{state.products.length}</strong><small>{stockIssues.length} công thức cần thay NVL · {numberLabel(totalEstimatedServings, 0)} ly ước tính</small></div>
     </header>

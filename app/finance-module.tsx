@@ -837,7 +837,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   return <div className={styles.finance}>
     <header className={styles.financeHero}>
       <span className={styles.eyebrow}>NHA COFFEE & TEA{uatMode ? " · UAT LOCAL" : ""}</span>
-      <div className={styles.financeHeroRow}><div><h1>Tài chính</h1><p>Theo dõi doanh thu, chi phí, dòng tiền và sức khỏe vận hành trên cùng một màn hình.</p></div><div className={styles.logo}><Image src="/nha-coffee-logo-transparent.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div></div>
+      <div className={styles.financeHeroRow}><div><h1>Tài chính</h1><p>Theo dõi doanh thu, chi phí, dòng tiền và sức khỏe vận hành.</p></div><div className={styles.logo}><Image src="/nha-coffee-logo-transparent.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div></div>
       <div className={styles.heroMetric}><span>{tab === "revenue" ? `Doanh thu thực · ${bounds.label}` : `Lợi nhuận hoạt động · ${bounds.label}`}</span><strong>{money(tab === "revenue" ? datasetRevenue : operatingProfit)}</strong><small>{tab === "revenue" ? revenueDataset.length ? `${revenueDataset.length.toLocaleString("vi-VN")} ngày có dữ liệu trong kỳ` : "Chưa có doanh thu trong kỳ" : netRevenue ? `${((operatingProfit / netRevenue) * 100).toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% doanh thu thuần` : "Chưa có doanh thu trong kỳ"}</small></div>
     </header>
 

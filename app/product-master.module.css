@@ -25,7 +25,7 @@
 
 .hero {
   position: relative;
-  min-height: 282px;
+  min-height: 218px;
   overflow: hidden;
   padding: 30px 20px 24px;
   color: #fffdf6;
@@ -37,7 +37,7 @@
 .hero::after { position: absolute; right: -90px; bottom: -150px; width: 310px; height: 310px; border: 1px solid #d5e6c74f; border-radius: 50%; content: ""; }
 .hero > div:first-child { position: relative; z-index: 1; max-width: 78%; }
 .eyebrow { color: #cce0b2; font: 800 9px Arial, sans-serif; letter-spacing: .17em; }
-.hero h1 { max-width: 650px; margin: 9px 0 0; font: 700 clamp(30px, 8.5vw, 49px)/1 Georgia, serif; letter-spacing: -.045em; }
+.hero h1 { max-width: 650px; margin: 7px 0 0; font: 700 clamp(28px, 7.5vw, 43px)/1 Georgia, serif; letter-spacing: -.045em; }
 .hero p { max-width: 520px; margin-top: 12px; color: #d4e2d6; font: 12px/1.5 Arial, sans-serif; }
 .logo { position: absolute; z-index: 1; top: -9px; right: -17px; width: 166px; height: 100px; overflow: hidden; }
 .logo img { width: 100%; height: 100%; object-fit: cover; filter: grayscale(1) invert(1) contrast(1.2); opacity: .92; transform: scale(1.16); }
@@ -329,7 +329,7 @@
 }
 
 @media (min-width: 700px) {
-  .hero { min-height: 294px; padding: 39px 34px 28px; }
+  .hero { min-height: 232px; padding: 30px 34px 24px; }
   .hero > div:first-child { max-width: 620px; }
   .hero p { font-size: 13px; }
   .logo { right: 6px; width: 205px; height: 120px; }
@@ -359,7 +359,7 @@
 }
 
 @media (min-width: 1024px) {
-  .hero { padding: 43px 44px 31px; }
+  .hero { min-height: 238px; padding: 32px 44px 25px; }
   .heroMetric { right: 44px; left: 44px; }
   .content { padding: 32px 40px 100px; }
   .pageIntro h2 { font-size: 28px; }
