@@ -144,7 +144,7 @@ Do not stage these files in an unrelated Kho NVL hotfix. The current browser-loc
 |---|---|---|
 | Inventory receipts/history | `inventory_receipts`, `inventory_history` | `20260701000000`, `20260701000001` |
 | Inventory lifecycle | `inventory_active_sessions`; expiry/storage fields | `20260728000000` |
-| Inventory deletion guardrails | authenticated-user RLS, active-session FK behavior and return-to-stock deletion | `20260728000100`, `20260808000200`, `20260809000100` |
+| Inventory deletion guardrails | authenticated-user RLS, active-session FK behavior and return-to-stock deletion | `20260728000100`, `20260808000200`, `20260809000100`; targeted receipt restoration `20260809000300` |
 | Receipt codes | receipt code column, daily sequence, trigger | `20260728000200` |
 | Historical test cleanup | destructive one-time cleanup | `20260728000300` |
 | Finance imports | finance import/row tables and replace RPCs | `20260804000100` through `20260804000300` |
