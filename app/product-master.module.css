@@ -291,6 +291,17 @@
 .recipeForm { display: grid; gap: 9px; margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 11px; background: #fff; }
 .recipeForm label { display: grid; gap: 5px; color: var(--muted); font: 800 8px Arial, sans-serif; }
 .recipeForm label small { color: #7d7564; font: 8px/1.35 Arial, sans-serif; }
+.recipeIngredientPicker { position: relative; }
+.recipeIngredientTrigger { display: flex; justify-content: space-between; gap: 8px; align-items: center; width: 100%; min-height: 37px; padding: 9px 7px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: #fff; text-align: left; }
+.recipeIngredientTrigger:disabled { color: var(--muted); background: #f4f3ed; }
+.recipeIngredientTrigger i { display: grid; flex: 0 0 auto; width: 18px; height: 18px; place-items: center; border-radius: 50%; color: #fff; background: var(--pine); font: 800 15px/1 Arial, sans-serif; font-style: normal; }
+.recipeIngredientOptions { position: absolute; z-index: 6; top: calc(100% + 4px); right: 0; left: 0; display: grid; max-height: 230px; overflow: auto; padding: 4px; border: 1px solid #c6d5c7; border-radius: 10px; background: #fffdf8; box-shadow: 0 9px 22px #17362e24; }
+.recipeIngredientOptions button { display: flex; justify-content: space-between; gap: 10px; align-items: center; width: 100%; padding: 9px; border: 0; border-radius: 7px; color: var(--ink); background: transparent; text-align: left; }
+.recipeIngredientOptions button:hover:not(:disabled), .recipeIngredientOptions button[aria-selected="true"] { background: #edf5ec; }
+.recipeIngredientOptions span { min-width: 0; overflow: hidden; font: 700 9px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+.recipeIngredientOptions b { flex: 0 0 auto; color: #39715d; font: 800 8px Arial, sans-serif; white-space: nowrap; }
+.recipeIngredientOptions .unconvertedOption { cursor: not-allowed; opacity: 1; }
+.recipeIngredientOptions .unconvertedOption span, .recipeIngredientOptions .unconvertedOption b { color: var(--red); }
 .recipeSelectors { display: grid; gap: 7px; }
 .recipeForm > div:not(.recipeSelectors) { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
 .recipeForm input, .recipeForm select { min-width: 0; width: 100%; padding: 9px 7px; border: 1px solid var(--line); border-radius: 8px; background: #fff; font: 10px Arial, sans-serif; }
