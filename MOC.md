@@ -149,6 +149,7 @@ Do not stage these files in an unrelated Kho NVL hotfix. The current browser-loc
 | Inventory Excel import | atomic receipt and history import; prevents partial workbooks | `20260809000500` |
 | July 2026 sealed-stock cleanup | destructive one-time Production cleanup; retains active/used/wasted lifecycle rows | `20260809000600` |
 | Unbranded sealed-stock cleanup | destructive one-time Production cleanup across all dates; retains lifecycle rows | `20260809000700` |
+| June-August 2026 inventory reset | destructive owner-requested Production reset by `purchased_on`; privately snapshots then removes receipts, history, all lifecycle statuses and daily sequences | `20260809000800` |
 | Inventory lifecycle | `inventory_active_sessions`; expiry/storage fields | `20260728000000` |
 | Inventory deletion guardrails | authenticated-user RLS, active-session FK behavior and return-to-stock deletion | `20260728000100`, `20260808000200`, `20260809000100`; targeted receipt restoration `20260809000300` |
 | Receipt codes | receipt code column, daily sequence, trigger | `20260728000200` |
