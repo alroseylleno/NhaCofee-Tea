@@ -6,6 +6,7 @@ export type CloudItem = { id: string; name: string; category: string; brand: str
 export type CloudLotMeta = { expiresOn: string; shelfLifeHours?: number; storageLocation: string };
 export type CloudActiveSession = { id: string; sourceReceiptId: string; ingredientKey: string; activatedAt: string; costRecognitionMonth?: string; useBy?: string; status: "active" | "used" | "wasted"; closedAt?: string; reason: string; note?: string };
 export type CloudInventoryState = { items: CloudItem[]; lotMeta: Record<string, CloudLotMeta>; activeSessions: CloudActiveSession[]; lifecycleReady: boolean };
+export type CloudInventoryImport = { item: CloudItem; event: CloudHistory; meta?: CloudLotMeta };
 
 function requireClient() { if (!supabase) throw new Error("Supabase chưa được cấu hình."); return supabase; }
 function lifecycleTableMissing(error: { code?: string; message?: string } | null) { return Boolean(error && (error.code === "42P01" || error.code === "PGRST205" || error.message?.includes("inventory_active_sessions"))); }
@@ -57,6 +58,13 @@ export async function saveInventory(item: CloudItem, event: CloudHistory, file?:
   if (result.error) throw result.error;
   const { error: historyError } = await client.from("inventory_history").insert({ id: event.id, inventory_receipt_id: item.id, action: event.action, changes: event.changes, created_at: event.at });
   if (historyError) throw historyError;
+}
+
+export async function importInventoryBatch(entries: CloudInventoryImport[]) {
+  const client = requireClient();
+  const { error } = await client.rpc("import_inventory_receipts", { payload: entries });
+  if (error?.code === "PGRST202") throw new Error("Supabase chưa có chức năng nhập kho theo lô. Hãy chạy migration 20260809000500 trước khi nhập file Excel.");
+  if (error) throw error;
 }
 
 export async function createActiveSession(activeSession: CloudActiveSession) {

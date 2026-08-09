@@ -6,7 +6,7 @@ import type { Session } from "@supabase/supabase-js";
 import FinanceModule from "@/app/finance-module";
 import ProductMaster from "@/app/product-master";
 import { isSupabaseConfigured, supabase } from "@/lib/supabase";
-import { createActiveSession, loadInventory, migrateLocalLifecycle, removeActiveSession, removeInventory, saveInventory, updateActiveSession } from "@/lib/inventory-store";
+import { createActiveSession, importInventoryBatch, loadInventory, migrateLocalLifecycle, removeActiveSession, removeInventory, saveInventory, updateActiveSession } from "@/lib/inventory-store";
 
 type Receipt = { name: string; dataUrl?: string; path?: string };
 type Change = { field: string; from: string; to: string };
@@ -618,7 +618,9 @@ export default function Home() {
       const created = prepared.length - updated;
       if (!window.confirm(`Sẽ cập nhật ${updated} lô theo Mã phiếu và thêm ${created} lô mới từ ${file.name}. Các lô không có trong file sẽ được giữ nguyên, không bị xóa. Hóa đơn đính kèm hiện có cũng được giữ lại. Tiếp tục?`)) return;
       if (!isLocalUat && isSupabaseConfigured && session) {
-        for (const entry of prepared) await saveInventory(entry.item, entry.event, undefined, cloudLifecycleReady ? entry.meta : undefined);
+        // The database function stores every receipt and history row in one transaction.
+        // A bad row can no longer leave a partially imported workbook in Production.
+        await importInventoryBatch(prepared.map((entry) => ({ item: entry.item, event: entry.event, meta: cloudLifecycleReady ? entry.meta : undefined })));
         await refreshCloud();
       } else {
         setLotMeta((current) => ({ ...current, ...Object.fromEntries(prepared.map(({ item, meta }) => [item.id, meta])) }));
