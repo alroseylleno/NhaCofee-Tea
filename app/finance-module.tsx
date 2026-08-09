@@ -105,7 +105,8 @@ type ParsedProductImport = { type: "products"; meta: ImportMetaInput; importMeta
 type ParsedServiceImport = { type: "service"; meta: ImportMetaInput; importMeta: FinanceImportMeta; records: FinanceServiceRecord[] };
 type ParsedFinanceImport = ParsedRevenueImport | ParsedProductImport | ParsedServiceImport;
 
-const FINANCE_STORAGE_KEY = "nha-ops-finance-v1";
+const FINANCE_STORAGE_KEY = "nha-ops-finance-v2";
+const FINANCE_PROD_LEGACY_STORAGE_KEY = "nha-ops-finance-v1";
 const FINANCE_UAT_STORAGE_KEY = "nha-ops-finance-uat-v2";
 const FINANCE_LEGACY_UAT_STORAGE_KEY = "nha-ops-finance-uat-v1";
 const categoryLabels: Record<ExpenseCategory, string> = {
@@ -488,7 +489,13 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   useEffect(() => {
     let cancelled = false;
     async function loadState() {
-      const stored = window.localStorage.getItem(storageKey) || (!uatMode ? window.localStorage.getItem(FINANCE_LEGACY_UAT_STORAGE_KEY) : null);
+      if (!uatMode) {
+        // One-time Production reset: old manual expenses were browser-local and
+        // could survive a database cleanup or leak in through the legacy UAT fallback.
+        window.localStorage.removeItem(FINANCE_PROD_LEGACY_STORAGE_KEY);
+        window.localStorage.removeItem(FINANCE_LEGACY_UAT_STORAGE_KEY);
+      }
+      const stored = window.localStorage.getItem(storageKey) || (uatMode ? window.localStorage.getItem(FINANCE_LEGACY_UAT_STORAGE_KEY) : null);
       let nextState = uatMode ? seedFinanceState() : emptyFinanceState();
       if (stored) {
         try { nextState = normalizeFinanceState(JSON.parse(stored), uatMode); } catch { nextState = uatMode ? seedFinanceState() : emptyFinanceState(); }

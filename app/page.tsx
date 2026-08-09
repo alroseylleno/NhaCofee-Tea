@@ -6,7 +6,7 @@ import type { Session } from "@supabase/supabase-js";
 import FinanceModule from "@/app/finance-module";
 import ProductMaster from "@/app/product-master";
 import { isSupabaseConfigured, supabase } from "@/lib/supabase";
-import { createActiveSession, importInventoryBatch, loadInventory, migrateLocalLifecycle, removeActiveSession, removeInventory, saveInventory, updateActiveSession } from "@/lib/inventory-store";
+import { createActiveSession, importInventoryBatch, loadInventory, migrateLocalLifecycle, removeActiveSession, removeInventory, saveInventory, settleInventoryPeriod, updateActiveSession } from "@/lib/inventory-store";
 
 type Receipt = { name: string; dataUrl?: string; path?: string };
 type Change = { field: string; from: string; to: string };
@@ -178,6 +178,7 @@ export default function Home() {
   const [settlementMode, setSettlementMode] = useState<SettlementMode>("month");
   const [settlementDate, setSettlementDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [settlementRemaining, setSettlementRemaining] = useState("");
+  const [settlingPeriod, setSettlingPeriod] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [workspace, setWorkspace] = useState<"inventory" | "finance" | "products">("inventory");
   const [tab, setTab] = useState<"inventory" | "active" | "report">("inventory");
@@ -403,7 +404,7 @@ export default function Home() {
   }
   function requestClose(session: ActiveSession, status: "used" | "wasted") { setCloseCandidate({ session, status }); setCloseReason(status === "used" ? "used_up" : ""); setCloseNote(""); }
   function requestSettlement(activeSession: ActiveSession) {
-    if (!isLocalUat) return;
+    if (activeSession.status !== "active") return;
     const lot = items.find((item) => item.id === activeSession.sourceReceiptId);
     const openingAmount = activeSession.openedAmount || lot?.conversion?.amount;
     const openingUnit = activeSession.openedUnit || lot?.conversion?.unit;
@@ -416,9 +417,9 @@ export default function Home() {
     setSettlementDate(new Date().toISOString().slice(0, 10));
     setSettlementRemaining("");
   }
-  function confirmSettlement(event: FormEvent<HTMLFormElement>) {
+  async function confirmSettlement(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!isLocalUat || !settlementCandidate) return;
+    if (!settlementCandidate || settlingPeriod) return;
     const sourceLot = items.find((item) => item.id === settlementCandidate.sourceReceiptId);
     if (!sourceLot || settlementCandidate.status !== "active") { window.alert("Phiên đang dùng này không còn khả dụng để chốt."); return; }
     const openingAmount = settlementCandidate.openedAmount || sourceLot.conversion?.amount || 0;
@@ -449,27 +450,41 @@ export default function Home() {
       settlement: { mode: settlementMode, periodEnd: settlementDate, openingAmount, remainingAmount, usedAmount, unit: openingUnit, returnedLotId },
     };
 
-    setActiveSessions((current) => current.map((entry) => entry.id === updatedSession.id ? updatedSession : entry));
-    if (returnedLotId) {
-      const returnedLot: Ingredient = {
-        ...sourceLot,
-        id: returnedLotId,
-        quantity: 1,
-        unitCost: returnedCost,
-        conversion: { amount: remainingAmount, unit: openingUnit },
-        receiptCode: `${sourceLot.receiptCode || "UAT"}-HK-${settlementDate.replaceAll("-", "")}-${returnedLotId.slice(0, 4).toUpperCase()}`,
-        stockState: "opened",
-        returnedOn: settlementDate,
-        sourceSessionId: settlementCandidate.id,
-        firstOpenedAt: sourceLot.firstOpenedAt || settlementCandidate.activatedAt,
-        history: [{ id: crypto.randomUUID(), at: closedAt, action: "created", changes: [] }],
-      };
-      setItems((current) => [returnedLot, ...current]);
-      setLotMeta((current) => ({ ...current, [returnedLotId]: { ...(current[sourceLot.id] || { storageLocation: "Chưa ghi", expiresOn: "" }) } }));
+    setSettlingPeriod(true);
+    try {
+      if (!isLocalUat) {
+        if (!cloudLifecycleReady || !session) throw new Error("Không thể xác nhận phiên Production. Vui lòng tải lại trang và đăng nhập lại.");
+        await settleInventoryPeriod({ sessionId: settlementCandidate.id, mode: settlementMode, periodEnd: settlementDate, remainingAmount, returnedLotId, historyId: returnedLotId ? crypto.randomUUID() : undefined });
+        await refreshCloud();
+      } else {
+        setActiveSessions((current) => current.map((entry) => entry.id === updatedSession.id ? updatedSession : entry));
+        if (returnedLotId) {
+          const returnedLot: Ingredient = {
+            ...sourceLot,
+            id: returnedLotId,
+            quantity: 1,
+            unitCost: returnedCost,
+            conversion: { amount: remainingAmount, unit: openingUnit },
+            receiptCode: `${sourceLot.receiptCode || "UAT"}-HK-${settlementDate.replaceAll("-", "")}-${returnedLotId.slice(0, 4).toUpperCase()}`,
+            stockState: "opened",
+            returnedOn: settlementDate,
+            sourceSessionId: settlementCandidate.id,
+            firstOpenedAt: sourceLot.firstOpenedAt || settlementCandidate.activatedAt,
+            history: [{ id: crypto.randomUUID(), at: closedAt, action: "created", changes: [] }],
+          };
+          setItems((current) => [returnedLot, ...current]);
+          setLotMeta((current) => ({ ...current, [returnedLotId]: { ...(current[sourceLot.id] || { storageLocation: "Chưa ghi", expiresOn: "" }) } }));
+        }
+      }
+      setSettlementCandidate(undefined);
+      setSettlementRemaining("");
+      window.alert(`Đã chốt ${usedAmount.toLocaleString("vi-VN")} ${openingUnit} sử dụng = ${formatMoney(recognizedCost)}.${remainingAmount > 0 ? ` Hoàn kho ${remainingAmount.toLocaleString("vi-VN")} ${openingUnit} = ${formatMoney(returnedCost)}.` : " Không còn lượng hoàn kho."}`);
+    } catch (error) {
+      if (!isLocalUat) { try { await refreshCloud(); } catch {} }
+      window.alert(error instanceof Error ? error.message : "Không thể chốt kỳ nguyên liệu.");
+    } finally {
+      setSettlingPeriod(false);
     }
-    setSettlementCandidate(undefined);
-    setSettlementRemaining("");
-    window.alert(`Đã chốt ${usedAmount.toLocaleString("vi-VN")} ${openingUnit} sử dụng = ${formatMoney(recognizedCost)}.${remainingAmount > 0 ? ` Hoàn kho ${remainingAmount.toLocaleString("vi-VN")} ${openingUnit} = ${formatMoney(returnedCost)}.` : " Không còn lượng hoàn kho."}`);
   }
   async function returnToStock(session: ActiveSession) {
     if (!canDeleteInventory || !window.confirm("Trả đơn vị này về trạng thái tồn kho?")) return;
@@ -800,7 +815,7 @@ export default function Home() {
       {lifecycleDashboard.length === 0 ? <div className="empty"><b>Không có dữ liệu trong bộ lọc này</b><span>Chọn một chỉ số khác để xem các nguyên liệu liên quan.</span></div> : <div className="active-list">{lifecycleDashboard.map((activeSession) => {
         const lot = items.find((entry) => entry.id === activeSession.sourceReceiptId); const group = ingredientGroups.find((entry) => entry.key === (lot ? ingredientKey(lot) : activeSession.ingredientKey)); const remaining = activeSession.useBy ? new Date(activeSession.useBy).getTime() - now : undefined; const totalLife = activeSession.useBy ? new Date(activeSession.useBy).getTime() - new Date(activeSession.activatedAt).getTime() : undefined; const elapsed = totalLife ? Math.min(100, Math.max(4, ((now - new Date(activeSession.activatedAt).getTime()) / totalLife) * 100)) : 12; const urgency = remaining === undefined ? "neutral" : remaining < 0 ? "overdue" : remaining <= 86_400_000 ? "soon" : "safe";
         if (activeSession.status === "wasted") return <article className="active-card wasted" key={activeSession.id}><div className="active-card-top"><div><span>{group?.category || "Nguyên liệu"}</span><h3>{group?.name || lot?.name || "Không xác định"}</h3><p>Báo hỏng {activeSession.closedAt ? formatDateTime(activeSession.closedAt) : "chưa rõ thời gian"}</p></div><b>{formatMoney(lot?.unitCost || 0)}</b></div><div className="waste-reason"><span>{reasonLabel(activeSession.reason)}</span>{activeSession.note && <small>{activeSession.note}</small>}</div><div className="active-meta"><span>Lô {lot ? formatDate(lot.purchasedOn) : "-"}</span><span>Mở lúc {formatDateTime(activeSession.activatedAt)}</span></div><div className="active-actions"><button onClick={() => group && setDetailGroup(group)}>Chi tiết nguồn hàng</button></div></article>;
-        return <article className={`active-card ${urgency}`} key={activeSession.id}><div className="active-card-top"><div><span>{group?.category || "Nguyên liệu"}</span><h3>{group?.name || lot?.name || "Không xác định"}</h3><p>Mở {formatDateTime(activeSession.activatedAt)} · đã {formatDuration(now - new Date(activeSession.activatedAt).getTime())} · Chi phí T{(activeSession.costRecognitionMonth || activeSession.activatedAt.slice(0, 7)).split("-").reverse().join("/")} · tạm tính {formatMoney(activeSession.provisionalCost ?? lot?.unitCost ?? 0)}</p></div><b>{remaining === undefined ? "Chưa đặt hạn" : remaining < 0 ? `Quá ${formatDuration(remaining)}` : `Còn ${formatDuration(remaining)}`}</b></div><div className="life-bar"><i style={{ width: `${elapsed}%` }} /></div><div className="active-meta"><span>Lô {lot ? formatDate(lot.purchasedOn) : "-"}</span><span>{lotMeta[activeSession.sourceReceiptId]?.storageLocation || "Chưa ghi nơi bảo quản"}</span></div><div className="active-actions">{canDeleteInventory && <button onClick={() => returnToStock(activeSession)}>Trả về tồn kho</button>}{isLocalUat && <button className="settle" onClick={() => requestSettlement(activeSession)}>Chốt kỳ</button>}<button onClick={() => requestClose(activeSession, "used")}>Đã dùng hết</button><button className="waste" onClick={() => requestClose(activeSession, "wasted")}>Báo hỏng</button><button onClick={() => group && setDetailGroup(group)}>Chi tiết</button></div></article>;
+        return <article className={`active-card ${urgency}`} key={activeSession.id}><div className="active-card-top"><div><span>{group?.category || "Nguyên liệu"}</span><h3>{group?.name || lot?.name || "Không xác định"}</h3><p>Mở {formatDateTime(activeSession.activatedAt)} · đã {formatDuration(now - new Date(activeSession.activatedAt).getTime())} · Chi phí T{(activeSession.costRecognitionMonth || activeSession.activatedAt.slice(0, 7)).split("-").reverse().join("/")} · tạm tính {formatMoney(activeSession.provisionalCost ?? lot?.unitCost ?? 0)}</p></div><b>{remaining === undefined ? "Chưa đặt hạn" : remaining < 0 ? `Quá ${formatDuration(remaining)}` : `Còn ${formatDuration(remaining)}`}</b></div><div className="life-bar"><i style={{ width: `${elapsed}%` }} /></div><div className="active-meta"><span>Lô {lot ? formatDate(lot.purchasedOn) : "-"}</span><span>{lotMeta[activeSession.sourceReceiptId]?.storageLocation || "Chưa ghi nơi bảo quản"}</span></div><div className="active-actions">{canDeleteInventory && <button onClick={() => returnToStock(activeSession)}>Trả về tồn kho</button>}{activeSession.status === "active" && <button className="settle" onClick={() => requestSettlement(activeSession)}>Chốt kỳ</button>}<button onClick={() => requestClose(activeSession, "used")}>Đã dùng hết</button><button className="waste" onClick={() => requestClose(activeSession, "wasted")}>Báo hỏng</button><button onClick={() => group && setDetailGroup(group)}>Chi tiết</button></div></article>;
       })}</div>}
     </section>}
 
@@ -830,7 +845,7 @@ export default function Home() {
       const provisionalCost = settlementCandidate.provisionalCost ?? lot?.unitCost ?? 0;
       const recognizedCost = openingAmount ? Math.round(provisionalCost * usedAmount / openingAmount) : 0;
       const returnedCost = Math.max(0, provisionalCost - recognizedCost);
-      return <div className="sheet-backdrop action-backdrop" role="presentation" onMouseDown={() => setSettlementCandidate(undefined)}><form className="sheet action-sheet" onSubmit={confirmSettlement} onMouseDown={(event) => event.stopPropagation()}><div className="sheet-handle" /><div className="sheet-title"><div><p>ĐỐI SOÁT LƯỢNG DÙNG THỰC TẾ</p><h2>Chốt kỳ · {lot?.name || "Nguyên liệu"}</h2><span>Chi phí đang tạm tính {formatMoney(provisionalCost)}</span></div><button type="button" className="close" onClick={() => setSettlementCandidate(undefined)}>×</button></div><div className="form-row"><label><FieldHint label="Loại kỳ" help="Chọn tuần nếu đối soát vận hành hàng tuần, hoặc tháng nếu chốt trực tiếp theo kỳ kế toán." /><select value={settlementMode} onChange={(event) => setSettlementMode(event.target.value as SettlementMode)}><option value="week">Hàng tuần</option><option value="month">Hàng tháng</option></select></label><label><FieldHint label="Ngày kết thúc kỳ" help="Ngày kiểm đếm lượng còn lại. Chi phí thực dùng sẽ điều chỉnh vào tháng đã chọn khi mở hộp." /><input required type="date" value={settlementDate} onChange={(event) => setSettlementDate(event.target.value)} /></label></div><label><FieldHint label={`Còn lại thực tế (${openingUnit})`} help="Nhập số lượng thực tế còn lại trong bao bì. Hệ thống tự tính phần đã dùng và giá trị hoàn kho." /><input required autoFocus min="0" max={openingAmount} step="0.01" inputMode="decimal" type="number" value={settlementRemaining} onChange={(event) => setSettlementRemaining(event.target.value)} placeholder={`Tối đa ${openingAmount.toLocaleString("vi-VN")} ${openingUnit}`} /><small>Lúc mở: {openingAmount.toLocaleString("vi-VN")} {openingUnit} · ghi nhận vào tháng {(settlementCandidate.costRecognitionMonth || settlementCandidate.activatedAt.slice(0, 7)).split("-").reverse().join("/")}</small></label><div className="settlement-preview"><div><span>Đã sử dụng</span><strong>{usedAmount.toLocaleString("vi-VN")} {openingUnit}</strong><small>{formatMoney(recognizedCost)}</small></div><div><span>Trả về Kho</span><strong>{remainingAmount.toLocaleString("vi-VN")} {openingUnit}</strong><small>{formatMoney(returnedCost)} · đã mở</small></div></div><p className="uat-note">Session hiện tại sẽ được đóng và giữ lịch sử. Phần còn lại tạo thành lô Kho đã mở, giữ nguyên hạn dùng sau lần mở đầu tiên.</p><button className="save-button" type="submit">Xác nhận chốt kỳ</button></form></div>;
+      return <div className="sheet-backdrop action-backdrop" role="presentation" onMouseDown={() => !settlingPeriod && setSettlementCandidate(undefined)}><form className="sheet action-sheet" onSubmit={confirmSettlement} onMouseDown={(event) => event.stopPropagation()}><div className="sheet-handle" /><div className="sheet-title"><div><p>ĐỐI SOÁT LƯỢNG DÙNG THỰC TẾ</p><h2>Chốt kỳ · {lot?.name || "Nguyên liệu"}</h2><span>Chi phí đang tạm tính {formatMoney(provisionalCost)}</span></div><button disabled={settlingPeriod} type="button" className="close" onClick={() => setSettlementCandidate(undefined)}>×</button></div><div className="form-row"><label><FieldHint label="Loại kỳ" help="Chọn tuần nếu đối soát vận hành hàng tuần, hoặc tháng nếu chốt trực tiếp theo kỳ kế toán." /><select disabled={settlingPeriod} value={settlementMode} onChange={(event) => setSettlementMode(event.target.value as SettlementMode)}><option value="week">Hàng tuần</option><option value="month">Hàng tháng</option></select></label><label><FieldHint label="Ngày kết thúc kỳ" help="Ngày kiểm đếm lượng còn lại. Chi phí thực dùng sẽ điều chỉnh vào tháng đã chọn khi mở hộp." /><input disabled={settlingPeriod} required type="date" value={settlementDate} onChange={(event) => setSettlementDate(event.target.value)} /></label></div><label><FieldHint label={`Còn lại thực tế (${openingUnit})`} help="Nhập số lượng thực tế còn lại trong bao bì. Hệ thống tự tính phần đã dùng và giá trị hoàn kho." /><input disabled={settlingPeriod} required autoFocus min="0" max={openingAmount} step="0.01" inputMode="decimal" type="number" value={settlementRemaining} onChange={(event) => setSettlementRemaining(event.target.value)} placeholder={`Tối đa ${openingAmount.toLocaleString("vi-VN")} ${openingUnit}`} /><small>Lúc mở: {openingAmount.toLocaleString("vi-VN")} {openingUnit} · ghi nhận vào tháng {(settlementCandidate.costRecognitionMonth || settlementCandidate.activatedAt.slice(0, 7)).split("-").reverse().join("/")}</small></label><div className="settlement-preview"><div><span>Đã sử dụng</span><strong>{usedAmount.toLocaleString("vi-VN")} {openingUnit}</strong><small>{formatMoney(recognizedCost)}</small></div><div><span>Trả về Kho</span><strong>{remainingAmount.toLocaleString("vi-VN")} {openingUnit}</strong><small>{formatMoney(returnedCost)} · đã mở</small></div></div><p className="uat-note">Session hiện tại sẽ được đóng và giữ lịch sử. Phần còn lại tạo thành lô Kho đã mở, giữ nguyên hạn dùng sau lần mở đầu tiên.</p><button disabled={settlingPeriod} className="save-button" type="submit">{settlingPeriod ? "Đang chốt kỳ..." : "Xác nhận chốt kỳ"}</button></form></div>;
     })()}
 
     {closeCandidate && <div className="sheet-backdrop action-backdrop" role="presentation" onMouseDown={() => setCloseCandidate(undefined)}><form className="sheet action-sheet" onSubmit={confirmClose} onMouseDown={(event) => event.stopPropagation()}><div className="sheet-handle" /><div className="sheet-title"><div><p>KẾT THÚC ACTIVE</p><h2>{closeCandidate.status === "used" ? "Xác nhận đã dùng hết" : "Ghi nhận hư hỏng"}</h2></div><button type="button" className="close" onClick={() => setCloseCandidate(undefined)}>×</button></div>{closeCandidate.status === "wasted" && <label><FieldHint label="Lý do" help="Chọn nguyên nhân hư hỏng thực tế để theo dõi hao hụt và đưa ra biện pháp khắc phục." /><select required value={closeReason} onChange={(event) => setCloseReason(event.target.value)}><option value="">Chọn lý do</option>{closeReasons.filter(([key]) => key !== "used_up").map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></label>}<label><FieldHint label="Ghi chú" help="Ghi rõ lý do khi chọn Khác để lịch sử hao hụt có thể truy vết." /> {closeReason === "other" ? "(bắt buộc)" : "(không bắt buộc)"}<textarea required={closeReason === "other"} value={closeNote} onChange={(event) => setCloseNote(event.target.value)} placeholder="Mô tả ngắn nếu cần" /></label><button className={`save-button ${closeCandidate.status === "wasted" ? "danger-button" : ""}`} type="submit">{closeCandidate.status === "used" ? "Đánh dấu đã dùng hết" : "Ghi nhận hư/hủy"}</button></form></div>}

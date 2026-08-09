@@ -81,7 +81,7 @@ When changing an inventory field, inspect all of these paths together:
 - A lot/receipt cannot be deleted after any unit has been issued, regardless of current active count.
 - Fully depleted groups move from `Tồn kho` to `Dùng hết` when sealed quantity and active quantity both reach zero.
 - Cost recognition uses `costRecognitionMonth`; operational opening time remains `activatedAt`.
-- Local UAT supports period settlement for an active converted unit. The session keeps its provisional full cost until settlement, then stores `recognizedCost` for actual use and creates an internal `stockState: opened` return lot for the remaining quantity/value. Internal return lots are inventory assets, not new purchases, and preserve the first-open shelf-life clock.
+- Local UAT and Production support period settlement for an active converted unit. The session keeps its provisional full cost until settlement, then stores `recognizedCost` for actual use and creates an internal `stockState: opened` return lot for the remaining quantity/value. Production uses the atomic `settle_inventory_period` RPC so closing the session and creating the return lot cannot partially succeed. Internal return lots are inventory assets, not new purchases, and preserve the first-open shelf-life clock.
 
 ## Finance Map
 
@@ -92,6 +92,7 @@ Owns expense forms, period filters, Excel parsing, report/dashboard calculations
 Important boundaries:
 
 - UAT finance data uses UAT-specific browser storage.
+- Production manual-expense cache uses `nha-ops-finance-v2`; the prior `v1` and accidental legacy-UAT fallback are cleared so a database inventory reset cannot leave stale expense cards in the browser.
 - Production Excel imports load from and replace the latest matching datasets in Supabase.
 - Importing a new dataset replaces that dataset through database RPCs; it must not silently clear unrelated inventory or expense data.
 - Inventory costs use sessions and their recognition month, not merely the browser's current month.
@@ -150,6 +151,8 @@ Do not stage these files in an unrelated Kho NVL hotfix. The current browser-loc
 | July 2026 sealed-stock cleanup | destructive one-time Production cleanup; retains active/used/wasted lifecycle rows | `20260809000600` |
 | Unbranded sealed-stock cleanup | destructive one-time Production cleanup across all dates; retains lifecycle rows | `20260809000700` |
 | June-August 2026 inventory reset | destructive owner-requested Production reset by `purchased_on`; privately snapshots then removes receipts, history, all lifecycle statuses and daily sequences | `20260809000800` |
+| Production inventory period settlement | receipt/session settlement fields plus atomic `settle_inventory_period` RPC and opened return lots | `20260809000900` |
+| Full Production inventory reset | destructive owner-requested private snapshot followed by complete removal of all receipts, history, lifecycle statuses and daily sequences | `20260809001000` |
 | Inventory lifecycle | `inventory_active_sessions`; expiry/storage fields | `20260728000000` |
 | Inventory deletion guardrails | authenticated-user RLS, active-session FK behavior and return-to-stock deletion | `20260728000100`, `20260808000200`, `20260809000100`; targeted receipt restoration `20260809000300` |
 | Receipt codes | receipt code column, daily sequence, trigger | `20260728000200` |
@@ -176,7 +179,7 @@ Migration rules:
 | Finance sample data | UAT-only local keys | Must not load UAT samples |
 | Authentication | Local UAT credentials are prefilled in the local login | Supabase Auth account |
 | Reset/sample controls | Allowed | Forbidden |
-| Delete receipt / return active unit to stock | Allowed in local data | Any authenticated account; receipt deletion remains blocked after its first issue and RLS only permits deleting an `active` session to return it to stock |
+| Delete receipt / return active unit to stock / period settlement | Allowed in local data | Any authenticated account; receipt deletion remains blocked after its first issue, RLS only permits deleting an `active` session to return it to stock, and period settlement runs atomically through Supabase |
 | Excel import | Local update for UAT testing | Supabase persistence for shared data |
 | Deployment | Localhost or `-uat` Vercel project | Vercel project tracking `main` |
 
