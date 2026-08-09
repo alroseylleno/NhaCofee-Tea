@@ -556,7 +556,9 @@ export default function Home() {
       if (Object.values(required).some((index) => index < 0)) throw new Error("File thiếu cột bắt buộc: Nguyên liệu, SL nhập, Đơn vị, Đơn giá hoặc Ngày mua.");
       const read = (row: unknown[], ...names: string[]) => { const index = column(...names); return index < 0 ? "" : row[index]; };
       const dateValue = (value: unknown) => {
-        if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
+        // Excel dates are calendar dates. Serializing through UTC can move midnight
+        // in Vietnam back to the prior day, so preserve the local calendar parts.
+        if (value instanceof Date && !Number.isNaN(value.getTime())) return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
         if (typeof value === "number") return new Date(Date.UTC(1899, 11, 30) + Math.round(value) * 86_400_000).toISOString().slice(0, 10);
         const text = String(value).trim(); const vietnamese = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); if (vietnamese) return `${vietnamese[3]}-${vietnamese[2].padStart(2, "0")}-${vietnamese[1].padStart(2, "0")}`;
         return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : "";

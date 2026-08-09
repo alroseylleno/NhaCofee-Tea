@@ -144,6 +144,7 @@ Do not stage these files in an unrelated Kho NVL hotfix. The current browser-loc
 | Area | Tables/functions | Key migrations |
 |---|---|---|
 | Inventory receipts/history | `inventory_receipts`, `inventory_history` | `20260701000000`, `20260701000001` |
+| Inventory import date correction | one-time 09 Aug Excel timezone correction | `20260809000400` - updates 87 guarded receipts from 30 Jun to 1 Jul 2026 |
 | Inventory lifecycle | `inventory_active_sessions`; expiry/storage fields | `20260728000000` |
 | Inventory deletion guardrails | authenticated-user RLS, active-session FK behavior and return-to-stock deletion | `20260728000100`, `20260808000200`, `20260809000100`; targeted receipt restoration `20260809000300` |
 | Receipt codes | receipt code column, daily sequence, trigger | `20260728000200` |
