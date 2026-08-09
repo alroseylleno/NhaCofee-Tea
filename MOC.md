@@ -118,6 +118,7 @@ Current UAT data contract:
 - Kho NVL lots feed Ingredient Master automatically with sealed-stock quantity, usable conversion, latest purchase price and a source-lot link for traceability.
 - Ingredient Master has no manual activation queue. Inventory ingredients are available to recipes as soon as they have appeared in Kho NVL, including historical out-of-stock options.
 - Multiple lots with the same name, category and brand are aggregated. Recipe selection prefers an in-stock ingredient whose oldest sealed lot has the earliest purchase date (FIFO), while theoretical cost keeps the latest purchase price.
+- In Local/UAT, a new recipe item may use only the NVL's explicit `Quy đổi sử dụng` unit. NVL without a valid conversion unit is excluded until its Kho NVL conversion is completed; purchase and specification units are never substituted.
 - Recipe edits stay only in the open screen until saved. `Lưu công thức` automatically creates the next immutable version and archives the prior version; there is no recipe activation action.
 - The UAT navigation label is `Sản phẩm`. It has three workspaces: Overview dashboard, waiting queue, and the combined Product/COGS catalog. The standalone Ingredient tab is intentionally removed; ingredients remain internal recipe choices sourced from Kho NVL.
 - Every SKU is normalized to `active` automatically on create, Finance merge and legacy local-data migration. SKU and recipe activation are not user workflows; saved recipes use the newest version automatically while prior versions remain archived for history.

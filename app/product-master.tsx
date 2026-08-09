@@ -3,7 +3,6 @@
 import Image from "next/image";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
-  ALL_RECIPE_UNITS,
   DEFAULT_STORE,
   type ImportedProductSource,
   type IngredientMaster,
@@ -15,7 +14,6 @@ import {
   type RecipeVersion,
   activeRecipeVersion,
   auditEvent,
-  compatibleUnits,
   convertToBase,
   emptyMasterDataState,
   mergeInventoryDrafts,
@@ -116,6 +114,11 @@ function sameUnitFamily(left: IngredientMaster, right: IngredientMaster) {
   return convertToBase(1, left.baseUnit, right.baseUnit) !== undefined;
 }
 
+function conversionUnitForRecipe(ingredient: IngredientMaster | undefined, uatMode: boolean) {
+  // UAT recipes must use the unit explicitly declared in Kho NVL's Quy đổi field.
+  return ingredient?.conversionUnit || (!uatMode ? ingredient?.baseUnit : undefined);
+}
+
 function capacityEstimate(version: RecipeVersion | undefined, ingredients: IngredientMaster[]): CapacityEstimate | undefined {
   if (!version?.items.length) return undefined;
   const rows = version.items.map((item): CapacityRow => {
@@ -150,9 +153,9 @@ function completeUatState(inventoryLots: InventorySourceLot[]) {
   let ingredients = mergeInventoryDrafts([], inventoryLots);
   if (!ingredients.length) {
     ingredients = [
-      { id: crypto.randomUUID(), storeId: DEFAULT_STORE.id, code: "NVL-0001", name: "Cà phê hạt", aliases: [], category: "CÀ PHÊ", brand: "Nhà", baseUnit: "g", purchaseUnit: "kg", latestPurchasePrice: 320_000, latestPurchasePricePerBaseUnit: 320, standardWastePercent: 2, latestPurchasedOn: today, oldestInStockPurchasedOn: today, stockQuantityBase: 4_000, stockLotCount: 1, sourceKey: "demo-coffee", status: "active", updatedAt: now },
-      { id: crypto.randomUUID(), storeId: DEFAULT_STORE.id, code: "NVL-0002", name: "Sữa tươi", aliases: [], category: "SỮA TƯƠI", brand: "Vinamilk", baseUnit: "ml", purchaseUnit: "hộp", latestPurchasePrice: 36_000, latestPurchasePricePerBaseUnit: 36, standardWastePercent: 1, latestPurchasedOn: today, oldestInStockPurchasedOn: today, stockQuantityBase: 12_000, stockLotCount: 12, sourceKey: "demo-milk", status: "active", updatedAt: now },
-      { id: crypto.randomUUID(), storeId: DEFAULT_STORE.id, code: "NVL-0003", name: "Trà lài", aliases: [], category: "TRÀ", brand: "Nhà", baseUnit: "g", purchaseUnit: "túi", latestPurchasePrice: 185_000, latestPurchasePricePerBaseUnit: 185, standardWastePercent: 2, latestPurchasedOn: today, oldestInStockPurchasedOn: today, stockQuantityBase: 1_000, stockLotCount: 2, sourceKey: "demo-tea", status: "active", updatedAt: now },
+      { id: crypto.randomUUID(), storeId: DEFAULT_STORE.id, code: "NVL-0001", name: "Cà phê hạt", aliases: [], category: "CÀ PHÊ", brand: "Nhà", baseUnit: "g", conversionUnit: "g", purchaseUnit: "kg", latestPurchasePrice: 320_000, latestPurchasePricePerBaseUnit: 320, standardWastePercent: 2, latestPurchasedOn: today, oldestInStockPurchasedOn: today, stockQuantityBase: 4_000, stockLotCount: 1, sourceKey: "demo-coffee", status: "active", updatedAt: now },
+      { id: crypto.randomUUID(), storeId: DEFAULT_STORE.id, code: "NVL-0002", name: "Sữa tươi", aliases: [], category: "SỮA TƯƠI", brand: "Vinamilk", baseUnit: "ml", conversionUnit: "ml", purchaseUnit: "hộp", latestPurchasePrice: 36_000, latestPurchasePricePerBaseUnit: 36, standardWastePercent: 1, latestPurchasedOn: today, oldestInStockPurchasedOn: today, stockQuantityBase: 12_000, stockLotCount: 12, sourceKey: "demo-milk", status: "active", updatedAt: now },
+      { id: crypto.randomUUID(), storeId: DEFAULT_STORE.id, code: "NVL-0003", name: "Trà lài", aliases: [], category: "TRÀ", brand: "Nhà", baseUnit: "g", conversionUnit: "g", purchaseUnit: "túi", latestPurchasePrice: 185_000, latestPurchasePricePerBaseUnit: 185, standardWastePercent: 2, latestPurchasedOn: today, oldestInStockPurchasedOn: today, stockQuantityBase: 1_000, stockLotCount: 2, sourceKey: "demo-tea", status: "active", updatedAt: now },
     ];
   }
   const usableIngredients = sortIngredientsForUse(ingredients).filter((ingredient) => ingredient.stockQuantityBase > 0);
@@ -245,9 +248,9 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
   const selectedProductCost = selectedProduct ? theoreticalProductCost(selectedProduct, state.recipeVersions, state.ingredients) : undefined;
   const selectedProductMargin = selectedProductCost !== undefined && selectedProduct?.sellingPrice ? (selectedProduct.sellingPrice - selectedProductCost) / selectedProduct.sellingPrice * 100 : undefined;
   const selectedCapacity = capacityEstimate(isCurrentRecipe ? { ...(currentRecipe || { id: "", productId: selectedProductId, version: 0, effectiveFrom: "", status: "active" as const, createdAt: "" }), items: recipeItems } : selectedVersion, state.ingredients);
-  const recipeCandidates = sortIngredientsForUse(state.ingredients.filter((ingredient) => !recipeCategory || ingredient.category === recipeCategory));
+  const recipeCandidates = sortIngredientsForUse(state.ingredients.filter((ingredient) => (!recipeCategory || ingredient.category === recipeCategory) && conversionUnitForRecipe(ingredient, uatMode)));
   const selectedRecipeIngredient = state.ingredients.find((ingredient) => ingredient.id === recipeIngredientId);
-  const allowedRecipeUnits = selectedRecipeIngredient ? compatibleUnits(selectedRecipeIngredient.baseUnit) : ALL_RECIPE_UNITS;
+  const allowedRecipeUnits = conversionUnitForRecipe(selectedRecipeIngredient, uatMode) ? [conversionUnitForRecipe(selectedRecipeIngredient, uatMode)!] : [];
 
   const stockIssues = useMemo<StockIssue[]>(() => {
     const issues = new Map<string, StockIssue>();
@@ -354,16 +357,16 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
 
   function selectRecipeCategory(category: string) {
     setRecipeCategory(category);
-    const preferred = sortIngredientsForUse(state.ingredients.filter((ingredient) => ingredient.category === category))[0];
+    const preferred = sortIngredientsForUse(state.ingredients.filter((ingredient) => ingredient.category === category && conversionUnitForRecipe(ingredient, uatMode)))[0];
     setRecipeIngredientId(preferred?.id || "");
-    setRecipeUnit(preferred?.baseUnit || "g");
+    setRecipeUnit(conversionUnitForRecipe(preferred, uatMode) || "");
     setRecipeWaste(String(preferred?.standardWastePercent || 0));
   }
 
   function selectRecipeIngredient(id: string) {
     setRecipeIngredientId(id);
     const ingredient = state.ingredients.find((entry) => entry.id === id);
-    setRecipeUnit(ingredient?.baseUnit || "g");
+    setRecipeUnit(conversionUnitForRecipe(ingredient, uatMode) || "");
     setRecipeWaste(String(ingredient?.standardWastePercent || 0));
   }
 
@@ -372,7 +375,8 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
     const quantity = Number(recipeQuantity);
     if (!selectedProduct || !isCurrentRecipe || !recipeIngredientId || quantity <= 0) return;
     const ingredient = state.ingredients.find((entry) => entry.id === recipeIngredientId);
-    if (!ingredient || !compatibleUnits(ingredient.baseUnit).some((unit) => unit === recipeUnit)) { window.alert("Đơn vị công thức không cùng nhóm với đơn vị chuẩn."); return; }
+    const conversionUnit = conversionUnitForRecipe(ingredient, uatMode);
+    if (!ingredient || !conversionUnit || recipeUnit !== conversionUnit) { window.alert("NVL này chưa có Đơn vị quy đổi hợp lệ. Hãy khai báo Quy đổi ở Kho NVL trước khi thêm vào công thức."); return; }
     setRecipeDraftItems((current) => [...current, { id: crypto.randomUUID(), ingredientId: recipeIngredientId, quantity, unit: recipeUnit, wastePercent: Math.max(0, Number(recipeWaste) || 0) }]);
     setRecipeQuantity("");
   }
@@ -505,7 +509,7 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
           <div className={styles.recipeToolbar}><label>Phiên bản đã lưu<select value={selectedVersion?.id || ""} onChange={(event) => { setSelectedRecipeVersionId(event.target.value); if (event.target.value === currentRecipe?.id) startRecipeDraft(selectedProduct.id); }}><option value="">Chưa có công thức</option>{selectedVersions.map((version) => <option value={version.id} key={version.id}>v{version.version} · {version.id === currentRecipe?.id ? "hiện hành" : "lưu trữ"} · {dateLabel(version.effectiveFrom)}</option>)}</select></label>{!isCurrentRecipe && <button onClick={() => startRecipeDraft(selectedProduct.id)}>Chỉnh công thức hiện hành</button>}</div>
           <div className={styles.recipeVersionMeta}><span>{currentRecipe ? `Đang chỉnh sửa từ v${currentRecipe.version}` : "Công thức mới"}</span><i className={recipeDraftDirty ? styles.draft : styles.active}>{recipeDraftDirty ? "chưa lưu" : "đã lưu"}</i><b>{recipeVersionCost({ id: "draft", productId: selectedProduct.id, version: 0, effectiveFrom: "", status: "active", createdAt: "", items: recipeItems }, state.ingredients, selectedProduct.packagingCost) === undefined ? "Chưa tính được" : money(recipeVersionCost({ id: "draft", productId: selectedProduct.id, version: 0, effectiveFrom: "", status: "active", createdAt: "", items: recipeItems }, state.ingredients, selectedProduct.packagingCost) || 0)}</b></div>
           <div className={styles.recipeList}>{recipeItems.length ? recipeItems.map((item) => { const ingredient = state.ingredients.find((entry) => entry.id === item.ingredientId); const cost = recipeItemCost(item, ingredient); const required = ingredient ? convertToBase(item.quantity, item.unit, ingredient.baseUnit) : undefined; const itemCapacity = ingredient && required ? Math.floor(ingredient.stockQuantityBase / (required * (1 + item.wastePercent / 100))) : 0; const issue = ingredient && ingredient.stockQuantityBase <= 0 ? { key: `${selectedProduct.id}-${ingredient.id}`, product: selectedProduct, version: currentRecipe || { id: "", productId: selectedProduct.id, version: 0, effectiveFrom: "", status: "active" as const, createdAt: "", items: recipeItems }, ingredient, candidates: sortIngredientsForUse(state.ingredients.filter((candidate) => candidate.id !== ingredient.id && candidate.stockQuantityBase > 0 && candidate.category === ingredient.category && sameUnitFamily(ingredient, candidate))) } : undefined; return <div className={styles.recipeItemBlock} key={item.id}><div className={`${styles.recipeRow} ${issue ? styles.recipeOut : ""}`}><span><b>{ingredient ? `${ingredient.name} · ${ingredient.brand}` : "Nguyên liệu đã xóa"}</b><small>{ingredient?.category || "-"} · {item.quantity} {item.unit} · HH {item.wastePercent}% · ước tính {numberLabel(itemCapacity, 0)} ly</small></span><strong>{cost === undefined ? "Thiếu giá" : money(cost)}</strong>{isCurrentRecipe && issue ? <><button className={styles.replaceButton} onClick={() => setInlineReplacementKey((current) => current === issue.key ? "" : issue.key)}>Thay thế</button><button className={styles.deleteButton} onClick={() => removeRecipeItem(item.id)}>Xóa</button></> : isCurrentRecipe && <button className={styles.deleteButton} onClick={() => removeRecipeItem(item.id)}>Xóa</button>}</div>{isCurrentRecipe && issue && inlineReplacementKey === issue.key && <div className={styles.inlineReplacement}><div><span>THAY NGUYÊN LIỆU / THƯƠNG HIỆU</span><b>{issue.ingredient.category}</b></div>{issue.candidates.length ? <><select value={replacementSelection[issue.key] || issue.candidates[0].id} onChange={(event) => setReplacementSelection((current) => ({ ...current, [issue.key]: event.target.value }))}>{issue.candidates.map((candidate) => <option value={candidate.id} key={candidate.id}>{candidate.name} · {candidate.brand} · còn {numberLabel(candidate.stockQuantityBase)} {candidate.baseUnit} · tồn từ {dateLabel(candidate.oldestInStockPurchasedOn)}</option>)}</select><button onClick={() => replaceIngredient(issue)}>Thay trong bản nháp</button></> : <p>Chưa có NVL còn tồn cùng category và nhóm đơn vị. Hãy nhập thêm ở Kho NVL.</p>}</div>}</div>; }) : <div className={styles.emptySmall}>Chưa có thành phần. Thêm NVL rồi lưu để tạo công thức đầu tiên.</div>}</div>
-          {isCurrentRecipe && <><form className={styles.recipeForm} onSubmit={addRecipeItem}><div className={styles.recipeSelectors}><label>1. Category<select required value={recipeCategory} onChange={(event) => selectRecipeCategory(event.target.value)}><option value="">Chọn category</option>{ingredientCategories.map((category) => <option value={category} key={category}>{category}</option>)}</select></label><label>2. Nguyên liệu / thương hiệu<select required disabled={!recipeCategory} value={recipeIngredientId} onChange={(event) => selectRecipeIngredient(event.target.value)}><option value="">Chọn nguyên liệu</option>{recipeCandidates.map((ingredient) => <option value={ingredient.id} key={ingredient.id}>{ingredient.name} · {ingredient.brand} · {ingredient.stockQuantityBase > 0 ? `còn ${numberLabel(ingredient.stockQuantityBase)} ${ingredient.baseUnit}` : "hết kho"}</option>)}</select><small>Ưu tiên mặc định: còn kho và tồn lâu nhất.</small></label></div><div><label>Định lượng<input required min="0.001" step="0.001" type="number" value={recipeQuantity} onChange={(event) => setRecipeQuantity(event.target.value)} /></label><label>Đơn vị<select value={recipeUnit} onChange={(event) => setRecipeUnit(event.target.value)}>{allowedRecipeUnits.map((unit) => <option key={unit}>{unit}</option>)}</select></label><label>Hao hụt %<input min="0" step="0.1" type="number" value={recipeWaste} onChange={(event) => setRecipeWaste(event.target.value)} /></label></div><button>Thêm nguyên liệu</button></form><button className={styles.saveRecipe} disabled={!recipeDraftDirty} onClick={saveRecipe}>Lưu công thức{currentRecipe ? ` thành v${currentRecipe.version + 1}` : ""}</button></>}
+          {isCurrentRecipe && <><form className={styles.recipeForm} onSubmit={addRecipeItem}><div className={styles.recipeSelectors}><label>1. Category<select required value={recipeCategory} onChange={(event) => selectRecipeCategory(event.target.value)}><option value="">Chọn category</option>{ingredientCategories.map((category) => <option value={category} key={category}>{category}</option>)}</select></label><label>2. Nguyên liệu / thương hiệu<select required disabled={!recipeCategory || !recipeCandidates.length} value={recipeIngredientId} onChange={(event) => selectRecipeIngredient(event.target.value)}><option value="">{recipeCandidates.length ? "Chọn nguyên liệu" : "Chưa có NVL đã quy đổi"}</option>{recipeCandidates.map((ingredient) => <option value={ingredient.id} key={ingredient.id}>{ingredient.name} · {ingredient.brand} · {ingredient.stockQuantityBase > 0 ? `còn ${numberLabel(ingredient.stockQuantityBase)} ${ingredient.baseUnit}` : "hết kho"} · quy đổi {ingredient.conversionUnit}</option>)}</select><small>Chỉ hiển thị NVL đã khai báo Quy đổi ở Kho NVL; ưu tiên tồn kho lâu nhất.</small></label></div><div><label>Định lượng<input required min="0.001" step="0.001" type="number" value={recipeQuantity} onChange={(event) => setRecipeQuantity(event.target.value)} /></label><label>Đơn vị quy đổi<select required disabled={!allowedRecipeUnits.length} value={recipeUnit} onChange={(event) => setRecipeUnit(event.target.value)}><option value="">Chọn đơn vị quy đổi</option>{allowedRecipeUnits.map((unit) => <option key={unit}>{unit}</option>)}</select></label><label>Hao hụt %<input min="0" step="0.1" type="number" value={recipeWaste} onChange={(event) => setRecipeWaste(event.target.value)} /></label></div><button disabled={!recipeIngredientId || !allowedRecipeUnits.length}>Thêm nguyên liệu</button></form><button className={styles.saveRecipe} disabled={!recipeDraftDirty} onClick={saveRecipe}>Lưu công thức{currentRecipe ? ` thành v${currentRecipe.version + 1}` : ""}</button></>}
         </>}
 
         {detailTab === "history" && <div className={styles.historyList}>{state.auditEvents.filter((event) => event.entityId === selectedProduct.id || state.recipeVersions.some((version) => version.productId === selectedProduct.id && version.id === event.entityId)).length ? state.auditEvents.filter((event) => event.entityId === selectedProduct.id || state.recipeVersions.some((version) => version.productId === selectedProduct.id && version.id === event.entityId)).map((event) => <div key={event.id}><span><b>{event.action}</b><small>{event.detail}</small></span><time>{new Date(event.createdAt).toLocaleString("vi-VN", { dateStyle: "short", timeStyle: "short" })}</time></div>) : <div className={styles.emptySmall}>Chưa có lịch sử cho SKU này.</div>}</div>}

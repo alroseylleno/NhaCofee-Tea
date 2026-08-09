@@ -43,6 +43,7 @@ export type IngredientMaster = {
   category: string;
   brand: string;
   baseUnit: string;
+  conversionUnit?: string;
   purchaseUnit: string;
   latestPurchasePrice: number;
   latestPurchasePricePerBaseUnit: number;
@@ -239,6 +240,7 @@ export function ingredientDraftsFromInventory(lots: InventorySourceLot[], storeI
       category: preferredLot.category,
       brand: preferredLot.brand,
       baseUnit: preferredSpecification.baseUnit,
+      conversionUnit: preferredLot.conversion?.amount && unitDefinition(preferredLot.conversion.unit) ? preferredLot.conversion.unit.trim() : undefined,
       purchaseUnit: preferredLot.unit,
       latestPurchasePrice: latestLot.unitCost,
       latestPurchasePricePerBaseUnit: latestSpecification.baseQuantity ? latestLot.unitCost / latestSpecification.baseQuantity : 0,
@@ -355,7 +357,7 @@ export function normalizeMasterDataState(value: unknown): MasterDataState {
   const now = new Date().toISOString();
   const normalizeStatus = (status: unknown): MasterStatus => MASTER_STATUSES.includes(status as MasterStatus) ? status as MasterStatus : "draft";
   const products = Array.isArray(stored.products) ? stored.products.map((product) => ({ ...product, aliases: Array.isArray(product.aliases) ? product.aliases : [], status: "active" as MasterStatus })) : [];
-  const ingredients = Array.isArray(stored.ingredients) ? stored.ingredients.map((ingredient) => ({ ...ingredient, aliases: Array.isArray(ingredient.aliases) ? ingredient.aliases : [], standardWastePercent: Number(ingredient.standardWastePercent) || 0, stockQuantityBase: Number(ingredient.stockQuantityBase) || 0, stockLotCount: Number(ingredient.stockLotCount) || 0, status: normalizeStatus(ingredient.status) })) : [];
+  const ingredients = Array.isArray(stored.ingredients) ? stored.ingredients.map((ingredient) => ({ ...ingredient, conversionUnit: typeof ingredient.conversionUnit === "string" && unitDefinition(ingredient.conversionUnit) ? ingredient.conversionUnit : undefined, aliases: Array.isArray(ingredient.aliases) ? ingredient.aliases : [], standardWastePercent: Number(ingredient.standardWastePercent) || 0, stockQuantityBase: Number(ingredient.stockQuantityBase) || 0, stockLotCount: Number(ingredient.stockLotCount) || 0, status: normalizeStatus(ingredient.status) })) : [];
   let recipeVersions = Array.isArray(stored.recipeVersions) ? stored.recipeVersions : [];
   if (!recipeVersions.length && Array.isArray(stored.recipes)) {
     const grouped = new Map<string, ProductRecipeItem[]>();
@@ -402,6 +404,7 @@ export function mergeInventoryDrafts(current: IngredientMaster[], lots: Inventor
       category: draft.category,
       brand: draft.brand,
       baseUnit: draft.baseUnit,
+      conversionUnit: draft.conversionUnit,
       purchaseUnit: draft.purchaseUnit,
       latestPurchasePrice: draft.latestPurchasePrice,
       latestPurchasePricePerBaseUnit: draft.latestPurchasePricePerBaseUnit,
