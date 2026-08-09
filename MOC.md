@@ -147,6 +147,7 @@ Do not stage these files in an unrelated Kho NVL hotfix. The current browser-loc
 | Inventory import date correction | one-time 09 Aug Excel timezone correction | `20260809000400` - guarded correction of supplied `010726-001..088` codes (without `033`) from 30 Jun to 1 Jul 2026 |
 | Inventory Excel import | atomic receipt and history import; prevents partial workbooks | `20260809000500` |
 | July 2026 sealed-stock cleanup | destructive one-time Production cleanup; retains active/used/wasted lifecycle rows | `20260809000600` |
+| Unbranded sealed-stock cleanup | destructive one-time Production cleanup across all dates; retains lifecycle rows | `20260809000700` |
 | Inventory lifecycle | `inventory_active_sessions`; expiry/storage fields | `20260728000000` |
 | Inventory deletion guardrails | authenticated-user RLS, active-session FK behavior and return-to-stock deletion | `20260728000100`, `20260808000200`, `20260809000100`; targeted receipt restoration `20260809000300` |
 | Receipt codes | receipt code column, daily sequence, trigger | `20260728000200` |
