@@ -117,7 +117,7 @@ Current UAT data contract:
 - Product Master is rendered in Local/UAT and Production. UAT browser storage uses `nha-ops-master-data-uat-v3`; Production uses `lib/master-data-store.ts` and Supabase.
 - Legacy UAT v2/v1 browser data is normalized on load. V3 removes Mapping entities from the Product Master state contract.
 - Finance product imports merge directly into Product Master by normalized SKU in both modes; the Product Master UI no longer exposes or requires a Mapping workflow.
-- Kho NVL lots feed Ingredient Master automatically with sealed-stock quantity, usable conversion, latest purchase price and a source-lot link for traceability.
+- Kho NVL lots feed Ingredient Master automatically with sealed-stock quantity, usable conversion, latest purchase price and a source-lot link for traceability. Supabase sync is source-of-truth: a master row no longer represented by a current Kho NVL lot is retained only for recipe history, set to inactive with zero stock, and excluded from new recipe choices.
 - Ingredient Master has no manual activation queue. Inventory ingredients are available to recipes as soon as they have appeared in Kho NVL, including historical out-of-stock options.
 - Multiple lots with the same name, category and brand are aggregated. Recipe selection prefers an in-stock ingredient whose oldest sealed lot has the earliest purchase date (FIFO), while theoretical cost keeps the latest purchase price.
 - In Local/UAT, a new recipe item may use only the NVL's explicit `Quy đổi sử dụng` unit. NVL without a valid conversion unit is excluded until its Kho NVL conversion is completed; purchase and specification units are never substituted.

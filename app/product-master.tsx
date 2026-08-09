@@ -234,7 +234,8 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
     if (loaded && uatMode) window.localStorage.setItem(MASTER_UAT_STORAGE_KEY, JSON.stringify(state));
   }, [state, loaded, uatMode]);
 
-  const ingredientCategories = useMemo(() => [...new Set(state.ingredients.map((ingredient) => ingredient.category).filter(Boolean))].sort((left, right) => left.localeCompare(right, "vi")), [state.ingredients]);
+  const liveIngredients = state.ingredients.filter((ingredient) => ingredient.status === "active");
+  const ingredientCategories = useMemo(() => [...new Set(liveIngredients.map((ingredient) => ingredient.category).filter(Boolean))].sort((left, right) => left.localeCompare(right, "vi")), [liveIngredients]);
   const activeProducts = state.products;
   const inStockIngredients = state.ingredients.filter((ingredient) => ingredient.stockQuantityBase > 0);
   const filteredProducts = useMemo(() => state.products.filter((product) => normalizedText(`${product.sku} ${product.name} ${product.aliases.join(" ")} ${product.category}`).includes(normalizedText(search))), [state.products, search]);
@@ -249,7 +250,7 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
   const selectedProductCost = selectedProduct ? theoreticalProductCost(selectedProduct, state.recipeVersions, state.ingredients) : undefined;
   const selectedProductMargin = selectedProductCost !== undefined && selectedProduct?.sellingPrice ? (selectedProduct.sellingPrice - selectedProductCost) / selectedProduct.sellingPrice * 100 : undefined;
   const selectedCapacity = capacityEstimate(isCurrentRecipe ? { ...(currentRecipe || { id: "", productId: selectedProductId, version: 0, effectiveFrom: "", status: "active" as const, createdAt: "" }), items: recipeItems } : selectedVersion, state.ingredients);
-  const recipeCandidates = sortIngredientsForUse(state.ingredients.filter((ingredient) => !recipeCategory || ingredient.category === recipeCategory)).sort((left, right) => Number(Boolean(conversionUnitForRecipe(right, uatMode))) - Number(Boolean(conversionUnitForRecipe(left, uatMode))));
+  const recipeCandidates = sortIngredientsForUse(liveIngredients.filter((ingredient) => !recipeCategory || ingredient.category === recipeCategory)).sort((left, right) => Number(Boolean(conversionUnitForRecipe(right, uatMode))) - Number(Boolean(conversionUnitForRecipe(left, uatMode))));
   const selectedRecipeIngredient = state.ingredients.find((ingredient) => ingredient.id === recipeIngredientId);
   const allowedRecipeUnits = conversionUnitForRecipe(selectedRecipeIngredient, uatMode) ? [conversionUnitForRecipe(selectedRecipeIngredient, uatMode)!] : [];
 
@@ -359,7 +360,7 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
   function selectRecipeCategory(category: string) {
     setRecipeCategory(category);
     setRecipePickerOpen(false);
-    const preferred = sortIngredientsForUse(state.ingredients.filter((ingredient) => ingredient.category === category && conversionUnitForRecipe(ingredient, uatMode)))[0];
+    const preferred = sortIngredientsForUse(liveIngredients.filter((ingredient) => ingredient.category === category && conversionUnitForRecipe(ingredient, uatMode)))[0];
     setRecipeIngredientId(preferred?.id || "");
     setRecipeUnit(conversionUnitForRecipe(preferred, uatMode) || "");
     setRecipeWaste(String(preferred?.standardWastePercent || 0));

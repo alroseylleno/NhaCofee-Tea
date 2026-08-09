@@ -390,7 +390,16 @@ export function mergeInventoryDrafts(current: IngredientMaster[], lots: Inventor
   const incoming = ingredientDraftsFromInventory(lots);
   const currentByKey = new Map(current.map((ingredient) => [ingredient.sourceKey, ingredient]));
   const incomingKeys = new Set(incoming.map((ingredient) => ingredient.sourceKey));
-  const merged = current.map((ingredient) => incomingKeys.has(ingredient.sourceKey) ? ingredient : ingredient.sourceInventoryLotId ? { ...ingredient, stockQuantityBase: 0, stockLotCount: 0, oldestInStockPurchasedOn: undefined } : ingredient);
+  // Keep referenced master rows for recipe history, but remove stale lots from live choices.
+  const merged = current.map((ingredient) => incomingKeys.has(ingredient.sourceKey) ? ingredient : {
+    ...ingredient,
+    sourceInventoryLotId: undefined,
+    stockQuantityBase: 0,
+    stockLotCount: 0,
+    oldestInStockPurchasedOn: undefined,
+    status: "inactive" as const,
+    updatedAt: new Date().toISOString(),
+  });
   for (const draft of incoming) {
     const existing = currentByKey.get(draft.sourceKey);
     if (!existing) {
