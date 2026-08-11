@@ -14,6 +14,8 @@ This is the mandatory routing map for code changes in `Operations/nha-ops/`. Rea
 - Localhost and `-uat` hosts use isolated browser storage for UAT inventory. They must not write to Production Supabase.
 - Product Master is available in both Local/UAT and Production. UAT uses isolated browser storage; Production reads and writes the shared Supabase Product Master tables.
 - Production `main` includes `bc5c225`, which reconciles Product Master ingredients to current Kho NVL source lots after an inventory reset/re-import.
+- The current release groups Kho/Active/Used/Waste cards by purchase month, then Category. Month headers are `+` / `-` accordions, while each ingredient detail keeps its complete cross-month receipt history.
+- The current release adds manual-expense Excel round-trip and Production Supabase persistence through `finance_expenses`; UAT expense records remain browser-local. Production saves require a returned Supabase row before the UI accepts the change.
 
 ## Start Here
 
@@ -57,6 +59,7 @@ Owns:
 - Login shell and module navigation.
 - Kho NVL tabs: inventory, active, report.
 - Stock/used-up views, category quick filters, search and sorting.
+- Inventory card hierarchy is purchase month → Category → grouped ingredient. Opening an ingredient exposes the full receipt history grouped again by month, including lots outside the current card month.
 - Category normalization: categories are uppercased and case-only duplicates collapse into one category.
 - Add/edit/copy/delete flows, invoice attachment UI, Excel import/export.
 - Sealed/active/used/wasted calculations and deletion guardrails.
@@ -94,13 +97,16 @@ Important boundaries:
 
 - UAT finance data uses UAT-specific browser storage.
 - Production manual-expense cache uses `nha-ops-finance-v2`; the prior `v1` and accidental legacy-UAT fallback are cleared so a database inventory reset cannot leave stale expense cards in the browser.
+- Manual expenses use Excel export/import with stable record IDs and an exported instruction sheet. Duplicate IDs inside one workbook keep the final row. UAT merges imported rows into its isolated browser store; Production bulk-upserts them into `finance_expenses`, requires Supabase to return every imported row, then reloads and verifies the committed cloud snapshot.
+- Expense entry keeps the four expense-category filter cards. Inside the selected filter, record groups are `+` / `-` accordions by manual subcategory; Operating expenses also contain `Từ Kho NVL`, nested again by the Category carried from each inventory lot before showing individual COGS/waste events.
+- On the first successful Production load after the expense migration, each device uses `nha-ops-finance-expenses-migrated-v1` to insert its browser-cached v2 expenses only once. Existing cloud IDs are never overwritten, and later cloud deletions cannot be resurrected by the cache.
 - Production Excel imports load from and replace the latest matching datasets in Supabase.
 - Importing a new dataset replaces that dataset through database RPCs; it must not silently clear unrelated inventory or expense data.
 - Inventory costs use sessions and their recognition month, not merely the browser's current month.
 
 ### `lib/finance-store.ts`
 
-Maps Supabase rows into revenue, product and service records and calls replace-import RPCs. If an import fails with missing table/function/schema cache errors, verify migrations before changing UI parsing.
+Maps Supabase rows into manual expenses, revenue, product and service records; upserts `finance_expenses`; and calls replace-import RPCs. If an import fails with missing table/function/schema cache errors, verify migrations before changing UI parsing.
 
 ## Product Master
 
@@ -161,6 +167,7 @@ Do not stage these files in an unrelated Kho NVL hotfix. The current browser-loc
 | Receipt codes | receipt code column, daily sequence, trigger | `20260728000200` |
 | Historical test cleanup | destructive one-time cleanup | `20260728000300` |
 | Finance imports | finance import/row tables and replace RPCs | `20260804000100` through `20260804000300` |
+| Manual finance expenses | `finance_expenses` with explicit authenticated table grants and authenticated CRUD RLS | `20260811000100` |
 | Cost recognition month | `inventory_active_sessions.cost_recognition_month` | `20260805000200` |
 | Inventory conversion | conversion amount/unit fields | `20260807000100` |
 | CFO master-data foundation | stores, masters, recipes and finance facts | `20260805000100`, `20260809000200` - additive tables, versioned recipes and broad authenticated RLS during rollout |
@@ -180,6 +187,7 @@ Migration rules:
 | Inventory store | Browser-local isolated keys | Supabase |
 | Product Master | Browser-local `nha-ops-master-data-uat-v3` | Shared Supabase master, recipe-version and audit tables |
 | Finance sample data | UAT-only local keys | Must not load UAT samples |
+| Manual expense ledger | Browser-local UAT key; Excel can move test data between browsers | Shared `finance_expenses` table after migration `20260811000100` |
 | Authentication | Local UAT credentials are prefilled in the local login | Supabase Auth account |
 | Reset/sample controls | Allowed | Forbidden |
 | Delete receipt / return active unit to stock / period settlement | Allowed in local data | Any authenticated account; receipt deletion remains blocked after its first issue, RLS only permits deleting an `active` session to return it to stock, and period settlement runs atomically through Supabase |

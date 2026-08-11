@@ -77,7 +77,27 @@ export type FinanceServiceRecord = {
   revenue: number;
 };
 
+export type FinanceExpenseRecord = {
+  id: string;
+  name: string;
+  category: "fixed" | "operating" | "sales" | "investment";
+  subcategory: string;
+  amount: number;
+  incurredOn: string;
+  recurrence: "once" | "weekly" | "monthly" | "quarterly" | "yearly";
+  paymentStatus: "unpaid" | "partial" | "paid";
+  paymentDate?: string;
+  invoiceCode?: string;
+  vendor?: string;
+  note?: string;
+  usefulLifeMonths?: number;
+  salvageValue?: number;
+  inServiceOn?: string;
+  status: "active" | "voided";
+};
+
 export type FinanceCloudState = {
+  expenses: FinanceExpenseRecord[];
   revenues: FinanceRevenueRecord[];
   products: FinanceProductRecord[];
   services: FinanceServiceRecord[];
@@ -94,6 +114,27 @@ function numberValue(value: unknown) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function expenseFromRow(row: Record<string, unknown>): FinanceExpenseRecord {
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    category: row.category as FinanceExpenseRecord["category"],
+    subcategory: String(row.subcategory),
+    amount: numberValue(row.amount),
+    incurredOn: String(row.incurred_on),
+    recurrence: row.recurrence as FinanceExpenseRecord["recurrence"],
+    paymentStatus: row.payment_status as FinanceExpenseRecord["paymentStatus"],
+    paymentDate: row.payment_date ? String(row.payment_date) : undefined,
+    invoiceCode: row.invoice_code ? String(row.invoice_code) : undefined,
+    vendor: row.vendor ? String(row.vendor) : undefined,
+    note: row.note ? String(row.note) : undefined,
+    usefulLifeMonths: row.useful_life_months === null || row.useful_life_months === undefined ? undefined : Number(row.useful_life_months),
+    salvageValue: row.salvage_value === null || row.salvage_value === undefined ? undefined : numberValue(row.salvage_value),
+    inServiceOn: row.in_service_on ? String(row.in_service_on) : undefined,
+    status: row.status as FinanceExpenseRecord["status"],
+  };
+}
+
 function supabaseFailure(error: unknown, context: string) {
   const detail = error && typeof error === "object" ? error as { code?: string; message?: string; details?: string; hint?: string } : {};
   const rawMessage = [detail.message, detail.details, detail.hint].filter(Boolean).join(" · ");
@@ -104,12 +145,14 @@ function supabaseFailure(error: unknown, context: string) {
 
 export async function loadFinanceImports(): Promise<FinanceCloudState> {
   const client = requireClient();
-  const [importsResult, revenueResult, productsResult, servicesResult] = await Promise.all([
+  const [expensesResult, importsResult, revenueResult, productsResult, servicesResult] = await Promise.all([
+    client.from("finance_expenses").select("*").order("incurred_on", { ascending: false }),
     client.from("finance_imports").select("*").order("imported_at", { ascending: false }),
     client.from("finance_revenue_rows").select("*").order("report_date", { ascending: false }),
     client.from("finance_product_rows").select("*").order("source_row", { ascending: true }),
     client.from("finance_service_rows").select("*").order("source_row", { ascending: true }),
   ]);
+  if (expensesResult.error) throw supabaseFailure(expensesResult.error, "Không thể tải chi phí ghi nhận");
   if (importsResult.error) throw supabaseFailure(importsResult.error, "Không thể tải metadata import");
   if (revenueResult.error) throw supabaseFailure(revenueResult.error, "Không thể tải dữ liệu doanh thu");
   if (productsResult.error) throw supabaseFailure(productsResult.error, "Không thể tải dữ liệu mặt hàng");
@@ -125,6 +168,8 @@ export async function loadFinanceImports(): Promise<FinanceCloudState> {
   }));
   const importByType = new Map(imports.map((entry) => [entry.dataType, entry]));
   const revenueMeta = importByType.get("revenue");
+
+  const expenses: FinanceExpenseRecord[] = (expensesResult.data || []).map((row) => expenseFromRow(row));
 
   const revenues: FinanceRevenueRecord[] = (revenueResult.data || []).map((row) => {
     const totalPlatformFees = numberValue(row.partner_fee) + numberValue(row.platform_tax_collected) + numberValue(row.service_fee_before_tax) + numberValue(row.delivery_fee);
@@ -198,7 +243,39 @@ export async function loadFinanceImports(): Promise<FinanceCloudState> {
     revenue: numberValue(row.revenue),
   }));
 
-  return { revenues, products, services, imports };
+  return { expenses, revenues, products, services, imports };
+}
+
+function expenseRows(records: FinanceExpenseRecord[]) {
+  return records.map((record) => ({
+    id: record.id,
+    name: record.name,
+    category: record.category,
+    subcategory: record.subcategory,
+    amount: record.amount,
+    incurred_on: record.incurredOn,
+    recurrence: record.recurrence,
+    payment_status: record.paymentStatus,
+    payment_date: record.paymentDate || null,
+    invoice_code: record.invoiceCode || null,
+    vendor: record.vendor || null,
+    note: record.note || null,
+    useful_life_months: record.usefulLifeMonths ?? null,
+    salvage_value: record.salvageValue ?? null,
+    in_service_on: record.inServiceOn || null,
+    status: record.status,
+    updated_at: new Date().toISOString(),
+  }));
+}
+
+export async function upsertFinanceExpenses(records: FinanceExpenseRecord[], ignoreExisting = false) {
+  if (!records.length) return [];
+  const { data, error } = await requireClient().from("finance_expenses").upsert(expenseRows(records), {
+    onConflict: "id",
+    ignoreDuplicates: ignoreExisting,
+  }).select("*");
+  if (error) throw supabaseFailure(error, "Không thể lưu chi phí ghi nhận");
+  return (data || []).map((row) => expenseFromRow(row));
 }
 
 function revenueRpcRows(records: FinanceRevenueRecord[]) {

@@ -167,3 +167,25 @@
 @media (min-width: 1120px) {
   .inventory-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
+
+.inventory-timeline { display: grid; gap: 24px; }
+.inventory-month-section { display: block; }
+.inventory-month-heading { position: sticky; z-index: 1; top: 0; display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 10px 12px; border-left: 4px solid var(--clay); border-radius: 0 11px 11px 0; color: #fff; background: linear-gradient(110deg, #183d35, #28614f); box-shadow: 0 5px 12px #17312b20; cursor: pointer; list-style: none; }
+.inventory-month-heading::-webkit-details-marker { display: none; }
+.inventory-month-heading::before { content: "+"; display: grid; width: 22px; height: 22px; place-items: center; border-radius: 50%; color: #173d33; background: #dce8d3; font: 800 17px/1 Arial, sans-serif; }
+.inventory-month-section[open] > .inventory-month-heading::before { content: "-"; }
+.inventory-month-heading span { font: 700 15px Georgia, serif; }
+.inventory-month-heading b { color: #dce8d3; font: 700 9px Arial, sans-serif; }
+.inventory-month-content { display: grid; gap: 13px; padding-top: 13px; }
+.inventory-category-section { display: grid; gap: 8px; padding-left: 9px; border-left: 1px solid #cfd9cc; }
+.inventory-category-heading { display: flex; justify-content: space-between; align-items: center; padding: 0 4px; }
+.inventory-category-heading h3 { color: #315b45; font: 800 11px Arial, sans-serif; letter-spacing: .08em; text-transform: uppercase; }
+.inventory-category-heading span { color: var(--muted); font: 9px Arial, sans-serif; }
+.ingredient-history-button { width: 100%; padding: 10px; border: 0; border-top: 1px solid #dfe6dc; border-radius: 0 0 9px 9px; color: #315b45; background: #e7f0e4; font: 800 9px Arial, sans-serif; text-align: center; }
+.detail-history-heading { display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 10px; }
+.detail-history-heading h3 { margin: 0; }
+.detail-history-heading span { color: var(--muted); font: 10px Arial, sans-serif; }
+.detail-month-group { display: grid; gap: 8px; padding: 10px; border: 1px solid #d7e1d6; border-radius: 13px; background: #f3f7f0; }
+.detail-month-group + .detail-month-group { margin-top: 10px; }
+.detail-month-group > div:first-child { display: flex; justify-content: space-between; gap: 10px; color: #315b45; font: 11px Arial, sans-serif; }
+.detail-month-group > div:first-child span { color: var(--muted); font-size: 9px; }

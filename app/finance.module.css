@@ -60,22 +60,46 @@
 .sectionHeader span, .reportHeader span, .dashboardActions span { color: #8d7b59; font: 700 9px Arial, sans-serif; letter-spacing: .13em; }
 .sectionHeader h2, .reportHeader h2, .dashboardActions h2 { margin-top: 4px; font-size: 22px; }
 .sectionHeader > button, .dashboardActions > button { flex: 0 0 auto; padding: 10px 12px; border: 0; border-radius: 10px; color: #fff; background: var(--ink); font: 700 11px Arial, sans-serif; }
+.expenseHeaderActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.expenseHeaderActions label, .expenseHeaderActions button { position: relative; flex: 0 0 auto; padding: 9px 10px; border: 1px solid #c8d5c8; border-radius: 9px; color: #1e4b3f; background: #f4f8f0; font: 700 10px Arial, sans-serif; cursor: pointer; }
+.expenseHeaderActions label input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); opacity: 0; }
+.expenseHeaderActions button:disabled { cursor: default; opacity: .4; }
+.expenseHeaderActions .addExpenseButton { border-color: #e87d5c; color: #fff; background: #e87d5c; box-shadow: 0 4px 10px #e87d5c35; }
+.cloudStatus { margin-top: 16px; padding: 10px 12px; border: 1px solid #c6d9c5; border-radius: 10px; color: #315b45; background: #eaf4e7; font: 10px/1.4 Arial, sans-serif; }
+@media (max-width: 520px) {
+  .sectionHeader { flex-direction: column; align-items: stretch; }
+  .expenseHeaderActions { display: grid; grid-template-columns: 1fr 1fr; }
+  .expenseHeaderActions label, .expenseHeaderActions button { text-align: center; }
+  .expenseHeaderActions .addExpenseButton { grid-column: 1 / -1; }
+}
 
 .categoryTabs { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin: 17px 0 13px; }
-.categoryTabs button { display: flex; justify-content: space-between; gap: 7px; align-items: center; min-width: 0; padding: 11px; border: 1px solid var(--line); border-radius: 11px; color: var(--muted); background: #f9f6ef; text-align: left; }
+.categoryTabs button { display: flex; justify-content: space-between; gap: 7px; align-items: center; min-width: 0; padding: 11px; border: 1px solid var(--line); border-radius: 11px; color: var(--muted); background: #f3f5ee; text-align: left; }
 .categoryTabs button span { overflow: hidden; font: 700 10px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
-.categoryTabs button b { display: grid; flex: 0 0 22px; place-items: center; height: 22px; border-radius: 50%; color: var(--ink); background: #eae3d7; font-size: 10px; }
-.categoryTabs .selected { border: 2px solid var(--ink); padding: 10px; color: var(--ink); background: #fff; }
+.categoryTabs button b { display: grid; flex: 0 0 22px; place-items: center; height: 22px; border-radius: 50%; color: #1e4b3f; background: #e4eee1; font-size: 10px; }
+.categoryTabs .selected { border: 2px solid #1e4b3f; padding: 10px; color: var(--ink); background: #fff; }
 .expenseList { display: grid; gap: 11px; }
 .expenseGroup { overflow: hidden; border: 1px solid #d6ded3; border-radius: 16px; background: #fff; box-shadow: 0 5px 16px #17312b0b; transition: border-color .16s ease, box-shadow .16s ease; }
 .expenseGroup:hover, .expenseGroup[open] { border-color: #aac0ae; box-shadow: 0 8px 20px #17312b12; }
 .expenseGroup > summary { display: grid; grid-template-columns: 23px minmax(0, 1fr) auto; gap: 9px; align-items: center; min-height: 54px; padding: 13px 14px; cursor: pointer; list-style: none; background: linear-gradient(105deg, #f6faf3, #fffdf8 72%); }
 .expenseGroup > summary::-webkit-details-marker { display: none; }
 .expenseGroup > summary::before { content: "+"; grid-column: 1; grid-row: 1; display: grid; place-items: center; width: 23px; height: 23px; border-radius: 50%; color: #fff; background: #527765; font: 700 17px/1 Arial, sans-serif; transition: background .15s ease; }
-.expenseGroup[open] > summary::before { content: "−"; background: #365f4d; }
+.expenseGroup[open] > summary::before { content: "-"; background: #365f4d; }
 .expenseGroup > summary span { grid-column: 2; min-width: 0; overflow: hidden; color: #284d3a; font: 700 12px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
 .expenseGroup > summary span small { color: var(--muted); font: 500 10px Arial, sans-serif; white-space: nowrap; }
 .expenseGroup > summary b { grid-column: 3; padding: 5px 7px; border-radius: 7px; color: #1e4b3f; background: #e5f0e3; font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.inventorySourceGroup { border-color: #d5c29e; }
+.inventorySourceGroup > summary { background: linear-gradient(105deg, #fff8ea, #fffdf8 72%); }
+.inventorySourceGroup > summary::before { background: #9b7a45; }
+.inventoryCategoryList { display: grid; gap: 7px; padding: 8px; border-top: 1px solid #e3d8c4; background: #f6f0e5; }
+.inventoryCategoryGroup { overflow: hidden; border: 1px solid #dfd6c6; border-radius: 12px; background: #fff; }
+.inventoryCategoryGroup > summary { display: grid; grid-template-columns: 21px minmax(0, 1fr) auto; gap: 8px; align-items: center; min-height: 46px; padding: 10px 11px; cursor: pointer; list-style: none; }
+.inventoryCategoryGroup > summary::-webkit-details-marker { display: none; }
+.inventoryCategoryGroup > summary::before { content: "+"; display: grid; width: 21px; height: 21px; place-items: center; border-radius: 6px; color: #fff; background: #967344; font: 700 15px/1 Arial, sans-serif; }
+.inventoryCategoryGroup[open] > summary::before { content: "-"; }
+.inventoryCategoryGroup > summary span { min-width: 0; overflow: hidden; color: #5c472b; font: 800 10px Arial, sans-serif; letter-spacing: .04em; text-overflow: ellipsis; white-space: nowrap; }
+.inventoryCategoryGroup > summary small { color: var(--muted); font: 500 9px Arial, sans-serif; letter-spacing: 0; }
+.inventoryCategoryGroup > summary b { color: #5c472b; font: 700 10px Arial, sans-serif; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .expenseGroupItems { display: grid; gap: 1px; padding: 6px; border-top: 1px solid #dfe6dc; background: #f1f5ef; }
 .compactExpenseCard { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; width: 100%; min-height: 42px; padding: 10px 11px; border: 1px solid transparent; border-radius: 9px; color: var(--ink); background: #fff; text-align: left; transition: border-color .14s ease, background .14s ease, transform .14s ease; }
 .compactExpenseCard:hover { border-color: #bed1bf; background: #fbfdf9; transform: translateX(2px); }
@@ -465,9 +489,6 @@
 .summaryStrip > div, .expenseCard, .reportCard, .chartCard, .runRateCard, .costMixCard, .forecastCard, .assetCard { border-color: var(--line); box-shadow: 0 2px 4px #17312b08; }
 .sectionHeader span, .reportHeader span, .dashboardActions span, .sourceLabel, .reportCard > span, .chartCard > div:first-child > span, .runRateCard > span, .costMixCard > div:first-child span, .forecastCard > span { color: #1e4b3f; }
 .sectionHeader > button, .dashboardActions > button { background: #e87d5c; box-shadow: 0 5px 12px #e87d5c44; }
-.categoryTabs button { border-color: var(--line); background: #f3f5ee; }
-.categoryTabs button b { color: #1e4b3f; background: #e4eee1; }
-.categoryTabs .selected { border-color: #1e4b3f; color: var(--ink); background: #fff; }
 .sourceIcon { background: #1e4b3f; }
 .expenseValue .paid { color: #3f6b4e; }
 .sourceButton { color: #1e4b3f; }
