@@ -291,6 +291,8 @@
 .recipeForm { display: grid; gap: 9px; margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 11px; background: #fff; }
 .recipeForm label { display: grid; gap: 5px; color: var(--muted); font: 800 8px Arial, sans-serif; }
 .recipeForm label small { color: #7d7564; font: 8px/1.35 Arial, sans-serif; }
+.recipePickerField { display: grid; gap: 5px; color: var(--muted); font: 800 8px Arial, sans-serif; }
+.recipePickerField > small { color: #7d7564; font: 8px/1.35 Arial, sans-serif; }
 .recipeIngredientPicker { position: relative; }
 .recipeIngredientTrigger { display: flex; justify-content: space-between; gap: 8px; align-items: center; width: 100%; min-height: 37px; padding: 9px 7px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: #fff; text-align: left; }
 .recipeIngredientTrigger:disabled { color: var(--muted); background: #f4f3ed; }
