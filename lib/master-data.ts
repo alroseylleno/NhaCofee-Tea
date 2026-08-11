@@ -337,7 +337,7 @@ export function productValidationErrors(product: ProductMaster, versions: Recipe
   for (const item of recipe?.items || []) {
     const ingredient = ingredients.find((entry) => entry.id === item.ingredientId);
     if (!ingredient) errors.push("Công thức tham chiếu nguyên liệu không tồn tại");
-    else if (ingredient.stockQuantityBase <= 0) errors.push(`${ingredient.name} · ${ingredient.brand}: đã hết trong kho`);
+    else if (ingredient.status !== "active" || ingredient.stockQuantityBase <= 0) errors.push(`${ingredient.name} · ${ingredient.brand}: không còn khả dụng ở Kho hay Đang dùng`);
     else if (recipeItemCost(item, ingredient) === undefined) errors.push(`${ingredient.name}: thiếu giá hoặc sai nhóm đơn vị`);
   }
   return [...new Set(errors)];

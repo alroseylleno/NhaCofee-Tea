@@ -312,6 +312,20 @@ export default function Home() {
   const openSessions = useMemo(() => activeSessions.filter((session) => session.status === "active"), [activeSessions]);
   const usedSessions = useMemo(() => activeSessions.filter((session) => session.status === "used"), [activeSessions]);
   const wastedSessions = useMemo(() => activeSessions.filter((session) => session.status === "wasted"), [activeSessions]);
+  const productInventoryLots = useMemo(() => {
+    const lifecycleCounts = new Map<string, { issued: number; active: number }>();
+    for (const lifecycleSession of activeSessions) {
+      const counts = lifecycleCounts.get(lifecycleSession.sourceReceiptId) || { issued: 0, active: 0 };
+      counts.issued += 1;
+      if (lifecycleSession.status === "active") counts.active += 1;
+      lifecycleCounts.set(lifecycleSession.sourceReceiptId, counts);
+    }
+    return items.map((item) => {
+      const counts = lifecycleCounts.get(item.id) || { issued: 0, active: 0 };
+      const sealedQuantity = Math.max(0, item.quantity - counts.issued);
+      return { id: item.id, name: item.name, category: item.category, brand: item.brand, unit: item.unit, quantity: item.quantity, stockQuantity: sealedQuantity + counts.active, specification: item.specification, conversion: item.conversion, unitCost: item.unitCost, purchasedOn: item.purchasedOn };
+    });
+  }, [items, activeSessions]);
   const inventoryViewGroups = useMemo(() => filteredGroups.map((group) => {
     const lots = group.lots.filter((lot) => {
       if (inventoryView === "stock") return sealedInLot(lot) > 0;
@@ -831,7 +845,7 @@ export default function Home() {
       onOpenInventoryLot={(id) => { const lot = items.find((item) => item.id === id); if (!lot) return; setWorkspace("inventory"); setTab("inventory"); setDetailLot(lot); }}
     /> : workspace === "products" && canAccessFinance ? <ProductMaster
       uatMode={isLocalUat}
-      inventoryLots={items.map((item) => ({ id: item.id, name: item.name, category: item.category, brand: item.brand, unit: item.unit, quantity: item.quantity, stockQuantity: sealedInLot(item), specification: item.specification, conversion: item.conversion, unitCost: item.unitCost, purchasedOn: item.purchasedOn }))}
+      inventoryLots={productInventoryLots}
     /> : <>
     <section className="hero">
       <div className="eyebrow">NHA COFFEE & TEA</div>
