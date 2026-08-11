@@ -1,6 +1,6 @@
 # Nha Ops - Code Map
 
-> Last reviewed: 2026-08-09
+> Last reviewed: 2026-08-11
 > Production branch: `main`
 > GitHub: `alroseylleno/NhaCofee-Tea`
 
@@ -13,6 +13,7 @@ This is the mandatory routing map for code changes in `Operations/nha-ops/`. Rea
 - Production inventory and finance Excel imports use Supabase.
 - Localhost and `-uat` hosts use isolated browser storage for UAT inventory. They must not write to Production Supabase.
 - Product Master is available in both Local/UAT and Production. UAT uses isolated browser storage; Production reads and writes the shared Supabase Product Master tables.
+- Production `main` includes `bc5c225`, which reconciles Product Master ingredients to current Kho NVL source lots after an inventory reset/re-import.
 
 ## Start Here
 
@@ -118,6 +119,7 @@ Current UAT data contract:
 - Legacy UAT v2/v1 browser data is normalized on load. V3 removes Mapping entities from the Product Master state contract.
 - Finance product imports merge directly into Product Master by normalized SKU in both modes; the Product Master UI no longer exposes or requires a Mapping workflow.
 - Kho NVL lots feed Ingredient Master automatically with sealed-stock quantity, usable conversion, latest purchase price and a source-lot link for traceability. Supabase sync is source-of-truth: a master row no longer represented by a current Kho NVL lot is retained only for recipe history, set to inactive with zero stock, and excluded from new recipe choices.
+- The recipe cascade must offer only active current-inventory master rows: Category is sourced from those rows, then the ingredient/brand picker is constrained to the selected Category. Inactive historical rows remain resolvable by saved recipes but are never selectable for new recipe items.
 - Ingredient Master has no manual activation queue. Inventory ingredients are available to recipes as soon as they have appeared in Kho NVL, including historical out-of-stock options.
 - Multiple lots with the same name, category and brand are aggregated. Recipe selection prefers an in-stock ingredient whose oldest sealed lot has the earliest purchase date (FIFO), while theoretical cost keeps the latest purchase price.
 - In Local/UAT, a new recipe item may use only the NVL's explicit `Quy đổi sử dụng` unit. NVL without a valid conversion unit is excluded until its Kho NVL conversion is completed; purchase and specification units are never substituted.
@@ -153,6 +155,7 @@ Do not stage these files in an unrelated Kho NVL hotfix. The current browser-loc
 | June-August 2026 inventory reset | destructive owner-requested Production reset by `purchased_on`; privately snapshots then removes receipts, history, all lifecycle statuses and daily sequences | `20260809000800` |
 | Production inventory period settlement | receipt/session settlement fields plus atomic `settle_inventory_period` RPC and opened return lots | `20260809000900` |
 | Full Production inventory reset | destructive owner-requested private snapshot followed by complete removal of all receipts, history, lifecycle statuses and daily sequences | `20260809001000` |
+| Product Master ingredient reconciliation | marks rows orphaned by a full inventory reset inactive and zero-stock; browser sync restores current receipt links and current Category/name/brand data | `20260809001100` |
 | Inventory lifecycle | `inventory_active_sessions`; expiry/storage fields | `20260728000000` |
 | Inventory deletion guardrails | authenticated-user RLS, active-session FK behavior and return-to-stock deletion | `20260728000100`, `20260808000200`, `20260809000100`; targeted receipt restoration `20260809000300` |
 | Receipt codes | receipt code column, daily sequence, trigger | `20260728000200` |
