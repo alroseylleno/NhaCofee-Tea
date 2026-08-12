@@ -1,11 +1,14 @@
--- Return the 9 CARNATION EXTRA cream boxes mistakenly recognized as July 2026
--- inventory cost. Lifecycle rows consume sealed units, so deleting only the
--- exact overstated sessions removes the cost and raises sealed stock 32 -> 41.
+-- Return the 9 CARNATION EXTRA cream boxes overstated in July 2026 inventory
+-- cost for receipt 010726-027. Production has 16 July lifecycle rows for this
+-- 48-box lot: keep the first 7 legitimate issues and remove the latest 9
+-- excess rows, raising its sealed stock 32 -> 41.
 
 do $$
 declare
   target_receipt_count integer;
-  target_session_count integer;
+  july_session_count integer;
+  matching_active_count integer;
+  august_active_count integer;
   settled_session_count integer;
   sealed_before numeric;
   sealed_after numeric;
@@ -14,7 +17,9 @@ begin
   create temporary table carnation_extra_receipts on commit drop as
   select receipt.id
   from public.inventory_receipts as receipt
-  where lower(receipt.name || ' ' || receipt.brand) like '%carnation extra%'
+  where receipt.receipt_code = '010726-027'
+    and receipt.total_quantity = 48
+    and lower(receipt.name || ' ' || receipt.brand) like '%carnation extra%'
     and (
       lower(receipt.name || ' ' || receipt.brand) like '%kem béo%'
       or lower(receipt.name || ' ' || receipt.brand) like '%kem beo%'
@@ -23,8 +28,8 @@ begin
   select count(*) into target_receipt_count
   from carnation_extra_receipts;
 
-  if target_receipt_count = 0 then
-    raise exception 'CARNATION EXTRA correction found no matching Kem béo receipt';
+  if target_receipt_count <> 1 then
+    raise exception 'CARNATION EXTRA correction expected exactly one 48-box receipt 010726-027, found %', target_receipt_count;
   end if;
 
   select
@@ -44,22 +49,46 @@ begin
     raise exception 'CARNATION EXTRA safeguard expected 32 sealed boxes before correction, found %', sealed_before;
   end if;
 
-  create temporary table carnation_extra_july_sessions on commit drop as
-  select session.id, session.source_receipt_id
+  select count(*) into july_session_count
   from public.inventory_active_sessions as session
   where session.source_receipt_id in (select id from carnation_extra_receipts)
     and session.cost_recognition_month = date '2026-07-01';
 
-  select count(*) into target_session_count
-  from carnation_extra_july_sessions;
+  if july_session_count <> 16 then
+    raise exception 'CARNATION EXTRA safeguard expected 16 July 2026 sessions before removing the 9 excess rows, found %', july_session_count;
+  end if;
 
-  if target_session_count <> 9 then
-    raise exception 'CARNATION EXTRA safeguard expected exactly 9 July 2026 sessions, found %', target_session_count;
+  select
+    count(*) filter (where session.status = 'active'),
+    count(*) filter (
+      where session.status = 'active'
+        and session.cost_recognition_month = date '2026-08-01'
+    )
+  into matching_active_count, august_active_count
+  from public.inventory_active_sessions as session
+  where session.source_receipt_id in (select id from carnation_extra_receipts);
+
+  if matching_active_count <> 1 or august_active_count <> 1 then
+    raise exception 'CARNATION EXTRA safeguard expected exactly one active August 2026 box to preserve, found % active / % active in August',
+      matching_active_count, august_active_count;
+  end if;
+
+  create temporary table carnation_extra_excess_sessions on commit drop as
+  select session.id, session.source_receipt_id
+  from public.inventory_active_sessions as session
+  where session.source_receipt_id in (select id from carnation_extra_receipts)
+    and session.cost_recognition_month = date '2026-07-01'
+    and session.status <> 'active'
+  order by session.activated_at desc, session.created_at desc, session.id desc
+  limit 9;
+
+  if (select count(*) from carnation_extra_excess_sessions) <> 9 then
+    raise exception 'CARNATION EXTRA safeguard could not isolate 9 closed July 2026 excess sessions';
   end if;
 
   select count(*) into settled_session_count
   from public.inventory_active_sessions as session
-  where session.id in (select id from carnation_extra_july_sessions)
+  where session.id in (select id from carnation_extra_excess_sessions)
     and (
       session.settlement is not null
       or exists (
@@ -99,7 +128,7 @@ begin
     coalesce((
       select jsonb_agg(to_jsonb(session) order by session.activated_at, session.id)
       from public.inventory_active_sessions as session
-      where session.id in (select id from carnation_extra_july_sessions)
+      where session.id in (select id from carnation_extra_excess_sessions)
     ), '[]'::jsonb),
     '[]'::jsonb,
     coalesce((
@@ -110,7 +139,7 @@ begin
   );
 
   delete from public.inventory_active_sessions as session
-  where session.id in (select id from carnation_extra_july_sessions);
+  where session.id in (select id from carnation_extra_excess_sessions);
   get diagnostics deleted_sessions = row_count;
 
   if deleted_sessions <> 9 then
@@ -134,6 +163,16 @@ begin
     raise exception 'CARNATION EXTRA safeguard expected 41 sealed boxes after correction, found %', sealed_after;
   end if;
 
-  raise notice 'CARNATION EXTRA correction complete: deleted % July sessions; sealed stock % -> %',
+  if (
+    select count(*)
+    from public.inventory_active_sessions as session
+    where session.source_receipt_id in (select id from carnation_extra_receipts)
+      and session.status = 'active'
+      and session.cost_recognition_month = date '2026-08-01'
+  ) <> 1 then
+    raise exception 'CARNATION EXTRA safeguard failed to preserve the one active August 2026 box';
+  end if;
+
+  raise notice 'CARNATION EXTRA correction complete: kept 7 legitimate July sessions, deleted % excess July sessions, preserved 1 active August box; sealed stock % -> %',
     deleted_sessions, sealed_before, sealed_after;
 end $$;
