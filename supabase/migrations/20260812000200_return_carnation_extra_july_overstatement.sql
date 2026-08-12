@@ -1,7 +1,7 @@
 -- Return the 9 CARNATION EXTRA cream boxes overstated in July 2026 inventory
--- cost for receipt 010726-027. Production has 16 July lifecycle rows for this
--- 48-box lot: keep the first 7 legitimate issues and remove the latest 9
--- excess rows, raising its sealed stock 32 -> 41.
+-- cost for receipt 010726-027. This 48-box lot has 16 lifecycle rows in total,
+-- including 13 recognized in July. Keep the first 4 legitimate July issues
+-- and remove the latest 9 excess July rows, raising sealed stock 32 -> 41.
 
 do $$
 declare
@@ -54,8 +54,8 @@ begin
   where session.source_receipt_id in (select id from carnation_extra_receipts)
     and session.cost_recognition_month = date '2026-07-01';
 
-  if july_session_count <> 16 then
-    raise exception 'CARNATION EXTRA safeguard expected 16 July 2026 sessions before removing the 9 excess rows, found %', july_session_count;
+  if july_session_count <> 13 then
+    raise exception 'CARNATION EXTRA safeguard expected 13 July 2026 sessions before removing the 9 excess rows, found %', july_session_count;
   end if;
 
   select
@@ -167,12 +167,29 @@ begin
     select count(*)
     from public.inventory_active_sessions as session
     where session.source_receipt_id in (select id from carnation_extra_receipts)
+  ) <> 7 then
+    raise exception 'CARNATION EXTRA safeguard expected 7 lifecycle rows after correction';
+  end if;
+
+  if (
+    select count(*)
+    from public.inventory_active_sessions as session
+    where session.source_receipt_id in (select id from carnation_extra_receipts)
+      and session.cost_recognition_month = date '2026-07-01'
+  ) <> 4 then
+    raise exception 'CARNATION EXTRA safeguard expected 4 legitimate July 2026 sessions after correction';
+  end if;
+
+  if (
+    select count(*)
+    from public.inventory_active_sessions as session
+    where session.source_receipt_id in (select id from carnation_extra_receipts)
       and session.status = 'active'
       and session.cost_recognition_month = date '2026-08-01'
   ) <> 1 then
     raise exception 'CARNATION EXTRA safeguard failed to preserve the one active August 2026 box';
   end if;
 
-  raise notice 'CARNATION EXTRA correction complete: kept 7 legitimate July sessions, deleted % excess July sessions, preserved 1 active August box; sealed stock % -> %',
+  raise notice 'CARNATION EXTRA correction complete: kept 4 legitimate July sessions, deleted % excess July sessions, preserved 1 active August box; sealed stock % -> %',
     deleted_sessions, sealed_before, sealed_after;
 end $$;
