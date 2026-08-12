@@ -30,6 +30,7 @@ export type ImportedProductSource = {
   category: string;
   variant?: string;
   unit?: string;
+  sellingPrice?: number;
   totalAmount?: number;
   quantity?: number;
 };
@@ -63,12 +64,13 @@ export type ProductMaster = {
   storeId: string;
   sku: string;
   name: string;
-  aliases: string[];
   category: string;
+  variant: string;
   sellingPrice: number;
+  sellingPriceOverridden: boolean;
   packagingCost: number;
   status: MasterStatus;
-  source: "import" | "manual";
+  source: "import";
   updatedAt: string;
 };
 
@@ -124,7 +126,7 @@ export type ImportBatchRecord = {
 };
 
 export type MasterDataState = {
-  version: 3;
+  version: 5;
   stores: StoreMaster[];
   ingredients: IngredientMaster[];
   products: ProductMaster[];
@@ -258,15 +260,16 @@ export function ingredientDraftsFromInventory(lots: InventorySourceLot[], storeI
 }
 
 export function productDraftFromSource(source: ImportedProductSource, storeId = DEFAULT_STORE.id): ProductMaster {
-  const observedPrice = source.quantity && source.totalAmount ? source.totalAmount / source.quantity : 0;
+  const observedPrice = source.sellingPrice || (source.quantity && source.totalAmount ? source.totalAmount / source.quantity : 0);
   return {
     id: crypto.randomUUID(),
     storeId,
     sku: source.sku.trim(),
     name: source.name.trim(),
-    aliases: [],
     category: source.category.trim() || "Chưa phân loại",
-    sellingPrice: Math.max(0, Math.round(observedPrice)),
+    variant: source.variant?.trim() || "",
+    sellingPrice: Math.max(0, Math.round(observedPrice || 0)),
+    sellingPriceOverridden: false,
     packagingCost: 0,
     status: "active",
     source: "import",
@@ -275,22 +278,26 @@ export function productDraftFromSource(source: ImportedProductSource, storeId = 
 }
 
 export function mergeProductDrafts(current: ProductMaster[], imported: ImportedProductSource[], storeId = DEFAULT_STORE.id) {
-  const merged = [...current];
-  for (const source of imported) {
-    const existingIndex = merged.findIndex((product) => normalizedText(product.sku) === normalizedText(source.sku));
-    const observedPrice = source.quantity && source.totalAmount ? Math.max(0, Math.round(source.totalAmount / source.quantity)) : 0;
-    if (existingIndex < 0) {
+  const merged: ProductMaster[] = [];
+  const uniqueSources = new Map<string, ImportedProductSource>();
+  for (const source of imported) uniqueSources.set(normalizedText(source.sku), source);
+  for (const source of uniqueSources.values()) {
+    const existing = current.find((product) => normalizedText(product.sku) === normalizedText(source.sku));
+    const observedPrice = source.sellingPrice || (source.quantity && source.totalAmount ? Math.max(0, Math.round(source.totalAmount / source.quantity)) : 0);
+    if (!existing) {
       merged.push(productDraftFromSource(source, storeId));
       continue;
     }
-    const existing = merged[existingIndex];
-    merged[existingIndex] = {
+    merged.push({
       ...existing,
-      sellingPrice: observedPrice || existing.sellingPrice,
-      category: existing.category === "Chưa phân loại" ? source.category.trim() || existing.category : existing.category,
+      name: source.name.trim() || existing.name,
+      category: source.category.trim() || "Chưa phân loại",
+      variant: source.variant?.trim() || "",
+      sellingPrice: existing.sellingPriceOverridden ? existing.sellingPrice : Math.max(0, Math.round(observedPrice || 0)),
       status: "active",
+      source: "import",
       updatedAt: new Date().toISOString(),
-    };
+    });
   }
   return merged;
 }
@@ -348,7 +355,7 @@ export function auditEvent(entityType: AuditEvent["entityType"], entityId: strin
 }
 
 export function emptyMasterDataState(): MasterDataState {
-  return { version: 3, stores: [DEFAULT_STORE], ingredients: [], products: [], recipeVersions: [], costSnapshots: [], auditEvents: [], importBatches: [] };
+  return { version: 5, stores: [DEFAULT_STORE], ingredients: [], products: [], recipeVersions: [], costSnapshots: [], auditEvents: [], importBatches: [] };
 }
 
 export function normalizeMasterDataState(value: unknown): MasterDataState {
@@ -356,7 +363,7 @@ export function normalizeMasterDataState(value: unknown): MasterDataState {
   const stored = value as Partial<MasterDataState> & { recipes?: Array<ProductRecipeItem & { productId?: string }> };
   const now = new Date().toISOString();
   const normalizeStatus = (status: unknown): MasterStatus => MASTER_STATUSES.includes(status as MasterStatus) ? status as MasterStatus : "draft";
-  const products = Array.isArray(stored.products) ? stored.products.map((product) => ({ ...product, aliases: Array.isArray(product.aliases) ? product.aliases : [], status: "active" as MasterStatus })) : [];
+  const products = Array.isArray(stored.products) ? stored.products.map((product) => ({ ...product, variant: typeof product.variant === "string" ? product.variant : "", sellingPriceOverridden: Boolean(product.sellingPriceOverridden), status: "active" as MasterStatus })) : [];
   const ingredients = Array.isArray(stored.ingredients) ? stored.ingredients.map((ingredient) => ({ ...ingredient, conversionUnit: typeof ingredient.conversionUnit === "string" && unitDefinition(ingredient.conversionUnit) ? ingredient.conversionUnit : undefined, aliases: Array.isArray(ingredient.aliases) ? ingredient.aliases : [], standardWastePercent: Number(ingredient.standardWastePercent) || 0, stockQuantityBase: Number(ingredient.stockQuantityBase) || 0, stockLotCount: Number(ingredient.stockLotCount) || 0, status: normalizeStatus(ingredient.status) })) : [];
   let recipeVersions = Array.isArray(stored.recipeVersions) ? stored.recipeVersions : [];
   if (!recipeVersions.length && Array.isArray(stored.recipes)) {
@@ -375,7 +382,7 @@ export function normalizeMasterDataState(value: unknown): MasterDataState {
   }
   recipeVersions = recipeVersions.map((version) => ({ ...version, status: latestRecipeIdByProduct.get(version.productId) === version.id ? "active" as const : "archived" as const }));
   return {
-    version: 3,
+    version: 5,
     stores: Array.isArray(stored.stores) && stored.stores.length ? stored.stores : [DEFAULT_STORE],
     ingredients,
     products,

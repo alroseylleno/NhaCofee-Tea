@@ -55,6 +55,7 @@ export type FinanceProductRecord = {
   sku: string;
   name: string;
   variant: string;
+  sellingPrice: number;
   unit: string;
   quantity: number;
   weight: number;
@@ -221,6 +222,7 @@ export async function loadFinanceImports(): Promise<FinanceCloudState> {
     sku: row.sku,
     name: row.product_name,
     variant: row.variant_name || "",
+    sellingPrice: numberValue(row.selling_price),
     unit: row.unit_name || "",
     quantity: numberValue(row.quantity),
     weight: numberValue(row.weight),
@@ -311,6 +313,7 @@ function productRpcRows(records: FinanceProductRecord[]) {
     sku: record.sku,
     product_name: record.name,
     variant_name: record.variant,
+    selling_price: record.sellingPrice,
     unit_name: record.unit,
     quantity: record.quantity,
     weight: record.weight,

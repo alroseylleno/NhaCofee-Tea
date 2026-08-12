@@ -319,7 +319,8 @@ function parseProductRows(file: File, rows: unknown[][]): ParsedProductImport {
       category: readText(row, "ten danh muc") || "Khác",
       sku,
       name,
-      variant: readText(row, "gia mat hang"),
+      variant: "",
+      sellingPrice: read(row, "gia mat hang"),
       unit: readText(row, "ten don vi"),
       quantity: read(row, "so luong"),
       weight: read(row, "trong luong"),
@@ -408,7 +409,11 @@ function normalizeFinanceState(value: unknown, uatMode: boolean): FinanceState {
   const stored = value as Partial<FinanceState>;
   const expenses = Array.isArray(stored.expenses) ? stored.expenses : [];
   const revenues = Array.isArray(stored.revenues) ? stored.revenues : [];
-  const products = Array.isArray(stored.products) ? stored.products : [];
+  const products = Array.isArray(stored.products) ? stored.products.map((product) => {
+    const legacyVariantPrice = product.variant && /^[\d.,\s]+$/.test(product.variant) ? Number(product.variant.replace(/\D/g, "")) || 0 : 0;
+    const sellingPrice = Number(product.sellingPrice) || legacyVariantPrice || (product.quantity ? Number(product.totalAmount) / Number(product.quantity) : 0);
+    return { ...product, variant: legacyVariantPrice ? "" : product.variant, sellingPrice: Math.max(0, Math.round(sellingPrice)) };
+  }) : [];
   const services = Array.isArray(stored.services) ? stored.services : [];
   const imports = Array.isArray(stored.imports) ? stored.imports : [];
   const importHistory = Array.isArray(stored.importHistory) ? stored.importHistory : imports;

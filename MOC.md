@@ -1,6 +1,6 @@
 # Nha Ops - Code Map
 
-> Last reviewed: 2026-08-11
+> Last reviewed: 2026-08-12
 > Production branch: `main`
 > GitHub: `alroseylleno/NhaCofee-Tea`
 
@@ -16,6 +16,7 @@ This is the mandatory routing map for code changes in `Operations/nha-ops/`. Rea
 - Production `main` includes `bc5c225`, which reconciles Product Master ingredients to current Kho NVL source lots after an inventory reset/re-import.
 - The current release groups Kho/Active/Used/Waste cards by purchase month, then Category. Month headers are `+` / `-` accordions, while each ingredient detail keeps its complete cross-month receipt history.
 - The current release adds manual-expense Excel round-trip and Production Supabase persistence through `finance_expenses`; UAT expense records remain browser-local. Production saves require a returned Supabase row before the UI accepts the change.
+- Product Master is Finance-driven: the latest `Tài chính → Doanh thu → Mặt hàng` snapshot is the sole SKU/name/category/default-price catalog. The 2026-08-12 migration performs the owner-authorized one-time Product reset and rebuilds Production products from the current Finance snapshot.
 
 ## Start Here
 
@@ -42,7 +43,7 @@ app/page.tsx
 
 lib/inventory-store.ts <-> Supabase inventory tables + bills storage
 app/finance-module.tsx <-> lib/finance-store.ts <-> Supabase finance tables/RPCs
-app/product-master.tsx <-> lib/master-data.ts <-> future master-data persistence
+app/product-master.tsx <-> lib/master-data.ts <-> lib/master-data-store.ts <-> Supabase Product Master
 ```
 
 There are no Next.js API routes. The client talks directly to Supabase using the publishable key and relies on Auth plus RLS.
@@ -121,9 +122,10 @@ The following files implement Product Master. Local/UAT remains isolated in brow
 
 Current UAT data contract:
 
-- Product Master is rendered in Local/UAT and Production. UAT browser storage uses `nha-ops-master-data-uat-v3`; Production uses `lib/master-data-store.ts` and Supabase.
-- Legacy UAT v2/v1 browser data is normalized on load. V3 removes Mapping entities from the Product Master state contract.
-- Finance product imports merge directly into Product Master by normalized SKU in both modes; the Product Master UI no longer exposes or requires a Mapping workflow.
+- Product Master is rendered in Local/UAT and Production. Production uses `lib/master-data-store.ts` and Supabase.
+- UAT browser storage uses `nha-ops-master-data-uat-v5`. Its first load intentionally discards every legacy Product/recipe/cost record, while Ingredient Master continues to rebuild from current Kho NVL.
+- Finance product imports reconcile Product Master exactly by normalized SKU in both modes: missing Finance SKUs are created, matching SKUs refresh name/category/variant, and SKUs absent from the latest Finance snapshot are removed with their recipes.
+- Product Master has no manual SKU creation. Selling price defaults from the Finance `Giá mặt hàng` column; a Product edit may override selling price and packaging cost, and the override prevents later Finance syncs from replacing that selling price.
 - Kho NVL lots feed Ingredient Master automatically with currently usable quantity, usable conversion, latest purchase price and a source-lot link for traceability. Product Master availability is sealed stock plus lifecycle sessions whose status is `active`; sessions closed as `used` or `wasted` are excluded. Supabase sync is source-of-truth: a master row no longer represented by a current Kho NVL lot is retained only for recipe history, set to inactive with zero availability, and excluded from new recipe choices.
 - The recipe cascade offers only active current-inventory master rows with usable quantity greater than zero: Category is sourced from rows that are either still sealed in Kho NVL or currently in `Đang dùng`, then the ingredient/brand picker is constrained to the selected Category. Inactive, depleted, used-up or wasted historical rows remain resolvable by saved recipes but are never selectable for new recipe items.
 - Ingredient Master has no manual activation queue. Inventory ingredients become available to new recipe items while they have sealed stock or an active lifecycle session; a saved recipe that later has neither raises a replacement alert explaining that it may be depleted, used up or wasted, and cannot be saved as a new version until the ingredient is replaced or removed.
@@ -133,14 +135,16 @@ Current UAT data contract:
 - Recipe edits stay only in the open screen until saved. `Lưu công thức` automatically creates the next immutable version and archives the prior version; there is no recipe activation action.
 - The parent page memoizes the Product Master inventory projection, and inventory refreshes must not clear the selected SKU or open recipe draft. Closing a product detail or changing saved recipe versions while a draft or quantity entry is unsaved requires explicit confirmation so incidental parent renders, backdrop clicks or version changes cannot discard data entry.
 - The UAT navigation label is `Sản phẩm`. It has three workspaces: Overview dashboard, waiting queue, and the combined Product/COGS catalog. The standalone Ingredient tab is intentionally removed; ingredients remain internal recipe choices sourced from Kho NVL.
-- Every SKU is normalized to `active` automatically on create, Finance merge and legacy local-data migration. SKU and recipe activation are not user workflows; saved recipes use the newest version automatically while prior versions remain archived for history.
+- Every Finance SKU is normalized to `active` automatically. SKU and recipe activation are not user workflows; saved recipes use the newest version automatically while prior versions remain archived for history.
 - The Overview dashboard combines theoretical COGS, gross-margin and inventory-capacity metrics with horizontal Top 5 charts for highest-cost and lowest-cost products, plus Top Items and Top Categories from the latest Finance product import.
 - The waiting queue is inventory-driven: an ingredient with neither sealed stock nor an active lifecycle session is flagged with available replacement candidates from the same category and compatible unit family. Product recipe rows expose the same direct `Thay thế` action when an ingredient is red/unavailable.
+- The waiting queue is grouped by the same Finance Category and uses compact 1–2 line SKU rows. It includes missing recipes, missing selling price, unit mismatch and depleted/used/wasted NVL replacement alerts.
+- Product Alias and workbook/reference-cost concepts are removed. Product detail shows the current theoretical COGS plus a compact line chart recalculated for every saved recipe version from current Ingredient Master prices.
 - Replacing or deleting an unavailable ingredient, or adding a new ingredient, updates the open local recipe draft only. Saving is the single action that creates the new formula version.
 - Product and theoretical COGS now share one catalog. Each recipe calculates an estimated serving capacity from currently usable inventory (sealed stock plus active lifecycle sessions); the minimum ingredient capacity is the limiting number of cups.
 - Kho NVL category quick filters display the number of matching grouped ingredients after the current stock-state and search filters are applied. A custom Category remains uppercase while typing and accepts spaces; all `Khác` inputs preserve user-entered spaces and normalize only when persisted where applicable.
 - Product, ingredient and recipe changes append browser-local audit events for UAT traceability.
-- UAT reset and completed-sample controls are intentionally unavailable outside local/UAT.
+- The UAT Product reset control clears only Product recipes/cost history and immediately rebuilds SKU/category/price from the local Finance snapshot; Production exposes no reset control.
 
 The intended chain is:
 
@@ -149,7 +153,7 @@ Kho NVL lots -> Ingredient Master -> Recipe quantities -> Theoretical product CO
 Finance product imports -> Product Master -> Product profitability
 ```
 
-Do not stage these files in an unrelated Kho NVL hotfix. The current browser-local v3 model is not a Production persistence design. Before enabling Product Master in Production, separately verify the Supabase persistence implementation, RLS scope, finance integration and Production data safety.
+Do not stage these files in an unrelated Kho NVL hotfix. Production Product Master changes must keep the Supabase persistence adapter, RLS scope, Finance integration and UAT isolation aligned.
 
 ## Supabase Map
 
@@ -173,6 +177,7 @@ Do not stage these files in an unrelated Kho NVL hotfix. The current browser-loc
 | Cost recognition month | `inventory_active_sessions.cost_recognition_month` | `20260805000200` |
 | Inventory conversion | conversion amount/unit fields | `20260807000100` |
 | CFO master-data foundation | stores, masters, recipes and finance facts | `20260805000100`, `20260809000200` - additive tables, versioned recipes and broad authenticated RLS during rollout |
+| Finance-driven Product catalog reset | `finance_product_rows.selling_price`, Product price override, exact Finance reconciliation, one-time Product/Ingredient reset | `20260812000100` |
 
 Migration rules:
 
@@ -187,7 +192,7 @@ Migration rules:
 | Concern | Local/UAT | Production |
 |---|---|---|
 | Inventory store | Browser-local isolated keys | Supabase |
-| Product Master | Browser-local `nha-ops-master-data-uat-v3` | Shared Supabase master, recipe-version and audit tables |
+| Product Master | Browser-local `nha-ops-master-data-uat-v5`; legacy Product data reset once | Shared Supabase Finance-driven master, recipe-version and audit tables |
 | Finance sample data | UAT-only local keys | Must not load UAT samples |
 | Manual expense ledger | Browser-local UAT key; Excel can move test data between browsers | Shared `finance_expenses` table after migration `20260811000100` |
 | Authentication | Local UAT credentials are prefilled in the local login | Supabase Auth account |

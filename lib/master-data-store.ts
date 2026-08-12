@@ -10,7 +10,6 @@ import {
   type RecipeVersion,
   emptyMasterDataState,
   mergeInventoryDrafts,
-  mergeProductDrafts,
 } from "@/lib/master-data";
 import { supabase } from "@/lib/supabase";
 
@@ -25,9 +24,9 @@ function toIngredient(row: Record<string, unknown>): IngredientMaster {
   return { id: String(row.id), storeId: String(row.store_id), code: String(row.code), name: String(row.name), aliases: aliases(row.aliases), category: String(row.category), brand: String(row.brand), baseUnit: String(row.base_unit), purchaseUnit: String(row.purchase_unit), latestPurchasePrice: number(row.latest_purchase_price), latestPurchasePricePerBaseUnit: number(row.latest_purchase_price_per_base_unit), standardWastePercent: number(row.standard_waste_percent), latestPurchasedOn: row.latest_purchased_on ? String(row.latest_purchased_on) : undefined, oldestInStockPurchasedOn: row.oldest_in_stock_purchased_on ? String(row.oldest_in_stock_purchased_on) : undefined, sourceInventoryLotId: row.source_inventory_receipt_id ? String(row.source_inventory_receipt_id) : undefined, stockQuantityBase: number(row.stock_quantity_base), stockLotCount: number(row.stock_lot_count), sourceKey: String(row.source_key), status: row.status === "inactive" ? "inactive" : "active", updatedAt: String(row.updated_at || new Date().toISOString()) };
 }
 function toProduct(row: Record<string, unknown>): ProductMaster {
-  return { id: String(row.id), storeId: String(row.store_id), sku: String(row.sku), name: String(row.name), aliases: aliases(row.aliases), category: String(row.category), sellingPrice: number(row.selling_price), packagingCost: number(row.packaging_cost), status: "active", source: row.source === "import" ? "import" : "manual", updatedAt: String(row.updated_at || new Date().toISOString()) };
+  return { id: String(row.id), storeId: String(row.store_id), sku: String(row.sku), name: String(row.name), category: String(row.category), variant: String(row.variant || ""), sellingPrice: number(row.selling_price), sellingPriceOverridden: Boolean(row.selling_price_overridden), packagingCost: number(row.packaging_cost), status: "active", source: "import", updatedAt: String(row.updated_at || new Date().toISOString()) };
 }
-function financeSource(row: FinanceProductRecord): ImportedProductSource { return { sku: row.sku, name: row.name, category: row.category, variant: row.variant, unit: row.unit, quantity: row.quantity, totalAmount: row.totalAmount }; }
+function financeSource(row: FinanceProductRecord): ImportedProductSource { return { sku: row.sku, name: row.name, category: row.category, variant: row.variant, unit: row.unit, sellingPrice: row.sellingPrice, quantity: row.quantity, totalAmount: row.totalAmount }; }
 
 async function loadFinanceSource() {
   const finance = await loadFinanceImports();
@@ -41,18 +40,15 @@ export async function loadCloudMasterData(inventoryLots: InventorySourceLot[]): 
   if (storeError || !store) throw new Error("Chưa thấy cửa hàng Product Master trên Supabase. Hãy kiểm tra migration Product Master đã chạy.");
   const storeId = String(store.id);
   const finance = await loadFinanceSource();
-  const [ingredientsResult, productsResult] = await Promise.all([
+  const [ingredientsResult] = await Promise.all([
     client.from("ingredient_master").select("*").eq("store_id", storeId),
-    client.from("product_master").select("*").eq("store_id", storeId),
   ]);
   if (ingredientsResult.error) throw ingredientsResult.error;
-  if (productsResult.error) throw productsResult.error;
   const syncedIngredients = mergeInventoryDrafts((ingredientsResult.data || []).map((row) => toIngredient(row)), inventoryLots);
   const ingredientRows = syncedIngredients.map((ingredient) => ({ store_id: storeId, code: ingredient.code || codeFor(ingredient.sourceKey), name: ingredient.name, aliases: ingredient.aliases, category: ingredient.category, brand: ingredient.brand, base_unit: ingredient.baseUnit, purchase_unit: ingredient.purchaseUnit, latest_purchase_price: ingredient.latestPurchasePrice, latest_purchase_price_per_base_unit: ingredient.latestPurchasePricePerBaseUnit, standard_waste_percent: ingredient.standardWastePercent, latest_purchased_on: ingredient.latestPurchasedOn || null, oldest_in_stock_purchased_on: ingredient.oldestInStockPurchasedOn || null, source_inventory_receipt_id: ingredient.sourceInventoryLotId || null, stock_quantity_base: ingredient.stockQuantityBase, stock_lot_count: ingredient.stockLotCount, source_key: ingredient.sourceKey, status: ingredient.status, updated_at: new Date().toISOString() }));
   if (ingredientRows.length) { const { error } = await client.from("ingredient_master").upsert(ingredientRows, { onConflict: "store_id,source_key" }); if (error) throw error; }
-  const syncedProducts = mergeProductDrafts((productsResult.data || []).map((row) => toProduct(row)), finance.products, storeId);
-  const productRows = syncedProducts.map((product) => ({ store_id: storeId, sku: product.sku, name: product.name, aliases: product.aliases, category: product.category, selling_price: product.sellingPrice, packaging_cost: product.packagingCost, source: product.source, status: "active", updated_at: new Date().toISOString() }));
-  if (productRows.length) { const { error } = await client.from("product_master").upsert(productRows, { onConflict: "store_id,sku" }); if (error) throw error; }
+  const { error: reconcileError } = await client.rpc("reconcile_product_master_from_finance", { p_store_id: storeId });
+  if (reconcileError) throw reconcileError;
   const [freshIngredients, freshProducts, versionsResult, eventsResult] = await Promise.all([
     client.from("ingredient_master").select("*").eq("store_id", storeId),
     client.from("product_master").select("*").eq("store_id", storeId),
@@ -62,12 +58,14 @@ export async function loadCloudMasterData(inventoryLots: InventorySourceLot[]): 
   if (freshIngredients.error || freshProducts.error || versionsResult.error || eventsResult.error) throw freshIngredients.error || freshProducts.error || versionsResult.error || eventsResult.error;
   const recipeVersions: RecipeVersion[] = (versionsResult.data || []).map((row) => ({ id: row.id, productId: row.product_id, version: number(row.version), effectiveFrom: row.effective_from, effectiveTo: row.effective_to || undefined, status: row.status, createdAt: row.created_at, items: (row.product_recipe_items || []).map((item: Record<string, unknown>) => ({ id: String(item.id), ingredientId: String(item.ingredient_id), quantity: number(item.quantity), unit: String(item.unit), wastePercent: number(item.waste_percent) })) }));
   const auditEvents: AuditEvent[] = (eventsResult.data || []).map((row) => ({ id: row.id, entityType: row.entity_type, entityId: row.entity_id, action: row.action, detail: row.detail, createdAt: row.created_at }));
-  return { state: { ...emptyMasterDataState(), stores: [{ ...DEFAULT_STORE, id: storeId }], ingredients: mergeInventoryDrafts((freshIngredients.data || []).map((row) => toIngredient(row)), inventoryLots), products: (freshProducts.data || []).map((row) => toProduct(row)), recipeVersions, auditEvents }, ...finance };
+  const products = (freshProducts.data || []).map((row) => toProduct(row));
+  const productIds = new Set(products.map((product) => product.id));
+  return { state: { ...emptyMasterDataState(), stores: [{ ...DEFAULT_STORE, id: storeId }], ingredients: mergeInventoryDrafts((freshIngredients.data || []).map((row) => toIngredient(row)), inventoryLots), products, recipeVersions: recipeVersions.filter((version) => productIds.has(version.productId)), auditEvents }, ...finance };
 }
 
 export async function saveCloudProduct(product: ProductMaster) {
   const client = requireClient();
-  const { error } = await client.from("product_master").upsert({ id: product.id, store_id: product.storeId, sku: product.sku, name: product.name, aliases: product.aliases, category: product.category, selling_price: product.sellingPrice, packaging_cost: product.packagingCost, source: product.source, status: "active", updated_at: product.updatedAt }, { onConflict: "store_id,sku" });
+  const { error } = await client.from("product_master").upsert({ id: product.id, store_id: product.storeId, sku: product.sku, name: product.name, category: product.category, variant: product.variant, selling_price: product.sellingPrice, selling_price_overridden: product.sellingPriceOverridden, packaging_cost: product.packagingCost, source: "import", status: "active", updated_at: product.updatedAt }, { onConflict: "store_id,sku" });
   if (error) throw error;
   const { error: auditError } = await client.from("product_audit_events").insert({ store_id: product.storeId, entity_type: "product", entity_id: product.id, action: "save", detail: "Lưu thông tin SKU" });
   if (auditError) throw auditError;
