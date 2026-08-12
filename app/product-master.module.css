@@ -278,6 +278,12 @@
 .recipeVersionMeta > span { font: 700 12px Arial, sans-serif; }
 .recipeVersionMeta > i { padding: 4px 6px; border-radius: 99px; font: 800 8px Arial, sans-serif; font-style: normal; }
 .recipeVersionMeta > b { grid-column: 1 / -1; font: 700 15px Georgia, serif; }
+.workbookIssues, .workbookReady { display: grid; gap: 4px; margin-top: 8px; padding: 10px 11px; border-radius: 10px; }
+.workbookIssues { color: #8d4938; background: var(--red-soft); }
+.workbookReady { color: #315d48; background: #e7f2e7; }
+.workbookIssues b, .workbookReady b { font: 800 8px Arial, sans-serif; letter-spacing: .08em; text-transform: uppercase; }
+.workbookIssues span, .workbookReady span { font: 700 9px/1.4 Arial, sans-serif; }
+.workbookIssues small { color: #9a5a49; font: 8px/1.4 Arial, sans-serif; }
 .recipeList { display: grid; gap: 6px; margin-top: 10px; }
 .recipeItemBlock { display: grid; gap: 5px; }
 .recipeRow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }

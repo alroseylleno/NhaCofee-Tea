@@ -18,11 +18,11 @@ type Ingredient = {
 };
 type ShelfLifeUnit = "minutes" | "hours" | "days" | "weeks";
 type FormValues = { name: string; category: string; categoryIsCustom: boolean; brand: string; brandIsCustom: boolean; invoiceCode: string; unit: string; unitIsCustom: boolean; quantity: string; specificationAmount: string; specificationUnit: string; specificationUnitIsCustom: boolean; specificationNote: string; conversionAmount: string; conversionUnit: string; conversionUnitIsCustom: boolean; unitCost: string; purchasedOn: string; supplier: string; supplierIsCustom: boolean; expiresOn: string; shelfLifeValue: string; shelfLifeUnit: ShelfLifeUnit; storageLocation: string };
-type SortKey = "purchasedOn" | "name" | "quantity" | "unitCost" | "total";
 type LotMeta = { expiresOn: string; shelfLifeHours?: number; storageLocation: string };
 type ActiveStatus = "active" | "used" | "wasted";
 type SettlementMode = "week" | "month";
-type PeriodSettlement = { mode: SettlementMode; periodEnd: string; openingAmount: number; remainingAmount: number; usedAmount: number; unit: string; returnedLotId?: string };
+type SettlementDisposition = "return" | "carry";
+type PeriodSettlement = { mode: SettlementMode; periodEnd: string; openingAmount: number; remainingAmount: number; usedAmount: number; unit: string; returnedLotId?: string; disposition?: SettlementDisposition; continuedSessionId?: string };
 type ActiveSession = { id: string; sourceReceiptId: string; ingredientKey: string; activatedAt: string; costRecognitionMonth?: string; useBy?: string; status: ActiveStatus; closedAt?: string; reason: string; note?: string; openedAmount?: number; openedUnit?: string; provisionalCost?: number; recognizedCost?: number; settlement?: PeriodSettlement };
 type IngredientGroup = { key: string; name: string; category: string; brand: string; unit: string; specification: string; lots: Ingredient[] };
 type ActivationCandidate = { group: IngredientGroup; lot: Ingredient };
@@ -80,17 +80,17 @@ function conversionLabel(conversion?: Ingredient["conversion"]) { return convers
 function stockStateLabel(item: Ingredient) { return item.stockState === "opened" ? "Kho đã mở" : "Kho niêm phong"; }
 function ingredientKey(item: Pick<Ingredient, "name" | "brand" | "unit" | "specification">) { return [item.name, item.brand, item.unit, item.specification].map((value) => value.trim().toLocaleLowerCase("vi")).join("|"); }
 function addDays(value: string, days: number) { const [year, month, day] = value.split("-").map(Number); if (!year || !month || !day) return ""; const date = new Date(Date.UTC(year, month - 1, day)); date.setUTCDate(date.getUTCDate() + days); return date.toISOString().slice(0, 10); }
+function nextMonth(value: string) { const [year, month] = value.split("-").map(Number); if (!year || !month) return ""; const date = new Date(Date.UTC(year, month, 1)); date.setUTCMonth(date.getUTCMonth() + 1); return date.toISOString().slice(0, 7); }
 function defaultExpiryFor(purchasedOn: string) { return addDays(purchasedOn, 1); }
 function addHours(value: string, hours: number) { return new Date(new Date(value).getTime() + hours * 60 * 60 * 1000).toISOString(); }
 function endOfDate(value: string) { return value ? new Date(`${value}T23:59:59`).toISOString() : undefined; }
 function useByFor(activatedAt: string, meta?: LotMeta) { const openedLimit = meta?.shelfLifeHours ? addHours(activatedAt, meta.shelfLifeHours) : undefined; const expiryLimit = endOfDate(meta?.expiresOn || ""); if (openedLimit && expiryLimit) return openedLimit < expiryLimit ? openedLimit : expiryLimit; return openedLimit || expiryLimit; }
 function formatDateTime(value: string) { return new Intl.DateTimeFormat("vi-VN", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value)); }
 function formatDuration(milliseconds: number) { const absolute = Math.abs(milliseconds); const hours = Math.floor(absolute / 3_600_000); if (hours < 24) return `${hours} giờ`; const days = Math.floor(hours / 24); const rest = hours % 24; return rest ? `${days} ngày ${rest} giờ` : `${days} ngày`; }
-function reasonLabel(value: string) { return value === "period_close" ? "Chốt kỳ và hoàn kho" : [...activationReasons, ...closeReasons].find(([key]) => key === value)?.[1] || value; }
+function reasonLabel(value: string) { return value === "period_close" ? "Chốt kỳ và hoàn kho" : value === "period_carry" ? "Chuyển tiếp từ kỳ trước" : [...activationReasons, ...closeReasons].find(([key]) => key === value)?.[1] || value; }
 function shelfLifeLabel(hours?: number) { if (!hours) return "Chưa ghi"; if (hours % 168 === 0) return `${hours / 168} tuần`; if (hours % 24 === 0) return `${hours / 24} ngày`; if (hours >= 1) return `${hours} giờ`; return `${Math.round(hours * 60)} phút`; }
 function shelfLifeFormValues(hours?: number): { value: string; unit: ShelfLifeUnit } { if (!hours) return { value: "", unit: "days" }; if (hours % 168 === 0) return { value: String(hours / 168), unit: "weeks" }; if (hours % 24 === 0) return { value: String(hours / 24), unit: "days" }; if (hours >= 1) return { value: String(hours), unit: "hours" }; return { value: String(hours * 60), unit: "minutes" }; }
 function shelfLifeHoursFor(value: string, unit: ShelfLifeUnit) { const amount = Number(value); if (!amount) return undefined; return amount * ({ minutes: 1 / 60, hours: 1, days: 24, weeks: 168 } as const)[unit]; }
-function escapeXml(value: string) { return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;"); }
 function VietnameseDateInput({ value, onChange, required = false }: { value: string; onChange: (value: string) => void; required?: boolean }) {
   const [display, setDisplay] = useState(formatDate(value));
   useEffect(() => setDisplay(formatDate(value)), [value]);
@@ -179,14 +179,20 @@ export default function Home() {
   const [closeNote, setCloseNote] = useState("");
   const [settlementCandidate, setSettlementCandidate] = useState<ActiveSession | undefined>();
   const [settlementMode, setSettlementMode] = useState<SettlementMode>("month");
+  const [settlementDisposition, setSettlementDisposition] = useState<SettlementDisposition>("return");
   const [settlementDate, setSettlementDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [settlementRemaining, setSettlementRemaining] = useState("");
+  const [settlementUsed, setSettlementUsed] = useState("");
   const [settlingPeriod, setSettlingPeriod] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [workspace, setWorkspace] = useState<"inventory" | "finance" | "products">("inventory");
   const [tab, setTab] = useState<"inventory" | "active" | "report">("inventory");
   const [inventoryView, setInventoryView] = useState<"stock" | "active" | "used" | "wasted">("stock");
   const [lifecycleFilter, setLifecycleFilter] = useState<LifecycleFilter>("active");
+  const [activeSearch, setActiveSearch] = useState("");
+  const [activeCategory, setActiveCategory] = useState("all");
+  const [activeMonthFilter, setActiveMonthFilter] = useState("all");
+  const [activeSort, setActiveSort] = useState<"expiry" | "opened">("expiry");
+  const [collapsedActiveMonths, setCollapsedActiveMonths] = useState<Set<string>>(() => new Set());
   const [search, setSearch] = useState("");
   const [inventoryCategory, setInventoryCategory] = useState("all");
   const [inventorySort, setInventorySort] = useState<"purchasedOn" | "stock">("purchasedOn");
@@ -200,7 +206,6 @@ export default function Home() {
   const [brandFilter, setBrandFilter] = useState("all");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
-  const [sort, setSort] = useState<{ key: SortKey; direction: "asc" | "desc" }>({ key: "purchasedOn", direction: "desc" });
   const [loaded, setLoaded] = useState(false);
   const [deletingId, setDeletingId] = useState<string | undefined>();
   const canDeleteInventory = isLocalUat || Boolean(session);
@@ -406,20 +411,75 @@ export default function Home() {
     overdue: ["Đã quá hạn", "Cần kiểm tra và xử lý ngay"],
     loss: ["Hao hụt đã ghi nhận", "Sắp xếp theo giá trị hao hụt cao nhất"],
   };
+  const activeMonthOptions = useMemo(() => [...new Set(lifecycleDashboard.map((entry) => entry.costRecognitionMonth || entry.activatedAt.slice(0, 7)))].sort((left, right) => right.localeCompare(left)), [lifecycleDashboard]);
+  const activeFilteredSessions = useMemo(() => lifecycleDashboard.filter((entry) => {
+    const lot = items.find((item) => item.id === entry.sourceReceiptId);
+    const haystack = `${lot?.name || ""} ${lot?.brand || ""} ${lot?.category || ""} ${lot?.supplier || ""}`.toLocaleLowerCase("vi");
+    return haystack.includes(activeSearch.toLocaleLowerCase("vi"))
+      && (activeCategory === "all" || lot?.category === activeCategory)
+      && (activeMonthFilter === "all" || (entry.costRecognitionMonth || entry.activatedAt.slice(0, 7)) === activeMonthFilter);
+  }).sort((left, right) => activeSort === "opened"
+    ? right.activatedAt.localeCompare(left.activatedAt)
+    : (left.useBy || "9999").localeCompare(right.useBy || "9999")), [lifecycleDashboard, items, activeSearch, activeCategory, activeMonthFilter, activeSort]);
+  const activeCategoryCounts = useMemo(() => activeFilteredSessions.reduce<Record<string, number>>((counts, entry) => {
+    const category = items.find((item) => item.id === entry.sourceReceiptId)?.category || "CHƯA PHÂN LOẠI";
+    counts[category] = (counts[category] || 0) + 1;
+    return counts;
+  }, {}), [activeFilteredSessions, items]);
+  const activeBaseCategoryCounts = useMemo(() => lifecycleDashboard.reduce<Record<string, number>>((counts, entry) => {
+    const lot = items.find((item) => item.id === entry.sourceReceiptId);
+    const haystack = `${lot?.name || ""} ${lot?.brand || ""} ${lot?.category || ""} ${lot?.supplier || ""}`.toLocaleLowerCase("vi");
+    if (!haystack.includes(activeSearch.toLocaleLowerCase("vi")) || (activeMonthFilter !== "all" && (entry.costRecognitionMonth || entry.activatedAt.slice(0, 7)) !== activeMonthFilter)) return counts;
+    const category = lot?.category || "CHƯA PHÂN LOẠI";
+    counts[category] = (counts[category] || 0) + 1;
+    return counts;
+  }, {}), [lifecycleDashboard, items, activeSearch, activeMonthFilter]);
+  const activeSections = useMemo(() => {
+    const months = new Map<string, Map<string, ActiveSession[]>>();
+    for (const entry of activeFilteredSessions) {
+      const month = entry.costRecognitionMonth || entry.activatedAt.slice(0, 7);
+      const category = items.find((item) => item.id === entry.sourceReceiptId)?.category || "CHƯA PHÂN LOẠI";
+      const categories = months.get(month) || new Map<string, ActiveSession[]>();
+      categories.set(category, [...(categories.get(category) || []), entry]);
+      months.set(month, categories);
+    }
+    return [...months.entries()].sort(([left], [right]) => right.localeCompare(left)).map(([month, categories]) => ({
+      month,
+      categories: [...categories.entries()].sort(([left], [right]) => left.localeCompare(right, "vi")).map(([category, sessions]) => ({ category, sessions })),
+    }));
+  }, [activeFilteredSessions, items]);
   const suppliers = useMemo(() => [...new Set(items.map((item) => item.supplier))].sort(), [items]);
   const categories = useMemo(() => [...new Set(items.map((item) => item.category))].sort(), [items]);
   const brands = useMemo(() => [...new Set(items.map((item) => item.brand))].sort(), [items]);
   const units = useMemo(() => [...new Set(items.map((item) => item.unit).filter(Boolean))].sort(), [items]);
   const specificationUnits = useMemo(() => [...new Set(items.map((item) => parseSpecification(item.specification)).filter((specification) => specification.amount).map((specification) => specification.unit))].sort(), [items]);
   const conversionUnits = useMemo(() => [...new Set(items.map((item) => item.conversion?.unit).filter((unit): unit is string => Boolean(unit)))].sort(), [items]);
-  const reportRows = useMemo(() => {
-    const result = items.filter((item) => item.stockState !== "opened" && `${item.name} ${item.category} ${item.brand} ${item.supplier}`.toLowerCase().includes(reportSearch.toLowerCase()) && (supplierFilter === "all" || item.supplier === supplierFilter) && (categoryFilter === "all" || item.category === categoryFilter) && (brandFilter === "all" || item.brand === brandFilter) && (!dateFrom || item.purchasedOn >= dateFrom) && (!dateTo || item.purchasedOn <= dateTo));
-    return [...result].sort((a, b) => {
-      const values: Record<SortKey, [string | number, string | number]> = { purchasedOn: [a.purchasedOn, b.purchasedOn], name: [a.name, b.name], quantity: [a.quantity, b.quantity], unitCost: [a.unitCost, b.unitCost], total: [a.quantity * a.unitCost, b.quantity * b.unitCost] };
-      const [left, right] = values[sort.key]; const order = typeof left === "number" && typeof right === "number" ? left - right : String(left).localeCompare(String(right), "vi");
-      return sort.direction === "asc" ? order : -order;
-    });
-  }, [items, reportSearch, supplierFilter, categoryFilter, brandFilter, dateFrom, dateTo, sort]);
+  const reportRows = useMemo(() => items.filter((item) => item.stockState !== "opened" && `${item.name} ${item.category} ${item.brand} ${item.supplier}`.toLowerCase().includes(reportSearch.toLowerCase()) && (supplierFilter === "all" || item.supplier === supplierFilter) && (categoryFilter === "all" || item.category === categoryFilter) && (brandFilter === "all" || item.brand === brandFilter) && (!dateFrom || item.purchasedOn >= dateFrom) && (!dateTo || item.purchasedOn <= dateTo)), [items, reportSearch, supplierFilter, categoryFilter, brandFilter, dateFrom, dateTo]);
+  const reportPurchaseValue = reportRows.reduce((sum, item) => sum + item.quantity * item.unitCost, 0);
+  const reportStockValue = reportRows.reduce((sum, item) => sum + sealedInLot(item) * item.unitCost, 0);
+  const reportIssuedValue = Math.max(0, reportPurchaseValue - reportStockValue);
+  const reportCategoryData = useMemo(() => {
+    const grouped = new Map<string, { stock: number; purchase: number; lots: number }>();
+    for (const item of reportRows) {
+      const current = grouped.get(item.category) || { stock: 0, purchase: 0, lots: 0 };
+      current.stock += sealedInLot(item) * item.unitCost;
+      current.purchase += item.quantity * item.unitCost;
+      current.lots += 1;
+      grouped.set(item.category, current);
+    }
+    return [...grouped.entries()].map(([label, value]) => ({ label, ...value })).sort((left, right) => right.stock - left.stock).slice(0, 7);
+  }, [reportRows, activeSessions]);
+  const reportSupplierData = useMemo(() => {
+    const grouped = new Map<string, number>();
+    for (const item of reportRows) grouped.set(item.supplier, (grouped.get(item.supplier) || 0) + item.quantity * item.unitCost);
+    return [...grouped.entries()].map(([label, value]) => ({ label, value })).sort((left, right) => right.value - left.value).slice(0, 6);
+  }, [reportRows]);
+  const reportMonthData = useMemo(() => {
+    const grouped = new Map<string, number>();
+    for (const item of reportRows) grouped.set(item.purchasedOn.slice(0, 7), (grouped.get(item.purchasedOn.slice(0, 7)) || 0) + item.quantity * item.unitCost);
+    return [...grouped.entries()].sort(([left], [right]) => left.localeCompare(right)).slice(-6).map(([label, value]) => ({ label, value }));
+  }, [reportRows]);
+  const reportRiskRows = useMemo(() => reportRows.map((item) => ({ item, meta: lotMeta[item.id], sealed: sealedInLot(item) })).filter(({ item, meta, sealed }) => sealed > 0 && Boolean(meta?.expiresOn) && meta.expiresOn <= addDays(new Date().toISOString().slice(0, 10), 14)).sort((left, right) => (left.meta?.expiresOn || "9999").localeCompare(right.meta?.expiresOn || "9999")).slice(0, 5), [reportRows, lotMeta, activeSessions]);
 
   function updateForm<K extends keyof FormValues>(field: K, value: FormValues[K]) { setForm((current) => ({ ...current, [field]: value })); }
   function updatePurchasedOn(purchasedOn: string) {
@@ -482,8 +542,9 @@ export default function Home() {
     }
     setSettlementCandidate(activeSession);
     setSettlementMode("month");
+    setSettlementDisposition("return");
     setSettlementDate(new Date().toISOString().slice(0, 10));
-    setSettlementRemaining("");
+    setSettlementUsed("");
   }
   async function confirmSettlement(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -492,9 +553,9 @@ export default function Home() {
     if (!sourceLot || settlementCandidate.status !== "active") { window.alert("Phiên đang dùng này không còn khả dụng để chốt."); return; }
     const openingAmount = settlementCandidate.openedAmount || sourceLot.conversion?.amount || 0;
     const openingUnit = settlementCandidate.openedUnit || sourceLot.conversion?.unit || "";
-    const remainingAmount = parseDecimalInput(settlementRemaining);
-    if (!settlementRemaining.trim() || !settlementDate || remainingAmount < 0 || remainingAmount > openingAmount) {
-      window.alert(`Số lượng còn lại phải từ 0 đến ${openingAmount.toLocaleString("vi-VN")} ${openingUnit}.`);
+    const usedAmount = parseDecimalInput(settlementUsed);
+    if (!settlementUsed.trim() || !settlementDate || usedAmount < 0 || usedAmount > openingAmount) {
+      window.alert(`Số lượng đã dùng phải từ 0 đến ${openingAmount.toLocaleString("vi-VN")} ${openingUnit}.`);
       return;
     }
     if (settlementDate > new Date().toISOString().slice(0, 10)) { window.alert("Ngày chốt kỳ không được nằm trong tương lai."); return; }
@@ -503,19 +564,24 @@ export default function Home() {
       return;
     }
 
-    const usedAmount = openingAmount - remainingAmount;
+    const remainingAmount = openingAmount - usedAmount;
     const provisionalCost = settlementCandidate.provisionalCost ?? sourceLot.unitCost;
     const recognizedCost = Math.round(provisionalCost * usedAmount / openingAmount);
     const returnedCost = Math.max(0, provisionalCost - recognizedCost);
     const closedAt = `${settlementDate}T23:59:59.000Z`;
     const returnedLotId = remainingAmount > 0 ? crypto.randomUUID() : undefined;
+    const continuedSessionId = settlementDisposition === "carry" && remainingAmount > 0 ? crypto.randomUUID() : undefined;
+    if (settlementDisposition === "carry" && !isLocalUat) {
+      window.alert("Option chuyển phần còn lại sang tháng tiếp theo đang chạy UAT local. Production hiện chỉ hỗ trợ trả phần còn lại về Kho.");
+      return;
+    }
     const updatedSession: ActiveSession = {
       ...settlementCandidate,
       status: "used",
       closedAt,
       reason: "period_close",
       recognizedCost,
-      settlement: { mode: settlementMode, periodEnd: settlementDate, openingAmount, remainingAmount, usedAmount, unit: openingUnit, returnedLotId },
+      settlement: { mode: settlementMode, periodEnd: settlementDate, openingAmount, remainingAmount, usedAmount, unit: openingUnit, returnedLotId, disposition: settlementDisposition, continuedSessionId },
     };
 
     setSettlingPeriod(true);
@@ -542,11 +608,28 @@ export default function Home() {
           };
           setItems((current) => [returnedLot, ...current]);
           setLotMeta((current) => ({ ...current, [returnedLotId]: { ...(current[sourceLot.id] || { storageLocation: "Chưa ghi", expiresOn: "" }) } }));
+          if (continuedSessionId) {
+            const continuedSession: ActiveSession = {
+              id: continuedSessionId,
+              sourceReceiptId: returnedLotId,
+              ingredientKey: settlementCandidate.ingredientKey,
+              activatedAt: closedAt,
+              costRecognitionMonth: nextMonth(settlementDate.slice(0, 7)),
+              useBy: settlementCandidate.useBy,
+              status: "active",
+              reason: "period_carry",
+              note: `Chuyển tiếp ${remainingAmount.toLocaleString("vi-VN")} ${openingUnit} từ kỳ kết thúc ${formatDate(settlementDate)}`,
+              openedAmount: remainingAmount,
+              openedUnit: openingUnit,
+              provisionalCost: returnedCost,
+            };
+            setActiveSessions((current) => [continuedSession, ...current]);
+          }
         }
       }
       setSettlementCandidate(undefined);
-      setSettlementRemaining("");
-      window.alert(`Đã chốt ${usedAmount.toLocaleString("vi-VN")} ${openingUnit} sử dụng = ${formatMoney(recognizedCost)}.${remainingAmount > 0 ? ` Hoàn kho ${remainingAmount.toLocaleString("vi-VN")} ${openingUnit} = ${formatMoney(returnedCost)}.` : " Không còn lượng hoàn kho."}`);
+      setSettlementUsed("");
+      window.alert(`Đã chốt ${usedAmount.toLocaleString("vi-VN")} ${openingUnit} sử dụng = ${formatMoney(recognizedCost)}.${remainingAmount > 0 ? settlementDisposition === "carry" ? ` Chuyển ${remainingAmount.toLocaleString("vi-VN")} ${openingUnit} sang tháng ${nextMonth(settlementDate.slice(0, 7)).split("-").reverse().join("/")} ở Đang dùng.` : ` Hoàn kho ${remainingAmount.toLocaleString("vi-VN")} ${openingUnit} = ${formatMoney(returnedCost)}.` : " Không còn lượng chuyển tiếp."}`);
     } catch (error) {
       if (!isLocalUat) { try { await refreshCloud(); } catch {} }
       window.alert(error instanceof Error ? error.message : "Không thể chốt kỳ nguyên liệu.");
@@ -657,8 +740,6 @@ export default function Home() {
       setDeletingId(undefined);
     }
   }
-  function changeSort(key: SortKey) { setSort((current) => current.key === key ? { key, direction: current.direction === "asc" ? "desc" : "asc" } : { key, direction: "asc" }); }
-  function sortMarker(key: SortKey) { return sort.key === key ? (sort.direction === "asc" ? " ↑" : " ↓") : " ↕"; }
   async function exportInventoryExcel() {
     const XLSX = await import("xlsx");
     const rows = items.map((item) => {
@@ -796,26 +877,16 @@ export default function Home() {
       window.alert(`Đã xử lý ${prepared.length} dòng: cập nhật ${updated} lô, thêm ${created} lô mới. Không có dữ liệu nào bị xóa.`);
     } catch (error) { window.alert(error instanceof Error ? error.message : "Không thể nhập file Excel."); }
   }
-  function exportReportExcel() {
-    const stringCell = (value: string, style = "Text") => `<Cell ss:StyleID="${style}"><Data ss:Type="String">${escapeXml(value)}</Data></Cell>`;
-    const numberCell = (value: number, style = "Number") => `<Cell ss:StyleID="${style}"><Data ss:Type="Number">${value}</Data></Cell>`;
-    const dateCell = (value: string) => value ? `<Cell ss:StyleID="Date"><Data ss:Type="DateTime">${value}T00:00:00.000</Data></Cell>` : stringCell("", "Date");
-    const filterDescription = [reportSearch && `Từ khóa: ${reportSearch}`, supplierFilter !== "all" && `NCC: ${supplierFilter}`, categoryFilter !== "all" && `Category: ${categoryFilter}`, brandFilter !== "all" && `Thương hiệu: ${brandFilter}`, dateFrom && `Từ ngày: ${formatDate(dateFrom)}`, dateTo && `Đến ngày: ${formatDate(dateTo)}`].filter(Boolean).join(" | ") || "Tất cả dữ liệu";
-    const headers = ["Mã phiếu", "Ngày mua", "Hạn sử dụng", "Nguyên liệu", "Category", "Thương hiệu", "Nhà cung cấp", "SL nhập", "Đơn vị", "Định lượng/đơn vị", "Tồn niêm phong", "Đang active", "Đơn giá", "Thành tiền", "Nơi bảo quản", "Dùng sau khi mở", "Hóa đơn", "Link hóa đơn"];
-    const rows = reportRows.map((item) => {
-      const meta = lotMeta[item.id];
-      const openCount = openSessions.filter((activeSession) => activeSession.sourceReceiptId === item.id).length;
-      const receiptLink = item.receipt?.dataUrl || "";
-      const linkCell = receiptLink ? `<Cell ss:StyleID="Link" ss:HRef="${escapeXml(receiptLink)}"><Data ss:Type="String">Mở hóa đơn</Data></Cell>` : stringCell("");
-      return `<Row>${stringCell(item.receiptCode || "-")}${dateCell(item.purchasedOn)}${dateCell(meta?.expiresOn || "")}${stringCell(item.name)}${stringCell(item.category)}${stringCell(item.brand)}${stringCell(item.supplier)}${numberCell(item.quantity)}${stringCell(item.unit)}${stringCell(item.specification)}${numberCell(sealedInLot(item))}${numberCell(openCount)}${numberCell(item.unitCost, "Currency")}${numberCell(item.quantity * item.unitCost, "Currency")}${stringCell(meta?.storageLocation || "Chưa ghi")}${stringCell(shelfLifeLabel(meta?.shelfLifeHours))}${stringCell(item.receipt?.name || "Không có")}${linkCell}</Row>`;
-    }).join("");
-    const xml = `<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Styles><Style ss:ID="Default" ss:Name="Normal"><Alignment ss:Vertical="Center"/><Font ss:FontName="Aptos" ss:Size="10"/></Style><Style ss:ID="Title"><Font ss:FontName="Aptos Display" ss:Size="16" ss:Bold="1" ss:Color="#17312B"/><Alignment ss:Vertical="Center"/></Style><Style ss:ID="Subtitle"><Font ss:FontName="Aptos" ss:Size="9" ss:Color="#71786E"/><Alignment ss:Vertical="Center"/></Style><Style ss:ID="Header"><Font ss:FontName="Aptos" ss:Size="9" ss:Bold="1" ss:Color="#FFFFFF"/><Interior ss:Color="#1E4B3F" ss:Pattern="Solid"/><Alignment ss:Vertical="Center" ss:WrapText="1"/></Style><Style ss:ID="Text"><Alignment ss:Vertical="Center" ss:WrapText="1"/></Style><Style ss:ID="Number"><NumberFormat ss:Format="#,##0.00"/><Alignment ss:Horizontal="Right" ss:Vertical="Center"/></Style><Style ss:ID="Currency"><NumberFormat ss:Format="#,##0 [$₫-vi-VN]"/><Alignment ss:Horizontal="Right" ss:Vertical="Center"/></Style><Style ss:ID="Date"><NumberFormat ss:Format="dd/mm/yyyy"/><Alignment ss:Horizontal="Center" ss:Vertical="Center"/></Style><Style ss:ID="Link"><Font ss:Color="#1E4B3F" ss:Underline="Single"/><Alignment ss:Vertical="Center"/></Style></Styles><Worksheet ss:Name="Báo cáo nhập kho"><Table ss:ExpandedColumnCount="18" ss:ExpandedRowCount="${reportRows.length + 3}" x:FullColumns="1" x:FullRows="1"><Column ss:Width="86"/><Column ss:Width="72"/><Column ss:Width="78"/><Column ss:Width="130"/><Column ss:Width="80"/><Column ss:Width="90"/><Column ss:Width="120"/><Column ss:Width="58"/><Column ss:Width="55"/><Column ss:Width="105"/><Column ss:Width="82"/><Column ss:Width="70"/><Column ss:Width="82"/><Column ss:Width="90"/><Column ss:Width="90"/><Column ss:Width="95"/><Column ss:Width="130"/><Column ss:Width="82"/><Row ss:Height="26"><Cell ss:MergeAcross="17" ss:StyleID="Title"><Data ss:Type="String">Báo cáo nhập kho — Nhà Coffee &amp; Tea</Data></Cell></Row><Row ss:Height="22"><Cell ss:MergeAcross="17" ss:StyleID="Subtitle"><Data ss:Type="String">Bộ lọc: ${escapeXml(filterDescription)} | Xuất lúc: ${escapeXml(formatDateTime(new Date().toISOString()))}</Data></Cell></Row><Row ss:Height="30">${headers.map((header) => stringCell(header, "Header")).join("")}</Row>${rows}</Table><WorksheetOptions xmlns="urn:schemas-microsoft-com:office:excel"><FreezePanes/><FrozenNoSplit/><SplitHorizontal>3</SplitHorizontal><TopRowBottomPane>3</TopRowBottomPane><DoNotDisplayGridlines/></WorksheetOptions><AutoFilter x:Range="R3C1:R${reportRows.length + 3}C18" xmlns="urn:schemas-microsoft-com:office:excel"/></Worksheet></Workbook>`;
-    const blob = new Blob([xml], { type: "application/vnd.ms-excel;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url; link.download = `bao-cao-nhap-kho-${new Date().toISOString().slice(0, 10)}.xls`; document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+  function renderActiveCard(activeSession: ActiveSession) {
+    const lot = items.find((entry) => entry.id === activeSession.sourceReceiptId);
+    const group = ingredientGroups.find((entry) => entry.key === (lot ? ingredientKey(lot) : activeSession.ingredientKey));
+    const remaining = activeSession.useBy ? new Date(activeSession.useBy).getTime() - now : undefined;
+    const totalLife = activeSession.useBy ? new Date(activeSession.useBy).getTime() - new Date(activeSession.activatedAt).getTime() : undefined;
+    const elapsed = totalLife ? Math.min(100, Math.max(4, ((now - new Date(activeSession.activatedAt).getTime()) / totalLife) * 100)) : 12;
+    const urgency = remaining === undefined ? "neutral" : remaining < 0 ? "overdue" : remaining <= 86_400_000 ? "soon" : "safe";
+    if (activeSession.status === "wasted") return <article className="active-card wasted" key={activeSession.id}><div className="active-card-top"><div><span>{group?.category || "Nguyên liệu"}</span><h3>{group?.name || lot?.name || "Không xác định"}</h3><p>Báo hỏng {activeSession.closedAt ? formatDateTime(activeSession.closedAt) : "chưa rõ thời gian"}</p></div><b>{formatMoney(lot?.unitCost || 0)}</b></div><div className="waste-reason"><span>{reasonLabel(activeSession.reason)}</span>{activeSession.note && <small>{activeSession.note}</small>}</div><div className="active-meta"><span>Lô {lot ? formatDate(lot.purchasedOn) : "-"}</span><span>Mở lúc {formatDateTime(activeSession.activatedAt)}</span></div><div className="active-actions"><button onClick={() => group && setDetailGroup(group)}>Chi tiết nguồn hàng</button></div></article>;
+    return <article className={`active-card ${urgency}`} key={activeSession.id}><div className="active-card-top"><div><span>{group?.category || "Nguyên liệu"}</span><h3>{group?.name || lot?.name || "Không xác định"}</h3><p>{lot?.brand || "Chưa ghi thương hiệu"} · Mở {formatDateTime(activeSession.activatedAt)} · Chi phí T{(activeSession.costRecognitionMonth || activeSession.activatedAt.slice(0, 7)).split("-").reverse().join("/")}</p></div><b>{remaining === undefined ? "Chưa đặt hạn" : remaining < 0 ? `Quá ${formatDuration(remaining)}` : `Còn ${formatDuration(remaining)}`}</b></div><div className="life-bar"><i style={{ width: `${elapsed}%` }} /></div><div className="active-meta"><span>Lô nhập {lot ? formatDate(lot.purchasedOn) : "-"}</span><span>{lotMeta[activeSession.sourceReceiptId]?.storageLocation || "Chưa ghi nơi bảo quản"}</span></div><div className="active-actions">{canDeleteInventory && <button onClick={() => returnToStock(activeSession)}>Trả về tồn kho</button>}{activeSession.status === "active" && <button className="settle" onClick={() => requestSettlement(activeSession)}>Chốt kỳ</button>}<button onClick={() => requestClose(activeSession, "used")}>Đã dùng hết</button><button className="waste" onClick={() => requestClose(activeSession, "wasted")}>Báo hỏng</button><button onClick={() => group && setDetailGroup(group)}>Chi tiết</button></div></article>;
   }
-
   if (!runtimeModeReady) return <main className="login" />;
   if ((isLocalUat && !uatAuthenticated) || (!isLocalUat && isSupabaseConfigured && !session)) return <main className="login">
     <section className="login-visual">
@@ -849,7 +920,7 @@ export default function Home() {
     /> : <>
     <section className="hero">
       <div className="eyebrow">NHA COFFEE & TEA</div>
-      <div className="hero-row"><div><h1>{tab === "inventory" ? "Kho nguyên liệu" : tab === "active" ? "Đang sử dụng" : "Báo cáo nhập kho"}</h1><p>{tab === "inventory" ? "Tìm nguyên liệu, xem tồn và mở để sử dụng." : tab === "active" ? "Ưu tiên những món sắp hư hoặc đã mở lâu." : "Lọc và sắp xếp dữ liệu nhập nguyên liệu."}</p></div><div className="hero-logo"><Image src="/nha-coffee-logo-transparent.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div></div>
+      <div className="hero-row"><div><h1>{tab === "inventory" ? "Kho nguyên liệu" : tab === "active" ? "Đang sử dụng" : "Sức khỏe Kho NVL"}</h1><p>{tab === "inventory" ? "Tìm nguyên liệu, xem tồn và mở để sử dụng." : tab === "active" ? "Lọc theo tháng, category và ưu tiên những món sắp hư." : "Theo dõi giá trị tồn, tốc độ xuất kho và các lô cần hành động."}</p></div><div className="hero-logo"><Image src="/nha-coffee-logo-transparent.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div></div>
     {tab === "active" ? <div className="metric"><span>Đơn vị đang active</span><strong>{openSessions.length}</strong><small>{overdueCount} quá hạn · {expiringSoonCount} sắp đến hạn</small></div> : <div className="metric inventory-value-metric"><span>Giá trị đã ghi nhận</span><div><section><small>Tổng tồn kho khả dụng</small><strong>{formatMoney(totalStockValue)}</strong></section><section><small>Xuất kho ghi nhận</small><select aria-label="Tháng xuất kho ghi nhận" value={inventoryCostMonth} onChange={(event) => setInventoryCostMonth(event.target.value)}>{inventoryCostMonthOptions.map((month) => <option value={month} key={month}>Tháng {month.slice(5)}/{month.slice(0, 4)}</option>)}</select><strong>{formatMoney(selectedMonthInventoryValue)}</strong></section></div><small>Chi phí session đã chốt dùng số thực tế; session chưa chốt vẫn giữ giá trị tạm tính.</small></div>}
     </section>
     {isLocalUat && <div className="uat-local-banner"><span><b>UAT LOCAL</b> · Dữ liệu mẫu không đồng bộ lên production.</span><button onClick={resetLocalUatInventory}>Nạp lại dữ liệu mẫu</button></div>}
@@ -879,18 +950,28 @@ export default function Home() {
         <div className="waste-bar" aria-label={`Hao hụt ${wasteRate.toFixed(1)} phần trăm trên mức cho phép ${wasteAllowancePercent.toFixed(1)} phần trăm`}><i className="waste-limit-marker" style={{ left: `${Math.min(100, wasteAllowancePercent)}%` }} /><b style={{ width: `${Math.min(100, wasteRate)}%` }} /></div>
         <div className="waste-monitor-foot"><span>Đã báo hỏng: {formatMoney(wastedValue)} / {formatMoney(totalValue)} giá trị nhập kho</span><strong>{isWasteOverAllowance ? `Vượt ${Math.max(0, wasteRate - wasteAllowancePercent).toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% — cần kiểm tra nguyên nhân.` : `Còn ${Math.max(0, wasteAllowancePercent - wasteRate).toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% trước ngưỡng.`}</strong></div>
       </section>
-      <div className="dashboard-head"><div><h2>{lifecycleHeading[lifecycleFilter][0]}</h2><p>{lifecycleHeading[lifecycleFilter][1]}</p></div><span>{lifecycleDashboard.length} kết quả</span></div>
-      {lifecycleDashboard.length === 0 ? <div className="empty"><b>Không có dữ liệu trong bộ lọc này</b><span>Chọn một chỉ số khác để xem các nguyên liệu liên quan.</span></div> : <div className="active-list">{lifecycleDashboard.map((activeSession) => {
-        const lot = items.find((entry) => entry.id === activeSession.sourceReceiptId); const group = ingredientGroups.find((entry) => entry.key === (lot ? ingredientKey(lot) : activeSession.ingredientKey)); const remaining = activeSession.useBy ? new Date(activeSession.useBy).getTime() - now : undefined; const totalLife = activeSession.useBy ? new Date(activeSession.useBy).getTime() - new Date(activeSession.activatedAt).getTime() : undefined; const elapsed = totalLife ? Math.min(100, Math.max(4, ((now - new Date(activeSession.activatedAt).getTime()) / totalLife) * 100)) : 12; const urgency = remaining === undefined ? "neutral" : remaining < 0 ? "overdue" : remaining <= 86_400_000 ? "soon" : "safe";
-        if (activeSession.status === "wasted") return <article className="active-card wasted" key={activeSession.id}><div className="active-card-top"><div><span>{group?.category || "Nguyên liệu"}</span><h3>{group?.name || lot?.name || "Không xác định"}</h3><p>Báo hỏng {activeSession.closedAt ? formatDateTime(activeSession.closedAt) : "chưa rõ thời gian"}</p></div><b>{formatMoney(lot?.unitCost || 0)}</b></div><div className="waste-reason"><span>{reasonLabel(activeSession.reason)}</span>{activeSession.note && <small>{activeSession.note}</small>}</div><div className="active-meta"><span>Lô {lot ? formatDate(lot.purchasedOn) : "-"}</span><span>Mở lúc {formatDateTime(activeSession.activatedAt)}</span></div><div className="active-actions"><button onClick={() => group && setDetailGroup(group)}>Chi tiết nguồn hàng</button></div></article>;
-        return <article className={`active-card ${urgency}`} key={activeSession.id}><div className="active-card-top"><div><span>{group?.category || "Nguyên liệu"}</span><h3>{group?.name || lot?.name || "Không xác định"}</h3><p>Mở {formatDateTime(activeSession.activatedAt)} · đã {formatDuration(now - new Date(activeSession.activatedAt).getTime())} · Chi phí T{(activeSession.costRecognitionMonth || activeSession.activatedAt.slice(0, 7)).split("-").reverse().join("/")} · tạm tính {formatMoney(activeSession.provisionalCost ?? lot?.unitCost ?? 0)}</p></div><b>{remaining === undefined ? "Chưa đặt hạn" : remaining < 0 ? `Quá ${formatDuration(remaining)}` : `Còn ${formatDuration(remaining)}`}</b></div><div className="life-bar"><i style={{ width: `${elapsed}%` }} /></div><div className="active-meta"><span>Lô {lot ? formatDate(lot.purchasedOn) : "-"}</span><span>{lotMeta[activeSession.sourceReceiptId]?.storageLocation || "Chưa ghi nơi bảo quản"}</span></div><div className="active-actions">{canDeleteInventory && <button onClick={() => returnToStock(activeSession)}>Trả về tồn kho</button>}{activeSession.status === "active" && <button className="settle" onClick={() => requestSettlement(activeSession)}>Chốt kỳ</button>}<button onClick={() => requestClose(activeSession, "used")}>Đã dùng hết</button><button className="waste" onClick={() => requestClose(activeSession, "wasted")}>Báo hỏng</button><button onClick={() => group && setDetailGroup(group)}>Chi tiết</button></div></article>;
-      })}</div>}
+      <div className="dashboard-head"><div><h2>{lifecycleHeading[lifecycleFilter][0]}</h2><p>{lifecycleHeading[lifecycleFilter][1]}</p></div><span>{activeFilteredSessions.length} kết quả</span></div>
+      <div className="inventory-category-tabs active-category-tabs" role="tablist" aria-label="Lọc Đang dùng theo category"><button type="button" role="tab" aria-selected={activeCategory === "all"} className={activeCategory === "all" ? "selected" : ""} onClick={() => setActiveCategory("all")}>Tất cả ({Object.values(activeBaseCategoryCounts).reduce((sum, count) => sum + count, 0)})</button>{inventoryCategories.map((category) => <button type="button" role="tab" aria-selected={activeCategory === category} className={activeCategory === category ? "selected" : ""} onClick={() => setActiveCategory(category)} key={category}>{category} ({activeBaseCategoryCounts[category] || 0})</button>)}</div>
+      <div className="inventory-search-controls"><label className="search"><span>⌕</span><input value={activeSearch} onChange={(event) => setActiveSearch(event.target.value)} placeholder="Tìm NVL, thương hiệu hoặc nhà cung cấp" /></label><label className="inventory-sort"><span>Sắp xếp</span><select value={activeSort} onChange={(event) => setActiveSort(event.target.value as "expiry" | "opened")}><option value="expiry">Hạn dùng gần nhất</option><option value="opened">Mở gần nhất</option></select></label></div>
+      <div className="inventory-month-filters active-month-filter"><label><span>Tháng mở</span><select value={activeMonthFilter} onChange={(event) => setActiveMonthFilter(event.target.value)}><option value="all">Tất cả tháng</option>{activeMonthOptions.map((month) => <option value={month} key={month}>{formatMonth(month)}</option>)}</select></label></div>
+      {activeFilteredSessions.length === 0 ? <div className="empty"><b>Không có dữ liệu trong bộ lọc này</b><span>Thử đổi category, tháng mở hoặc từ khóa tìm kiếm.</span></div> : <div className="inventory-timeline active-timeline">{activeSections.map((monthSection) => <details className="inventory-month-section" open={!collapsedActiveMonths.has(monthSection.month)} onToggle={(event) => { const isOpen = event.currentTarget.open; setCollapsedActiveMonths((current) => { const next = new Set(current); if (isOpen) next.delete(monthSection.month); else next.add(monthSection.month); return next; }); }} key={monthSection.month}><summary className="inventory-month-heading"><span>{formatMonth(monthSection.month)}</span><b>{monthSection.categories.reduce((sum, category) => sum + category.sessions.length, 0)} đơn vị</b></summary><div className="inventory-month-content">{monthSection.categories.map((categorySection) => <section className="inventory-category-section" key={`${monthSection.month}-${categorySection.category}`}><div className="inventory-category-heading"><h3>{categorySection.category}</h3><span>{activeCategoryCounts[categorySection.category] || categorySection.sessions.length} đơn vị</span></div><div className="active-list">{categorySection.sessions.map(renderActiveCard)}</div></section>)}</div></details>)}</div>}
     </section>}
 
-    {tab === "report" && <section className="content report"><div className="report-toolbar"><div className="report-summary"><div><span>Số dòng</span><strong>{reportRows.length}</strong></div><div><span>Giá trị theo bộ lọc</span><strong>{formatMoney(reportRows.reduce((sum, item) => sum + item.quantity * item.unitCost, 0))}</strong></div></div><button className="export-button" type="button" disabled={!reportRows.length} onClick={exportReportExcel}><span>⇩</span> Xuất Excel</button></div><label className="search"><span>⌕</span><input value={reportSearch} onChange={(event) => setReportSearch(event.target.value)} placeholder="Tìm NVL, category, thương hiệu..." /></label><div className="filters"><label><FieldHint label="Nhà cung cấp" help="Chọn đơn vị bán hàng để theo dõi giá mua và đối chiếu hóa đơn. Chỉ dùng Khác khi chưa có trong danh sách." /><select required value={supplierFilter} onChange={(event) => setSupplierFilter(event.target.value)}><option value="all">Tất cả</option>{suppliers.map((supplier) => <option key={supplier}>{supplier}</option>)}</select></label><label><FieldHint label="Category" help="Chọn nhóm chung như Sữa, Trà, Syrup để lọc kho và tổng hợp chi phí. Chỉ dùng Khác khi chưa có nhóm phù hợp." /><select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="all">Tất cả</option>{categories.map((category) => <option key={category}>{category}</option>)}</select></label><label><FieldHint label="Thương hiệu" help="Chọn thương hiệu in trên bao bì để phân biệt giá mua và chất lượng giữa các lô." /><select required value={brandFilter} onChange={(event) => setBrandFilter(event.target.value)}><option value="all">Tất cả</option>{brands.map((brand) => <option key={brand}>{brand}</option>)}</select></label><label>Từ ngày<input type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} /></label><label>Đến ngày<input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} /></label></div><div className="table-wrap"><table className="report-table"><thead><tr><th><button onClick={() => changeSort("purchasedOn")}>Ngày mua{sortMarker("purchasedOn")}</button></th><th>HSD</th><th>Mã phiếu</th><th><button onClick={() => changeSort("name")}>Nguyên liệu{sortMarker("name")}</button></th><th>Category</th><th>Thương hiệu</th><th>Nhà cung cấp</th><th><button onClick={() => changeSort("quantity")}>SL nhập{sortMarker("quantity")}</button></th><th>Định lượng</th><th>Quy đổi</th><th>Tồn kín</th><th>Active</th><th><button onClick={() => changeSort("unitCost")}>Đơn giá{sortMarker("unitCost")}</button></th><th><button onClick={() => changeSort("total")}>Thành tiền{sortMarker("total")}</button></th><th>Bảo quản</th><th>Sau mở</th><th>Hóa đơn</th></tr></thead><tbody>{reportRows.map((item) => { const meta = lotMeta[item.id]; const activeCount = openSessions.filter((activeSession) => activeSession.sourceReceiptId === item.id).length; return <tr key={item.id}><td>{formatDate(item.purchasedOn)}</td><td>{meta?.expiresOn ? formatDate(meta.expiresOn) : "-"}</td><td>{item.receiptCode || "-"}</td><td><button className="table-detail-button" onClick={() => setDetailLot(item)}><b>{item.name}</b><span>Xem chi tiết</span></button></td><td>{item.category}</td><td>{item.brand}</td><td>{item.supplier}</td><td>{item.quantity.toLocaleString("vi-VN")} {item.unit}</td><td>{item.specification}</td><td>{conversionLabel(item.conversion)}</td><td>{sealedInLot(item).toLocaleString("vi-VN")} {item.unit}</td><td>{activeCount}</td><td>{formatMoney(item.unitCost)}</td><td><b>{formatMoney(item.quantity * item.unitCost)}</b></td><td>{meta?.storageLocation || "-"}</td><td>{shelfLifeLabel(meta?.shelfLifeHours)}</td><td>{item.receipt?.dataUrl ? <a className="table-receipt" href={item.receipt.dataUrl} target="_blank" rel="noreferrer">Mở HĐ</a> : item.receipt ? "Có file" : "-"}</td></tr>; })}{reportRows.length === 0 && <tr><td colSpan={17} className="no-result">Không có dữ liệu phù hợp.</td></tr>}</tbody></table></div></section>}
+    {tab === "report" && <section className="content report inventory-report-dashboard">
+      <div className="report-dashboard-head"><div><span>INVENTORY PULSE</span><h2>Sức khỏe Kho NVL</h2><p>Giá trị, tốc độ xuất kho và rủi ro hạn dùng theo bộ lọc hiện tại.</p></div><b>{reportRows.length} lô</b></div>
+      <label className="search"><span>⌕</span><input value={reportSearch} onChange={(event) => setReportSearch(event.target.value)} placeholder="Tìm NVL, category, thương hiệu..." /></label>
+      <div className="filters"><label><FieldHint label="Nhà cung cấp" help="Lọc theo đơn vị bán hàng để so sánh cơ cấu mua và mức phụ thuộc." /><select required value={supplierFilter} onChange={(event) => setSupplierFilter(event.target.value)}><option value="all">Tất cả</option>{suppliers.map((supplier) => <option key={supplier}>{supplier}</option>)}</select></label><label><FieldHint label="Category" help="Lọc một nhóm nguyên liệu để xem giá trị tồn và tốc độ sử dụng." /><select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="all">Tất cả</option>{categories.map((category) => <option key={category}>{category}</option>)}</select></label><label><FieldHint label="Thương hiệu" help="Lọc theo thương hiệu để đối chiếu giá trị mua và tồn." /><select required value={brandFilter} onChange={(event) => setBrandFilter(event.target.value)}><option value="all">Tất cả</option>{brands.map((brand) => <option key={brand}>{brand}</option>)}</select></label><label>Từ ngày<input type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} /></label><label>Đến ngày<input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} /></label></div>
+      <div className="report-kpis"><article><span>Giá trị đã nhập</span><strong>{formatMoney(reportPurchaseValue)}</strong><small>{reportRows.reduce((sum, item) => sum + item.quantity, 0).toLocaleString("vi-VN")} đơn vị nhập</small></article><article><span>Giá trị tồn kín</span><strong>{formatMoney(reportStockValue)}</strong><small>{reportPurchaseValue ? `${(reportStockValue / reportPurchaseValue * 100).toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% giá trị mua` : "Chưa có dữ liệu"}</small></article><article><span>Đã xuất khỏi kho</span><strong>{formatMoney(reportIssuedValue)}</strong><small>{activeSessions.filter((session) => reportRows.some((item) => item.id === session.sourceReceiptId)).length} lượt lifecycle</small></article><article className={reportRiskRows.length ? "risk" : ""}><span>Cần ưu tiên</span><strong>{reportRiskRows.length}</strong><small>Lô còn tồn, HSD trong 14 ngày</small></article></div>
+      <div className="report-dashboard-grid">
+        <section className="report-panel report-month-panel"><div className="report-panel-head"><div><span>DÒNG TIỀN NHẬP KHO</span><h3>Giá trị mua theo tháng</h3></div><small>6 tháng gần nhất</small></div><div className="month-bars">{reportMonthData.length ? reportMonthData.map((entry) => { const max = Math.max(...reportMonthData.map((item) => item.value), 1); return <div key={entry.label}><b style={{ height: `${Math.max(8, entry.value / max * 100)}%` }}><i>{formatMoney(entry.value)}</i></b><span>T{Number(entry.label.slice(5))}</span></div>; }) : <p>Chưa có dữ liệu.</p>}</div></section>
+        <section className="report-panel"><div className="report-panel-head"><div><span>CƠ CẤU TỒN KHO</span><h3>Category giữ nhiều giá trị nhất</h3></div><small>Top {reportCategoryData.length}</small></div><div className="horizontal-bars">{reportCategoryData.map((entry) => { const max = Math.max(...reportCategoryData.map((item) => item.stock), 1); return <div key={entry.label}><div><b>{entry.label}</b><span>{formatMoney(entry.stock)}</span></div><i><b style={{ width: `${entry.stock / max * 100}%` }} /></i><small>{entry.lots} lô · đã xuất {entry.purchase ? ((entry.purchase - entry.stock) / entry.purchase * 100).toLocaleString("vi-VN", { maximumFractionDigits: 0 }) : 0}%</small></div>; })}</div></section>
+        <section className="report-panel"><div className="report-panel-head"><div><span>NGUỒN CUNG</span><h3>Chi tiêu theo nhà cung cấp</h3></div><small>Top {reportSupplierData.length}</small></div><div className="supplier-list">{reportSupplierData.map((entry, index) => <div key={entry.label}><b>{String(index + 1).padStart(2, "0")}</b><span><strong>{entry.label}</strong><small>{reportPurchaseValue ? `${(entry.value / reportPurchaseValue * 100).toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% tổng mua` : "0%"}</small></span><em>{formatMoney(entry.value)}</em></div>)}</div></section>
+        <section className="report-panel risk-panel"><div className="report-panel-head"><div><span>ACTION NEEDED</span><h3>Lô cần ưu tiên xử lý</h3></div><small>HSD ≤ 14 ngày</small></div>{reportRiskRows.length ? <div className="risk-list">{reportRiskRows.map(({ item, meta, sealed }) => <button type="button" onClick={() => setDetailLot(item)} key={item.id}><span><b>{item.name}</b><small>{item.brand} · {sealed.toLocaleString("vi-VN")} {item.unit} còn kín</small></span><strong>{meta?.expiresOn ? formatDate(meta.expiresOn) : "-"}</strong></button>)}</div> : <div className="report-clear"><b>Kho đang an toàn</b><span>Không có lô còn tồn nào hết hạn trong 14 ngày tới.</span></div>}</section>
+      </div>
+    </section>}
 
     {selectedGroup && <div className="sheet-backdrop" role="presentation" onMouseDown={() => setDetailGroup(undefined)}><aside className="sheet detail-sheet" onMouseDown={(event) => event.stopPropagation()}><div className="sheet-handle" /><div className="sheet-title"><div><p>CHI TIẾT NGUYÊN LIỆU</p><h2>{selectedGroup.name}</h2><span>{selectedGroup.brand} · {selectedGroup.specification}</span></div><button type="button" className="close" onClick={() => setDetailGroup(undefined)}>×</button></div><div className="detail-totals"><div><span>Niêm phong</span><strong>{sealedInGroup(selectedGroup).toLocaleString("vi-VN")} {selectedGroup.unit}</strong></div><div><span>Đang active</span><strong>{activeInGroup(selectedGroup).length} {selectedGroup.unit}</strong></div></div>
-      <section className="detail-section"><h3>Đang active</h3>{activeInGroup(selectedGroup).length === 0 ? <p className="detail-empty">Chưa có {selectedGroup.unit} nào đang sử dụng.</p> : activeInGroup(selectedGroup).map((activeSession, index) => <article className="detail-active" key={activeSession.id}><div><b>{selectedGroup.unit} active #{index + 1}</b><span>Mở {formatDateTime(activeSession.activatedAt)}</span><span>Chi phí ghi nhận T{(activeSession.costRecognitionMonth || activeSession.activatedAt.slice(0, 7)).split("-").reverse().join("/")}</span><span>{activeSession.useBy ? `Dùng trước ${formatDateTime(activeSession.useBy)}` : "Chưa thiết lập hạn sau khi mở"}</span></div><div>{canDeleteInventory && <button onClick={() => returnToStock(activeSession)}>Trả về tồn kho</button>}<button onClick={() => requestClose(activeSession, "used")}>Dùng hết</button><button className="waste" onClick={() => requestClose(activeSession, "wasted")}>Báo hỏng</button></div></article>)}</section>
+      <section className="detail-section"><h3>Đang active</h3>{activeInGroup(selectedGroup).length === 0 ? <p className="detail-empty">Chưa có {selectedGroup.unit} nào đang sử dụng.</p> : activeInGroup(selectedGroup).map((activeSession, index) => <article className="detail-active" key={activeSession.id}><div><b>{selectedGroup.unit} active #{index + 1}</b><span>Mở {formatDateTime(activeSession.activatedAt)}</span><span>Chi phí ghi nhận T{(activeSession.costRecognitionMonth || activeSession.activatedAt.slice(0, 7)).split("-").reverse().join("/")}</span><span>{activeSession.useBy ? `Dùng trước ${formatDateTime(activeSession.useBy)}` : "Chưa thiết lập hạn sau khi mở"}</span></div><div>{canDeleteInventory && <button onClick={() => returnToStock(activeSession)}>Trả về tồn kho</button>}<button className="settle" onClick={() => requestSettlement(activeSession)}>Chốt kỳ</button><button onClick={() => requestClose(activeSession, "used")}>Dùng hết</button><button className="waste" onClick={() => requestClose(activeSession, "wasted")}>Báo hỏng</button></div></article>)}</section>
       <section className="detail-section"><div className="detail-history-heading"><h3>Lịch sử nhập kho</h3><span>{selectedGroup.lots.length} lần nhập · {selectedGroupLotMonths.length} tháng</span></div>{selectedGroupLotMonths.map((monthGroup) => <section className="detail-month-group" key={monthGroup.month}><div><b>{formatMonth(monthGroup.month)}</b><span>{monthGroup.lots.length} lần nhập</span></div>{[...monthGroup.lots].sort((a, b) => (lotMeta[a.id]?.expiresOn || "9999").localeCompare(lotMeta[b.id]?.expiresOn || "9999")).map((lot) => { const meta = lotMeta[lot.id]; const sealed = sealedInLot(lot); const hasBeenIssued = takenFromLot(lot.id) > 0; return <article className="lot-card" key={lot.id}><button className="lot-summary-button" onClick={() => setDetailLot(lot)}><div className="lot-top"><div><b>Nhập {formatDate(lot.purchasedOn)}</b><span>{lot.receiptCode ? `Phiếu ${lot.receiptCode} · ` : ""}{lot.supplier}</span></div><strong>{sealed.toLocaleString("vi-VN")}/{lot.quantity.toLocaleString("vi-VN")} {lot.unit}</strong></div><div className="lot-meta"><span>HSD: {meta?.expiresOn ? formatDate(meta.expiresOn) : "Chưa ghi"}</span><span>Sau mở: {shelfLifeLabel(meta?.shelfLifeHours)}</span><span>{meta?.storageLocation || "Chưa ghi nơi bảo quản"}</span></div><span className="lot-detail-link">Xem chi tiết nhập kho & hóa đơn →</span></button><button className="activate-button" disabled={sealed < 1} onClick={() => requestActivation(selectedGroup, lot)}>{sealed < 1 ? "Lô đã hết" : `Mở 1 ${lot.unit} để sử dụng`}</button><div className="lot-actions"><button onClick={() => openEdit(lot)}>Sửa lô</button><button onClick={() => setHistoryItem(lot)}>Lịch sử</button>{canDeleteInventory && <button disabled={hasBeenIssued || deletingId === lot.id} title={hasBeenIssued ? "Không thể xóa phiếu đã có lần xuất sang Đang dùng" : undefined} onClick={() => removeItem(lot.id)}>{deletingId === lot.id ? "Đang xóa..." : "Xóa"}</button>}</div></article>; })}</section>)}</section>
     </aside></div>}
 
@@ -907,13 +988,13 @@ export default function Home() {
       const lot = items.find((item) => item.id === settlementCandidate.sourceReceiptId);
       const openingAmount = settlementCandidate.openedAmount || lot?.conversion?.amount || 0;
       const openingUnit = settlementCandidate.openedUnit || lot?.conversion?.unit || "";
-      const hasRemainingInput = Boolean(settlementRemaining.trim());
-      const remainingAmount = hasRemainingInput ? Math.min(openingAmount, Math.max(0, parseDecimalInput(settlementRemaining))) : openingAmount;
-      const usedAmount = Math.max(0, openingAmount - remainingAmount);
+      const hasUsedInput = Boolean(settlementUsed.trim());
+      const usedAmount = hasUsedInput ? Math.min(openingAmount, Math.max(0, parseDecimalInput(settlementUsed))) : 0;
+      const remainingAmount = Math.max(0, openingAmount - usedAmount);
       const provisionalCost = settlementCandidate.provisionalCost ?? lot?.unitCost ?? 0;
       const recognizedCost = openingAmount ? Math.round(provisionalCost * usedAmount / openingAmount) : 0;
       const returnedCost = Math.max(0, provisionalCost - recognizedCost);
-      return <div className="sheet-backdrop action-backdrop" role="presentation" onMouseDown={() => !settlingPeriod && setSettlementCandidate(undefined)}><form className="sheet action-sheet" onSubmit={confirmSettlement} onMouseDown={(event) => event.stopPropagation()}><div className="sheet-handle" /><div className="sheet-title"><div><p>ĐỐI SOÁT LƯỢNG DÙNG THỰC TẾ</p><h2>Chốt kỳ · {lot?.name || "Nguyên liệu"}</h2><span>Chi phí đang tạm tính {formatMoney(provisionalCost)}</span></div><button disabled={settlingPeriod} type="button" className="close" onClick={() => setSettlementCandidate(undefined)}>×</button></div><div className="form-row"><label><FieldHint label="Loại kỳ" help="Chọn tuần nếu đối soát vận hành hàng tuần, hoặc tháng nếu chốt trực tiếp theo kỳ kế toán." /><select disabled={settlingPeriod} value={settlementMode} onChange={(event) => setSettlementMode(event.target.value as SettlementMode)}><option value="week">Hàng tuần</option><option value="month">Hàng tháng</option></select></label><label><FieldHint label="Ngày kết thúc kỳ" help="Ngày kiểm đếm lượng còn lại. Chi phí thực dùng sẽ điều chỉnh vào tháng đã chọn khi mở hộp." /><input disabled={settlingPeriod} required type="date" value={settlementDate} onChange={(event) => setSettlementDate(event.target.value)} /></label></div><label><FieldHint label={`Còn lại thực tế (${openingUnit})`} help="Nhập số lượng thực tế còn lại trong bao bì. Hệ thống tự tính phần đã dùng và giá trị hoàn kho." /><input disabled={settlingPeriod} required autoFocus min="0" max={openingAmount} step="0.01" inputMode="decimal" type="number" value={settlementRemaining} onChange={(event) => setSettlementRemaining(event.target.value)} placeholder={`Tối đa ${openingAmount.toLocaleString("vi-VN")} ${openingUnit}`} /><small>Lúc mở: {openingAmount.toLocaleString("vi-VN")} {openingUnit} · ghi nhận vào tháng {(settlementCandidate.costRecognitionMonth || settlementCandidate.activatedAt.slice(0, 7)).split("-").reverse().join("/")}</small></label><div className="settlement-preview"><div><span>Đã sử dụng</span><strong>{usedAmount.toLocaleString("vi-VN")} {openingUnit}</strong><small>{formatMoney(recognizedCost)}</small></div><div><span>Trả về Kho</span><strong>{remainingAmount.toLocaleString("vi-VN")} {openingUnit}</strong><small>{formatMoney(returnedCost)} · đã mở</small></div></div><p className="uat-note">Session hiện tại sẽ được đóng và giữ lịch sử. Phần còn lại tạo thành lô Kho đã mở, giữ nguyên hạn dùng sau lần mở đầu tiên.</p><button disabled={settlingPeriod} className="save-button" type="submit">{settlingPeriod ? "Đang chốt kỳ..." : "Xác nhận chốt kỳ"}</button></form></div>;
+      return <div className="sheet-backdrop action-backdrop" role="presentation" onMouseDown={() => !settlingPeriod && setSettlementCandidate(undefined)}><form className="sheet action-sheet" onSubmit={confirmSettlement} onMouseDown={(event) => event.stopPropagation()}><div className="sheet-handle" /><div className="sheet-title"><div><p>ĐỐI SOÁT LƯỢNG DÙNG THỰC TẾ</p><h2>Chốt kỳ · {lot?.name || "Nguyên liệu"}</h2><span>Chi phí đang tạm tính {formatMoney(provisionalCost)}</span></div><button disabled={settlingPeriod} type="button" className="close" onClick={() => setSettlementCandidate(undefined)}>×</button></div><div className="form-row"><label><FieldHint label="Loại kỳ" help="Chọn tuần nếu đối soát vận hành hàng tuần, hoặc tháng nếu chốt trực tiếp theo kỳ kế toán." /><select disabled={settlingPeriod} value={settlementMode} onChange={(event) => { const mode = event.target.value as SettlementMode; setSettlementMode(mode); if (mode === "week") setSettlementDisposition("return"); }}><option value="week">Hàng tuần</option><option value="month">Hàng tháng</option></select></label><label><FieldHint label="Ngày kết thúc kỳ" help="Ngày kiểm đếm lượng đã dùng. Tháng chuyển tiếp được tính từ ngày kết thúc kỳ này." /><input disabled={settlingPeriod} required type="date" value={settlementDate} onChange={(event) => setSettlementDate(event.target.value)} /></label></div><label><FieldHint label={`Tháng này đã dùng (${openingUnit})`} help="Nhập số lượng đã sử dụng trong kỳ. Hệ thống tự tính phần còn lại để trả Kho hoặc chuyển tháng sau." /><input disabled={settlingPeriod} required autoFocus min="0" max={openingAmount} step="0.01" inputMode="decimal" type="number" value={settlementUsed} onChange={(event) => setSettlementUsed(event.target.value)} placeholder={`Tối đa ${openingAmount.toLocaleString("vi-VN")} ${openingUnit}`} /><small>Lúc mở: {openingAmount.toLocaleString("vi-VN")} {openingUnit} · ghi nhận vào tháng {(settlementCandidate.costRecognitionMonth || settlementCandidate.activatedAt.slice(0, 7)).split("-").reverse().join("/")}</small></label><fieldset className="settlement-options"><legend>Xử lý phần còn lại sau chốt kỳ</legend><label className={settlementDisposition === "return" ? "selected" : ""}><input type="radio" name="settlement-disposition" value="return" checked={settlementDisposition === "return"} onChange={() => setSettlementDisposition("return")} /><span><b>A · Trả về tồn kho</b><small>Tạo lô Kho đã mở để có thể mở lại khi cần.</small></span></label><label className={settlementDisposition === "carry" ? "selected" : ""}><input disabled={!isLocalUat || settlementMode !== "month"} type="radio" name="settlement-disposition" value="carry" checked={settlementDisposition === "carry"} onChange={() => setSettlementDisposition("carry")} /><span><b>B · Tiếp tục dùng tháng sau</b><small>{settlementMode === "month" ? `Giữ active, chuyển phần chi phí còn lại sang tháng ${nextMonth(settlementDate.slice(0, 7)).split("-").reverse().join("/")}.` : "Chỉ áp dụng khi chọn chốt Hàng tháng."}</small></span></label></fieldset><div className="settlement-preview"><div><span>Đã sử dụng kỳ này</span><strong>{usedAmount.toLocaleString("vi-VN")} {openingUnit}</strong><small>{formatMoney(recognizedCost)}</small></div><div><span>{settlementDisposition === "carry" ? "Chuyển tháng sau" : "Trả về Kho"}</span><strong>{remainingAmount.toLocaleString("vi-VN")} {openingUnit}</strong><small>{formatMoney(returnedCost)} · đã mở</small></div></div><p className="uat-note">Session kỳ hiện tại được đóng và giữ lịch sử. {settlementDisposition === "carry" ? "Phần còn lại xuất hiện ngay trong Đang dùng của tháng tiếp theo, không tăng số hộp vật lý." : "Phần còn lại trở thành lô Kho đã mở, giữ nguyên hạn dùng từ lần mở đầu tiên."}</p><button disabled={settlingPeriod} className="save-button" type="submit">{settlingPeriod ? "Đang chốt kỳ..." : "Xác nhận chốt kỳ"}</button></form></div>;
     })()}
 
     {closeCandidate && <div className="sheet-backdrop action-backdrop" role="presentation" onMouseDown={() => setCloseCandidate(undefined)}><form className="sheet action-sheet" onSubmit={confirmClose} onMouseDown={(event) => event.stopPropagation()}><div className="sheet-handle" /><div className="sheet-title"><div><p>KẾT THÚC ACTIVE</p><h2>{closeCandidate.status === "used" ? "Xác nhận đã dùng hết" : "Ghi nhận hư hỏng"}</h2></div><button type="button" className="close" onClick={() => setCloseCandidate(undefined)}>×</button></div>{closeCandidate.status === "wasted" && <label><FieldHint label="Lý do" help="Chọn nguyên nhân hư hỏng thực tế để theo dõi hao hụt và đưa ra biện pháp khắc phục." /><select required value={closeReason} onChange={(event) => setCloseReason(event.target.value)}><option value="">Chọn lý do</option>{closeReasons.filter(([key]) => key !== "used_up").map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></label>}<label><FieldHint label="Ghi chú" help="Ghi rõ lý do khi chọn Khác để lịch sử hao hụt có thể truy vết." /> {closeReason === "other" ? "(bắt buộc)" : "(không bắt buộc)"}<textarea required={closeReason === "other"} value={closeNote} onChange={(event) => setCloseNote(event.target.value)} placeholder="Mô tả ngắn nếu cần" /></label><button className={`save-button ${closeCandidate.status === "wasted" ? "danger-button" : ""}`} type="submit">{closeCandidate.status === "used" ? "Đánh dấu đã dùng hết" : "Ghi nhận hư/hủy"}</button></form></div>}

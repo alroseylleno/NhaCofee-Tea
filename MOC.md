@@ -15,8 +15,12 @@ This is the mandatory routing map for code changes in `Operations/nha-ops/`. Rea
 - Product Master is available in both Local/UAT and Production. UAT uses isolated browser storage; Production reads and writes the shared Supabase Product Master tables.
 - Production `main` includes `bc5c225`, which reconciles Product Master ingredients to current Kho NVL source lots after an inventory reset/re-import.
 - The current release groups Kho/Active/Used/Waste cards by purchase month, then Category. Month headers are `+` / `-` accordions, while each ingredient detail keeps its complete cross-month receipt history.
+- The UAT `Đang dùng` workspace mirrors Kho filtering with status cards, Category chips, search, month-open filter, sorting and month → Category accordions. UAT period settlement offers either returning the opened remainder to Kho or immediately carrying it into the next accounting month as a continued active session while preserving the original shelf-life clock.
+- UAT carry-over derives the next accounting month from the selected settlement end date, not the source session's prior recognition month; an August settlement therefore always carries into September.
+- The Kho NVL report workspace is dashboard-first instead of an Excel/table frame: filtered KPIs, six-month purchase value, Category stock concentration, supplier spend and 14-day expiry actions visualize the same inventory dataset.
 - The current release adds manual-expense Excel round-trip and Production Supabase persistence through `finance_expenses`; UAT expense records remain browser-local. Production saves require a returned Supabase row before the UI accepts the change.
 - Product Master is Finance-driven: the latest `Tài chính → Doanh thu → Mặt hàng` snapshot is the sole SKU/name/category/default-price catalog. The 2026-08-12 migration performs the owner-authorized one-time Product reset and rebuilds Production products from the current Finance snapshot.
+- Local/UAT Product Master seeds missing recipes by Finance SKU from `Copy of BẢNG TỔNG HỢP CT (1).xlsx`. Size-specific SKUs use the workbook's M/L column; matched Ingredient Master rows are prefilled, while missing/ambiguous NVL or unsupported conversions remain explicit `CT Excel` flags and block theoretical COGS. Existing saved recipes are never overwritten. Production is unchanged.
 - Production migration `20260812000200` corrects the owner-confirmed July overstatement for 9 boxes of Kem béo CARNATION EXTRA in the 48-box receipt `010726-027`. It verifies 16 total lifecycle rows and 13 July rows for that exact receipt, preserves the first 4 legitimate July issues, the two lifecycle rows from other periods and the single active August box, then snapshots and deletes only the latest 9 closed July rows; guarded sealed stock moves from 32 to 41.
 
 ## Start Here
@@ -88,6 +92,7 @@ When changing an inventory field, inspect all of these paths together:
 - Fully depleted groups move from `Tồn kho` to `Dùng hết` when sealed quantity and active quantity both reach zero.
 - Cost recognition uses `costRecognitionMonth`; operational opening time remains `activatedAt`.
 - Local UAT and Production support period settlement for an active converted unit. The session keeps its provisional full cost until settlement, then stores `recognizedCost` for actual use and creates an internal `stockState: opened` return lot for the remaining quantity/value. Production uses the atomic `settle_inventory_period` RPC so closing the session and creating the return lot cannot partially succeed. Internal return lots are inventory assets, not new purchases, and preserve the first-open shelf-life clock.
+- UAT additionally supports `Tiếp tục dùng tháng sau`: it closes the current period, creates the same internal opened remainder lot, then consumes that lot into one new active session whose `costRecognitionMonth` is the following month. The physical package count stays unchanged. This option is blocked outside Local/UAT until a Production atomic RPC is added.
 
 ## Finance Map
 
@@ -146,6 +151,9 @@ Current UAT data contract:
 - Kho NVL category quick filters display the number of matching grouped ingredients after the current stock-state and search filters are applied. A custom Category remains uppercase while typing and accepts spaces; all `Khác` inputs preserve user-entered spaces and normalize only when persisted where applicable.
 - Product, ingredient and recipe changes append browser-local audit events for UAT traceability.
 - The UAT Product reset control clears only Product recipes/cost history and immediately rebuilds SKU/category/price from the local Finance snapshot; Production exposes no reset control.
+- UAT recipe workbook mapping lives in `lib/uat-recipe-workbook.ts`; it is keyed by Finance SKU, resolves live Ingredient Master IDs at runtime and runs again after Finance/Kho sync for missing/workbook-seeded recipes, while any manually saved active version is preserved.
+- Recipe versions may carry UAT import metadata (`source`, `sourceLabel`, `expectedItemCount`, `importIssues`). Any unresolved workbook issue or incomplete expected item count prevents theoretical COGS from being presented as complete.
+- Count-family recipe units include `trái`, `miếng`, `muỗng` and `vá` so workbook topping quantities can be represented when the matching Kho NVL conversion is count-based.
 
 The intended chain is:
 

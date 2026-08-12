@@ -91,6 +91,10 @@ export type RecipeVersion = {
   status: RecipeVersionStatus;
   items: ProductRecipeItem[];
   createdAt: string;
+  source?: "workbook" | "manual";
+  sourceLabel?: string;
+  expectedItemCount?: number;
+  importIssues?: string[];
 };
 
 export type CostSnapshot = {
@@ -146,7 +150,7 @@ export const DEFAULT_STORE: StoreMaster = {
 
 export const MASS_UNITS = ["mg", "g", "kg"] as const;
 export const VOLUME_UNITS = ["ml", "l", "oz"] as const;
-export const COUNT_UNITS = ["cái", "viên", "phần", "gói", "túi", "hộp", "chai", "lon"] as const;
+export const COUNT_UNITS = ["cái", "viên", "phần", "gói", "túi", "hộp", "chai", "lon", "trái", "miếng", "muỗng", "vá"] as const;
 export const ALL_RECIPE_UNITS = [...MASS_UNITS, ...VOLUME_UNITS, ...COUNT_UNITS];
 const MASTER_STATUSES: MasterStatus[] = ["unmapped", "draft", "ready", "active", "inactive"];
 
@@ -165,6 +169,10 @@ const unitFactors: Record<string, { family: UnitFamily; factor: number; base: st
   "hộp": { family: "count", factor: 1, base: "cái" },
   "chai": { family: "count", factor: 1, base: "cái" },
   "lon": { family: "count", factor: 1, base: "cái" },
+  "trái": { family: "count", factor: 1, base: "cái" },
+  "miếng": { family: "count", factor: 1, base: "cái" },
+  "muỗng": { family: "count", factor: 1, base: "cái" },
+  "vá": { family: "count", factor: 1, base: "cái" },
 };
 
 export function normalizedText(value: string) {
@@ -318,7 +326,7 @@ export function recipeItemCost(recipe: ProductRecipeItem, ingredient?: Ingredien
 }
 
 export function recipeVersionCost(version: RecipeVersion | undefined, ingredients: IngredientMaster[], packagingCost = 0) {
-  if (!version?.items.length) return undefined;
+  if (!version?.items.length || version.importIssues?.length || (version.expectedItemCount !== undefined && version.items.length < version.expectedItemCount)) return undefined;
   let ingredientCost = 0;
   for (const recipe of version.items) {
     const cost = recipeItemCost(recipe, ingredients.find((ingredient) => ingredient.id === recipe.ingredientId));
@@ -341,6 +349,7 @@ export function productValidationErrors(product: ProductMaster, versions: Recipe
   if (!product.category.trim() || product.category === "Chưa phân loại") errors.push("Thiếu category chuẩn");
   if (product.sellingPrice <= 0) errors.push("Thiếu giá bán");
   if (!recipe?.items.length) errors.push("Chưa có công thức");
+  for (const issue of recipe?.importIssues || []) errors.push(`CT Excel: ${issue}`);
   for (const item of recipe?.items || []) {
     const ingredient = ingredients.find((entry) => entry.id === item.ingredientId);
     if (!ingredient) errors.push("Công thức tham chiếu nguyên liệu không tồn tại");
