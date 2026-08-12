@@ -17,6 +17,7 @@ This is the mandatory routing map for code changes in `Operations/nha-ops/`. Rea
 - The current release groups Kho/Active/Used/Waste cards by purchase month, then Category. Month headers are `+` / `-` accordions, while each ingredient detail keeps its complete cross-month receipt history.
 - The current release adds manual-expense Excel round-trip and Production Supabase persistence through `finance_expenses`; UAT expense records remain browser-local. Production saves require a returned Supabase row before the UI accepts the change.
 - Product Master is Finance-driven: the latest `Tài chính → Doanh thu → Mặt hàng` snapshot is the sole SKU/name/category/default-price catalog. The 2026-08-12 migration performs the owner-authorized one-time Product reset and rebuilds Production products from the current Finance snapshot.
+- Production migration `20260812000200` corrects the owner-confirmed July overstatement for 9 boxes of Kem béo CARNATION EXTRA by snapshotting and deleting exactly nine July lifecycle sessions; guarded sealed stock moves from 32 to 41.
 
 ## Start Here
 
@@ -178,6 +179,7 @@ Do not stage these files in an unrelated Kho NVL hotfix. Production Product Mast
 | Inventory conversion | conversion amount/unit fields | `20260807000100` |
 | CFO master-data foundation | stores, masters, recipes and finance facts | `20260805000100`, `20260809000200` - additive tables, versioned recipes and broad authenticated RLS during rollout |
 | Finance-driven Product catalog reset | `finance_product_rows.selling_price`, Product price override, exact Finance reconciliation, one-time Product/Ingredient reset | `20260812000100` |
+| July CARNATION EXTRA cost correction | guarded snapshot and deletion of exactly 9 July lifecycle sessions; sealed stock 32 -> 41 | `20260812000200` |
 
 Migration rules:
 
