@@ -2,7 +2,7 @@ import { supabase } from "@/lib/supabase";
 
 export type CloudReceipt = { name: string; dataUrl?: string; path?: string };
 export type CloudHistory = { id: string; at: string; action: "created" | "updated"; changes: unknown[] };
-export type CloudPeriodSettlement = { mode: "week" | "month"; periodEnd: string; openingAmount: number; remainingAmount: number; usedAmount: number; unit: string; returnedLotId?: string };
+export type CloudPeriodSettlement = { mode: "week" | "month"; periodEnd: string; openingAmount: number; remainingAmount: number; usedAmount: number; unit: string; returnedLotId?: string; disposition?: "return" | "carry"; continuedSessionId?: string };
 export type CloudItem = { id: string; name: string; category: string; brand: string; unit: string; quantity: number; specification: string; conversion?: { amount: number; unit: string }; unitCost: number; purchasedOn: string; supplier: string; receiptCode?: string; receipt?: CloudReceipt; history: CloudHistory[]; stockState?: "sealed" | "opened"; returnedOn?: string; sourceSessionId?: string; firstOpenedAt?: string };
 export type CloudLotMeta = { expiresOn: string; shelfLifeHours?: number; storageLocation: string };
 export type CloudActiveSession = { id: string; sourceReceiptId: string; ingredientKey: string; activatedAt: string; costRecognitionMonth?: string; useBy?: string; status: "active" | "used" | "wasted"; closedAt?: string; reason: string; note?: string; openedAmount?: number; openedUnit?: string; provisionalCost?: number; recognizedCost?: number; settlement?: CloudPeriodSettlement };
@@ -121,4 +121,18 @@ export async function settleInventoryPeriod(input: { sessionId: string; mode: "w
   if (error?.code === "PGRST202") throw new Error("Supabase chưa có chức năng Chốt kỳ. Hãy chạy migration 20260809000900 trước.");
   if (error) throw error;
   return data?.[0] as { recognized_cost: number; returned_cost: number; returned_lot_id?: string } | undefined;
+}
+
+export async function settleInventoryPeriodWithCarry(input: { sessionId: string; periodEnd: string; remainingAmount: number; returnedLotId: string; continuedSessionId: string; historyId?: string }) {
+  const { data, error } = await requireClient().rpc("settle_inventory_period_with_carry", {
+    p_session_id: input.sessionId,
+    p_period_end: input.periodEnd,
+    p_remaining_amount: input.remainingAmount,
+    p_returned_lot_id: input.returnedLotId,
+    p_continued_session_id: input.continuedSessionId,
+    p_history_id: input.historyId || null,
+  });
+  if (error?.code === "PGRST202") throw new Error("Supabase chưa có chức năng chuyển tiếp kỳ. Hãy chạy migration 20260813000100 trước.");
+  if (error) throw error;
+  return data?.[0] as { recognized_cost: number; carried_cost: number; returned_lot_id: string; continued_session_id: string; cost_recognition_month: string } | undefined;
 }
