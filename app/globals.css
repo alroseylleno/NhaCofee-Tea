@@ -23,8 +23,8 @@
 .waste-status-line .waste-allowance { display: block; }
 .waste-status-line .waste-allowance > span { display: none; }
 
-.inventory-views { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; margin: 18px 0 -4px; padding: 4px; border-radius: 11px; background: #edf0e9; }
-.inventory-views button { min-width: 0; padding: 9px 4px; border: 0; border-radius: 8px; color: var(--muted); background: transparent; font: 700 11px Arial, sans-serif; white-space: nowrap; }
+.inventory-views { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 5px; margin: 18px 0 -4px; padding: 4px; border-radius: 11px; background: #edf0e9; }
+.inventory-views button { min-width: 0; overflow: hidden; padding: 9px 2px; border: 0; border-radius: 8px; color: var(--muted); background: transparent; font: 700 clamp(8px, 2.55vw, 11px)/1 Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
 .inventory-views button.selected { color: var(--ink); background: #fff; box-shadow: 0 1px 4px #17312b18; }
 .inventory-category-tabs { display: flex; gap: 7px; margin: 14px -16px -3px; padding: 0 16px 8px; overflow-x: auto; scrollbar-color: #9eaa9c #edf0e9; scrollbar-width: thin; }
 .inventory-category-tabs::-webkit-scrollbar { height: 6px; }
@@ -199,7 +199,7 @@
   .app-workspace > .tabs { padding: 0 28px; }
   .app-workspace > .tabs button { padding-right: 18px; padding-left: 18px; }
   .app-workspace > .content { width: 100%; max-width: 1240px; margin-right: auto; margin-left: auto; padding: 28px 28px 90px; }
-  .inventory-views { width: min(360px, 100%); }
+  .inventory-views { width: min(470px, 100%); }
   .inventory-category-tabs { margin-right: 0; margin-left: 0; padding-right: 0; padding-left: 0; }
   .inventory-search-controls { grid-template-columns: minmax(0, 1fr) 210px; }
   .inventory-sort select { width: 100%; max-width: none; }

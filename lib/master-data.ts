@@ -70,7 +70,7 @@ export type ProductMaster = {
   sellingPriceOverridden: boolean;
   packagingCost: number;
   status: MasterStatus;
-  source: "import";
+  source: "import" | "manual";
   updatedAt: string;
 };
 
@@ -80,6 +80,11 @@ export type ProductRecipeItem = {
   quantity: number;
   unit: string;
   wastePercent: number;
+  // Manual exception for components that intentionally have no Kho NVL conversion.
+  customName?: string;
+  customBrand?: string;
+  customCategory?: string;
+  customCost?: number;
 };
 
 export type RecipeVersion = {
@@ -90,6 +95,7 @@ export type RecipeVersion = {
   effectiveTo?: string;
   status: RecipeVersionStatus;
   items: ProductRecipeItem[];
+  packagingItems?: ProductRecipeItem[];
   createdAt: string;
   source?: "workbook" | "manual";
   sourceLabel?: string;
@@ -307,6 +313,8 @@ export function mergeProductDrafts(current: ProductMaster[], imported: ImportedP
       updatedAt: new Date().toISOString(),
     });
   }
+  // Manual UAT drafts are intentionally not part of the Finance snapshot.
+  for (const product of current) if (product.source === "manual") merged.push(product);
   return merged;
 }
 
@@ -319,21 +327,29 @@ export function editableRecipeVersion(productId: string, versions: RecipeVersion
 }
 
 export function recipeItemCost(recipe: ProductRecipeItem, ingredient?: IngredientMaster) {
+  if (recipe.customName) return recipe.customCost && recipe.customCost > 0 ? recipe.customCost : undefined;
   if (!ingredient || !recipe.quantity) return undefined;
   const baseQuantity = convertToBase(recipe.quantity, recipe.unit, ingredient.baseUnit);
   if (baseQuantity === undefined || ingredient.latestPurchasePricePerBaseUnit <= 0) return undefined;
   return baseQuantity * ingredient.latestPurchasePricePerBaseUnit * (1 + Math.max(0, recipe.wastePercent) / 100);
 }
 
+export function recipeItemsCost(items: ProductRecipeItem[] | undefined, ingredients: IngredientMaster[]) {
+  if (!items?.length) return 0;
+  let total = 0;
+  for (const item of items) {
+    const cost = recipeItemCost(item, ingredients.find((ingredient) => ingredient.id === item.ingredientId));
+    if (cost === undefined) return undefined;
+    total += cost;
+  }
+  return total;
+}
+
 export function recipeVersionCost(version: RecipeVersion | undefined, ingredients: IngredientMaster[], packagingCost = 0) {
   if (!version?.items.length || version.importIssues?.length || (version.expectedItemCount !== undefined && version.items.length < version.expectedItemCount)) return undefined;
-  let ingredientCost = 0;
-  for (const recipe of version.items) {
-    const cost = recipeItemCost(recipe, ingredients.find((ingredient) => ingredient.id === recipe.ingredientId));
-    if (cost === undefined) return undefined;
-    ingredientCost += cost;
-  }
-  return ingredientCost + packagingCost;
+  const ingredientCost = recipeItemsCost(version.items, ingredients);
+  const packagingIngredientCost = recipeItemsCost(version.packagingItems, ingredients);
+  return ingredientCost === undefined || packagingIngredientCost === undefined ? undefined : ingredientCost + packagingIngredientCost + packagingCost;
 }
 
 export function theoreticalProductCost(product: ProductMaster, versions: RecipeVersion[], ingredients: IngredientMaster[]) {
@@ -351,6 +367,10 @@ export function productValidationErrors(product: ProductMaster, versions: Recipe
   if (!recipe?.items.length) errors.push("Chưa có công thức");
   for (const issue of recipe?.importIssues || []) errors.push(`CT Excel: ${issue}`);
   for (const item of recipe?.items || []) {
+    if (item.customName) {
+      if (!item.customCost || item.customCost <= 0) errors.push(`${item.customName}: mục Khác chưa có giá vốn để tính`);
+      continue;
+    }
     const ingredient = ingredients.find((entry) => entry.id === item.ingredientId);
     if (!ingredient) errors.push("Công thức tham chiếu nguyên liệu không tồn tại");
     else if (ingredient.status !== "active" || ingredient.stockQuantityBase <= 0) errors.push(`${ingredient.name} · ${ingredient.brand}: không còn khả dụng ở Kho hay Đang dùng`);

@@ -79,6 +79,15 @@
 .categoryTabs button b { display: grid; flex: 0 0 22px; place-items: center; height: 22px; border-radius: 50%; color: #1e4b3f; background: #e4eee1; font-size: 10px; }
 .categoryTabs .selected { border: 2px solid #1e4b3f; padding: 10px; color: var(--ink); background: #fff; }
 .expenseList { display: grid; gap: 11px; }
+.expenseCategoryGroup { overflow: hidden; border: 1px solid #9ebba8; border-radius: 17px; background: #eff6ed; box-shadow: 0 6px 18px #17312b0c; }
+.expenseCategoryGroup > summary { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; gap: 9px; align-items: center; min-height: 58px; padding: 13px 14px; cursor: pointer; list-style: none; color: #173d33; background: linear-gradient(105deg, #dcebdd, #f9fcf7 72%); }
+.expenseCategoryGroup > summary::-webkit-details-marker { display: none; }
+.expenseCategoryGroup > summary::before { content: "+"; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; color: #fff; background: #2d644e; font: 700 18px/1 Arial, sans-serif; }
+.expenseCategoryGroup[open] > summary::before { content: "-"; }
+.expenseCategoryGroup > summary span { min-width: 0; overflow: hidden; font: 800 13px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+.expenseCategoryGroup > summary small { color: #557463; font: 600 10px Arial, sans-serif; }
+.expenseCategoryGroup > summary b { padding: 5px 7px; border-radius: 7px; color: #214c3d; background: #fff; font: 700 11px Arial, sans-serif; white-space: nowrap; }
+.expenseCategoryGroupBody { display: grid; gap: 10px; padding: 10px; border-top: 1px solid #c7d9ca; }
 .expenseGroup { overflow: hidden; border: 1px solid #d6ded3; border-radius: 16px; background: #fff; box-shadow: 0 5px 16px #17312b0b; transition: border-color .16s ease, box-shadow .16s ease; }
 .expenseGroup:hover, .expenseGroup[open] { border-color: #aac0ae; box-shadow: 0 8px 20px #17312b12; }
 .expenseGroup > summary { display: grid; grid-template-columns: 23px minmax(0, 1fr) auto; gap: 9px; align-items: center; min-height: 54px; padding: 13px 14px; cursor: pointer; list-style: none; background: linear-gradient(105deg, #f6faf3, #fffdf8 72%); }
@@ -303,6 +312,33 @@
 .reportTabs { display: flex; gap: 6px; overflow-x: auto; margin: 16px -16px 14px; padding: 0 16px 3px; scrollbar-width: none; }
 .reportTabs button { flex: 0 0 auto; padding: 9px 11px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); background: #fff; font: 700 10px Arial, sans-serif; }
 .reportTabs .selected { border-color: var(--ink); color: #fff; background: var(--ink); }
+.reportVisualization { display: grid; gap: 9px; margin-bottom: 14px; }
+.reportVisualKpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+.reportVisualKpis article { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 13px; background: #fff; }
+.reportVisualKpis .visualPrimary { border-color: #b9cfbd; background: #edf5e9; }
+.reportVisualKpis .visualRisk { border-color: #dfb6aa; background: #fff2ed; }
+.reportVisualKpis span, .reportVisualKpis strong, .reportVisualKpis small { display: block; min-width: 0; }
+.reportVisualKpis span { overflow: hidden; color: #39715d; font: 800 8px Arial, sans-serif; letter-spacing: .07em; text-overflow: ellipsis; white-space: nowrap; }
+.reportVisualKpis strong { overflow-wrap: anywhere; margin-top: 6px; font: 700 clamp(13px, 4vw, 18px) Georgia, serif; }
+.reportVisualKpis small { margin-top: 4px; color: var(--muted); font: 8px/1.35 Arial, sans-serif; }
+.visualPanel { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
+.visualPanelHead { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
+.visualPanelHead span, .visualPanelHead h3 { display: block; }
+.visualPanelHead span { color: #39715d; font: 800 8px Arial, sans-serif; letter-spacing: .1em; }
+.visualPanelHead h3 { margin-top: 4px; font: 700 15px Georgia, serif; }
+.visualPanelHead > b { flex: 0 0 auto; color: var(--pine); font: 700 12px Arial, sans-serif; }
+.visualBars { display: grid; gap: 9px; }
+.visualBars > div > div { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+.visualBars > div > div span { overflow: hidden; font: 700 10px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+.visualBars > div > div b { flex: 0 0 auto; font: 700 10px Arial, sans-serif; }
+.visualBars > div > i { display: block; height: 7px; overflow: hidden; margin-top: 5px; border-radius: 99px; background: #e8ede5; }
+.visualBars > div > i > b { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #46735e, #a4bd9d); }
+.visualBars > div > small { display: block; margin-top: 4px; color: var(--muted); font: 8px Arial, sans-serif; }
+.visualBars > p { color: var(--muted); font: 10px Arial, sans-serif; }
+.assetValueTrack { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center; margin-top: 14px; padding-top: 12px; border-top: 1px solid #ebe5da; }
+.assetValueTrack span, .assetValueTrack strong { font: 700 9px Arial, sans-serif; }
+.assetValueTrack > i { display: block; height: 9px; overflow: hidden; border-radius: 99px; background: #eadfd2; }
+.assetValueTrack > i b { display: block; height: 100%; border-radius: inherit; background: #5b8d72; }
 .financialTable { overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
 .financialDetail { border-top: 1px solid #ebe5da; }
 .financialDetail:first-child { border-top: 0; }
@@ -312,13 +348,26 @@
 .financialRow span { font: 12px Arial, sans-serif; }
 .financialRow strong { font-size: 13px; text-align: right; }
 .financialRow small { color: var(--muted); font: 9px Arial, sans-serif; text-align: right; }
-.financialRow i { color: var(--muted); font: 16px Arial, sans-serif; font-style: normal; transition: transform .15s ease; }
-.financialDetail[open] .financialRow i { transform: rotate(180deg); }
+.financialRow i { display: grid; width: 18px; height: 18px; place-items: center; border-radius: 50%; color: #fff; background: #527765; font: 700 14px/1 Arial, sans-serif; font-style: normal; }
+.financialDetail[open] .financialRow i { font-size: 0; }
+.financialDetail[open] .financialRow i::after { content: "−"; font-size: 14px; }
 .financialBreakdown { display: grid; gap: 7px; padding: 10px 12px 12px 28px; border-top: 1px solid #eee8dc; background: #faf7f0; }
 .financialBreakdown > div { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font: 10px Arial, sans-serif; }
 .financialBreakdown > div span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .financialBreakdown > div b { flex: 0 0 auto; color: var(--ink); font: 700 10px Arial, sans-serif; }
 .financialBreakdown p { color: var(--muted); font: 10px Arial, sans-serif; }
+.financialSubgroup { overflow: hidden; border: 1px solid #dfd8ca; border-radius: 10px; background: #fff; }
+.financialSubgroup > summary { display: grid; grid-template-columns: minmax(0, 1fr) auto 18px; gap: 8px; align-items: center; padding: 9px 10px; cursor: pointer; list-style: none; }
+.financialSubgroup > summary::-webkit-details-marker { display: none; }
+.financialSubgroup > summary span { overflow: hidden; color: #4d5d52; font: 700 10px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+.financialSubgroup > summary b { color: var(--ink); font: 700 10px Arial, sans-serif; }
+.financialSubgroup > summary i { display: grid; width: 18px; height: 18px; place-items: center; border-radius: 50%; color: #fff; background: #8a7a5c; font: 700 13px/1 Arial, sans-serif; font-style: normal; }
+.financialSubgroup[open] > summary i { font-size: 0; }
+.financialSubgroup[open] > summary i::after { content: "−"; font-size: 13px; }
+.financialSubgroup > div { display: grid; gap: 1px; padding: 5px; border-top: 1px solid #eee8dc; background: #f5f1e9; }
+.financialSubgroup > div > div { display: flex; justify-content: space-between; gap: 10px; padding: 8px 9px; border-radius: 7px; color: var(--muted); background: #fff; font: 10px Arial, sans-serif; }
+.financialSubgroup > div span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.financialSubgroup > div b { flex: 0 0 auto; color: var(--ink); font: 700 10px Arial, sans-serif; }
 .income strong { color: #455f45; }
 .deduction strong, .cost strong { color: #845244; }
 .total { background: #f5f0e6; font-weight: 700; }
@@ -433,6 +482,9 @@
   .summaryStrip { grid-template-columns: repeat(4, 1fr); }
   .categoryTabs { grid-template-columns: repeat(4, 1fr); }
   .reportGrid { grid-template-columns: repeat(3, 1fr); }
+  .reportVisualization { grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); align-items: stretch; }
+  .reportVisualKpis { grid-template-columns: 1fr; }
+  .visualPanel { display: flex; flex-direction: column; justify-content: center; }
   .cashBreakdown { grid-column: 1 / -1; }
   .inventoryBridge { grid-template-columns: 1fr auto 1fr auto 1fr auto 1fr; }
   .assetList { grid-template-columns: 1fr 1fr; }

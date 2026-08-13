@@ -1,6 +1,6 @@
 # Nha Ops - Code Map
 
-> Last reviewed: 2026-08-12
+> Last reviewed: 2026-08-13
 > Production branch: `main`
 > GitHub: `alroseylleno/NhaCofee-Tea`
 
@@ -20,7 +20,7 @@ This is the mandatory routing map for code changes in `Operations/nha-ops/`. Rea
 - The Kho NVL report workspace is dashboard-first instead of an Excel/table frame: filtered KPIs, six-month purchase value, Category stock concentration, supplier spend and 14-day expiry actions visualize the same inventory dataset.
 - The current release adds manual-expense Excel round-trip and Production Supabase persistence through `finance_expenses`; UAT expense records remain browser-local. Production saves require a returned Supabase row before the UI accepts the change.
 - All UI date values, date-entry fields and exported Excel date columns use `dd/mm/yyyy`; application state and Supabase continue using ISO `yyyy-mm-dd` internally for safe filtering and persistence.
-- Product Master is Finance-driven: the latest `Tài chính → Doanh thu → Mặt hàng` snapshot is the sole SKU/name/category/default-price catalog. The 2026-08-12 migration performs the owner-authorized one-time Product reset and rebuilds Production products from the current Finance snapshot.
+- Product Master remains Finance-driven for imported SKU/name/category/default-price data, while manual products and clones are also supported in both environments. Production stores those manual products in Supabase and Finance reconciliation preserves them.
 - Local/UAT Product Master seeds missing recipes by Finance SKU from `Copy of BẢNG TỔNG HỢP CT (1).xlsx`. Size-specific SKUs use the workbook's M/L column; matched Ingredient Master rows are prefilled, while missing/ambiguous NVL or unsupported conversions remain explicit `CT Excel` flags and block theoretical COGS. Existing saved recipes are never overwritten. Production is unchanged.
 - Production migration `20260812000200` corrects the owner-confirmed July overstatement for 9 boxes of Kem béo CARNATION EXTRA in the 48-box receipt `010726-027`. It verifies 16 total lifecycle rows and 13 July rows for that exact receipt, preserves the first 4 legitimate July issues, the two lifecycle rows from other periods and the single active August box, then snapshots and deletes only the latest 9 closed July rows; guarded sealed stock moves from 32 to 41.
 
@@ -66,6 +66,7 @@ Owns:
 - Login shell and module navigation.
 - Kho NVL tabs: inventory, active, report.
 - Stock/used-up views, category quick filters, search and sorting.
+- Inventory view filters include `Chưa quy đổi`: only sealed or currently active lots with no usable conversion; historical `Đã dùng` and `Hao hụt` lots are excluded.
 - Inventory card hierarchy is purchase month → Category → grouped ingredient. Opening an ingredient exposes the full receipt history grouped again by month, including lots outside the current card month.
 - Category normalization: categories are uppercased and case-only duplicates collapse into one category.
 - Add/edit/copy/delete flows, invoice attachment UI, Excel import/export.
@@ -107,6 +108,8 @@ Important boundaries:
 - Production manual-expense cache uses `nha-ops-finance-v2`; the prior `v1` and accidental legacy-UAT fallback are cleared so a database inventory reset cannot leave stale expense cards in the browser.
 - Manual expenses use Excel export/import with stable record IDs and an exported instruction sheet. Duplicate IDs inside one workbook keep the final row. UAT merges imported rows into its isolated browser store; Production bulk-upserts them into `finance_expenses`, requires Supabase to return every imported row, then reloads and verifies the committed cloud snapshot.
 - Expense entry keeps the four expense-category filter cards. Inside the selected filter, record groups are `+` / `-` accordions by manual subcategory; Operating expenses also contain `Từ Kho NVL`, nested again by the Category carried from each inventory lot before showing individual COGS/waste events.
+- Every `Tài chính → Báo cáo tài chính` workspace (P&L, Cash Flow, Inventory and Assets/Depreciation) uses the same parent → subcategory → line-item accordion hierarchy with counts and `+` / `-`. Revenue/calculated totals use explicit composition subgroups; inventory and assets group by their source Category/subcategory.
+- Each Financial Report workspace also has a responsive dashboard above its accordion: P&L shows net revenue/profit KPIs and cost mix, Cash Flow shows inflow/outflow/net cash and outflow mix, Inventory shows opening/closing/issued values and closing Category concentration, and Assets shows original/accumulated/remaining values plus asset-category concentration.
 - On the first successful Production load after the expense migration, each device uses `nha-ops-finance-expenses-migrated-v1` to insert its browser-cached v2 expenses only once. Existing cloud IDs are never overwritten, and later cloud deletions cannot be resurrected by the cache.
 - Production Excel imports load from and replace the latest matching datasets in Supabase.
 - Importing a new dataset replaces that dataset through database RPCs; it must not silently clear unrelated inventory or expense data.
@@ -132,7 +135,7 @@ Current UAT data contract:
 - Product Master is rendered in Local/UAT and Production. Production uses `lib/master-data-store.ts` and Supabase.
 - UAT browser storage uses `nha-ops-master-data-uat-v5`. Its first load intentionally discards every legacy Product/recipe/cost record, while Ingredient Master continues to rebuild from current Kho NVL.
 - Finance product imports reconcile Product Master exactly by normalized SKU in both modes: missing Finance SKUs are created, matching SKUs refresh name/category/variant, and SKUs absent from the latest Finance snapshot are removed with their recipes.
-- Product Master has no manual SKU creation. Selling price defaults from the Finance `Giá mặt hàng` column; a Product edit may override selling price and packaging cost, and the override prevents later Finance syncs from replacing that selling price.
+- Selling price defaults from the Finance `Giá mặt hàng` column; an edit may override it, and manual products/clones can be created with their own SKU. Finance reconciliation refreshes imported products but preserves manual products and price overrides.
 - Kho NVL lots feed Ingredient Master automatically with currently usable quantity, usable conversion, latest purchase price and a source-lot link for traceability. Product Master availability is sealed stock plus lifecycle sessions whose status is `active`; sessions closed as `used` or `wasted` are excluded. Supabase sync is source-of-truth: a master row no longer represented by a current Kho NVL lot is retained only for recipe history, set to inactive with zero availability, and excluded from new recipe choices.
 - The recipe cascade offers only active current-inventory master rows with usable quantity greater than zero: Category is sourced from rows that are either still sealed in Kho NVL or currently in `Đang dùng`, then the ingredient/brand picker is constrained to the selected Category. Inactive, depleted, used-up or wasted historical rows remain resolvable by saved recipes but are never selectable for new recipe items.
 - Ingredient Master has no manual activation queue. Inventory ingredients become available to new recipe items while they have sealed stock or an active lifecycle session; a saved recipe that later has neither raises a replacement alert explaining that it may be depleted, used up or wasted, and cannot be saved as a new version until the ingredient is replaced or removed.
@@ -146,7 +149,7 @@ Current UAT data contract:
 - The Overview dashboard combines theoretical COGS, gross-margin and inventory-capacity metrics with horizontal Top 5 charts for highest-cost and lowest-cost products, plus Top Items and Top Categories from the latest Finance product import.
 - The waiting queue is inventory-driven: an ingredient with neither sealed stock nor an active lifecycle session is flagged with available replacement candidates from the same category and compatible unit family. Product recipe rows expose the same direct `Thay thế` action when an ingredient is red/unavailable.
 - The waiting queue is grouped by the same Finance Category and uses compact 1–2 line SKU rows. It includes missing recipes, missing selling price, unit mismatch and depleted/used/wasted NVL replacement alerts.
-- Product Alias and workbook/reference-cost concepts are removed. Product detail shows the current theoretical COGS plus a compact line chart recalculated for every saved recipe version from current Ingredient Master prices.
+- Product Alias and workbook/reference-cost concepts are removed. Product detail is one ordered workspace: Overview, Formula & NVL, then History. Formula is a `+` / `-` parent group with three child groups: Selling price, Ingredients and Packaging. Ingredients and Packaging each use the same inventory recipe flow (category, ingredient/brand, converted quantity, unit and waste); the single `Lưu công thức` action persists them with any selling-price edit. Overview explicitly shows `Giá NVL + Bao bì` for total COGS and recalculates profit margin; the compact line chart recalculates every saved recipe version from current Ingredient Master prices.
 - Replacing or deleting an unavailable ingredient, or adding a new ingredient, updates the open local recipe draft only. Saving is the single action that creates the new formula version.
 - Product and theoretical COGS now share one catalog. Each recipe calculates an estimated serving capacity from currently usable inventory (sealed stock plus active lifecycle sessions); the minimum ingredient capacity is the limiting number of cups.
 - Kho NVL category quick filters display the number of matching grouped ingredients after the current stock-state and search filters are applied. A custom Category remains uppercase while typing and accepts spaces; all `Khác` inputs preserve user-entered spaces and normalize only when persisted where applicable.
@@ -154,6 +157,9 @@ Current UAT data contract:
 - The UAT Product reset control clears only Product recipes/cost history and immediately rebuilds SKU/category/price from the local Finance snapshot; Production exposes no reset control.
 - UAT recipe workbook mapping lives in `lib/uat-recipe-workbook.ts`; it is keyed by Finance SKU, resolves live Ingredient Master IDs at runtime and runs again after Finance/Kho sync for missing/workbook-seeded recipes, while any manually saved active version is preserved.
 - Recipe versions may carry UAT import metadata (`source`, `sourceLabel`, `expectedItemCount`, `importIssues`). Any unresolved workbook issue or incomplete expected item count prevents theoretical COGS from being presented as complete.
+- The Product tab is labelled `Quản lý sản phẩm`. Every product row/card provides Copy and the workspace exposes `Tạo sản phẩm`; UAT stores manual drafts locally and Production persists them in Supabase.
+- Product Categories in `Quản lý sản phẩm` are `+` / `-` accordions. Row/card actions use compact Copy and Delete controls. Deleting a Finance-origin SKU records an environment-specific exclusion/tombstone so reconciliation does not immediately recreate it; UAT Reset clears local exclusions.
+- Ingredient selection includes `Khác` for formula exceptions that deliberately do not use a Kho NVL conversion. They retain their typed name and explicit manual COGS, which is included in total product COGS and margin. Migration `20260813000200` adds the component discriminator/manual fields required to persist these and Packaging items in Production.
 - Count-family recipe units include `trái`, `miếng`, `muỗng` and `vá` so workbook topping quantities can be represented when the matching Kho NVL conversion is count-based.
 
 The intended chain is:
@@ -188,6 +194,7 @@ Do not stage these files in an unrelated Kho NVL hotfix. Production Product Mast
 | Inventory conversion | conversion amount/unit fields | `20260807000100` |
 | CFO master-data foundation | stores, masters, recipes and finance facts | `20260805000100`, `20260809000200` - additive tables, versioned recipes and broad authenticated RLS during rollout |
 | Finance-driven Product catalog reset | `finance_product_rows.selling_price`, Product price override, exact Finance reconciliation, one-time Product/Ingredient reset | `20260812000100` |
+| Product Management component persistence | `product_recipe_items.component_type`, manual component cost/name fields, Product catalog exclusions and guarded Product delete RPC | `20260813000200` |
 | July CARNATION EXTRA cost correction | exact receipt `010726-027`; verifies 16 total/13 July rows, preserves 4 legitimate July issues, 2 other-period rows and 1 active August box, then snapshots/deletes the latest 9 closed July excess rows; sealed stock 32 -> 41 | `20260812000200` |
 
 Migration rules:

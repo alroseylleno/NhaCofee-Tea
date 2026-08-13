@@ -21,21 +21,21 @@ import {
   normalizedText,
   productValidationErrors,
   recipeItemCost,
+  recipeItemsCost,
   recipeVersionCost,
   theoreticalProductCost,
 } from "@/lib/master-data";
-import { loadCloudMasterData, saveCloudProduct, saveCloudRecipe } from "@/lib/master-data-store";
+import { deleteCloudProduct, loadCloudMasterData, saveCloudProduct, saveCloudRecipe } from "@/lib/master-data-store";
 import { applyUatWorkbookRecipes, workbookRecipeSummary } from "@/lib/uat-recipe-workbook";
 import styles from "./product-master.module.css";
 
 type MasterTab = "overview" | "queue" | "products";
-type DetailTab = "summary" | "recipe" | "history";
 type FinanceLocalState = {
   products?: ImportedProductSource[];
   imports?: Array<{ dataType: "revenue" | "products" | "service"; fileName: string; periodStart: string; periodEnd: string; rowCount: number; importedAt: string }>;
   importHistory?: Array<{ dataType: "revenue" | "products" | "service"; fileName: string; periodStart: string; periodEnd: string; rowCount: number; importedAt: string }>;
 };
-type ProductForm = { sellingPrice: string; packagingCost: string };
+type ProductForm = { sellingPrice: string };
 type CapacityRow = { ingredient?: IngredientMaster; requiredBase: number; capacity: number };
 type CapacityEstimate = { servings: number; limiting?: IngredientMaster; rows: CapacityRow[] };
 type StockIssue = { key: string; product: ProductMaster; version: RecipeVersion; ingredient: IngredientMaster; candidates: IngredientMaster[] };
@@ -45,6 +45,7 @@ type FinanceCategoryMetric = { name: string; revenue: number; quantity: number; 
 
 const MASTER_UAT_STORAGE_KEY = "nha-ops-master-data-uat-v5";
 const MASTER_UAT_RESET_KEY = "nha-ops-master-data-uat-v5-reset-20260812";
+const MASTER_UAT_DELETED_SKUS_KEY = "nha-ops-master-data-uat-deleted-skus-v1";
 const MASTER_LEGACY_UAT_STORAGE_KEYS = ["nha-ops-master-data-uat-v4", "nha-ops-master-data-uat-v3", "nha-ops-master-data-uat-v2", "nha-ops-master-data-uat-v1"];
 const FINANCE_UAT_STORAGE_KEY = "nha-ops-finance-uat-v2";
 
@@ -86,7 +87,7 @@ function parseAmount(value: string) {
 }
 
 function productDefaults(): ProductForm {
-  return { sellingPrice: "", packagingCost: "" };
+  return { sellingPrice: "" };
 }
 
 function legacyNumericPrice(value?: string) {
@@ -106,6 +107,13 @@ function readFinanceLocalState(): FinanceLocalState {
     return { ...stored, products: (stored.products || []).map(normalizeFinanceProduct) };
   }
   catch { return {}; }
+}
+
+function readDeletedUatSkus() {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(MASTER_UAT_DELETED_SKUS_KEY) || "[]");
+    return new Set(Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : []);
+  } catch { return new Set<string>(); }
 }
 
 function sortIngredientsForUse(ingredients: IngredientMaster[]) {
@@ -133,7 +141,7 @@ function ingredientIsAvailable(ingredient: IngredientMaster | undefined) {
 
 function capacityEstimate(version: RecipeVersion | undefined, ingredients: IngredientMaster[]): CapacityEstimate | undefined {
   if (!version?.items.length || version.importIssues?.length || (version.expectedItemCount !== undefined && version.items.length < version.expectedItemCount)) return undefined;
-  const rows = version.items.map((item): CapacityRow => {
+  const rows = version.items.filter((item) => !item.customName).map((item): CapacityRow => {
     const ingredient = ingredients.find((entry) => entry.id === item.ingredientId);
     const converted = ingredient ? convertToBase(item.quantity, item.unit, ingredient.baseUnit) : undefined;
     const requiredBase = converted === undefined ? 0 : converted * (1 + Math.max(0, item.wastePercent) / 100);
@@ -145,7 +153,8 @@ function capacityEstimate(version: RecipeVersion | undefined, ingredients: Ingre
 
 function mergeSourceData(state: MasterDataState, inventoryLots: InventorySourceLot[]) {
   const finance = readFinanceLocalState();
-  const products = mergeProductDrafts(state.products, finance.products || []);
+  const deletedSkus = readDeletedUatSkus();
+  const products = mergeProductDrafts(state.products, finance.products || []).filter((product) => product.source === "manual" || !deletedSkus.has(normalizedText(product.sku)));
   const productIds = new Set(products.map((product) => product.id));
   const importBatches = [...state.importBatches];
   for (const imported of finance.importHistory || finance.imports || []) {
@@ -172,9 +181,6 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
   const [replacementSelection, setReplacementSelection] = useState<Record<string, string>>({});
   const [inlineReplacementKey, setInlineReplacementKey] = useState("");
   const [selectedProductId, setSelectedProductId] = useState("");
-  const [detailTab, setDetailTab] = useState<DetailTab>("summary");
-  const [editingProductId, setEditingProductId] = useState<string>();
-  const [showProductForm, setShowProductForm] = useState(false);
   const [productForm, setProductForm] = useState<ProductForm>(productDefaults);
   const [recipeCategory, setRecipeCategory] = useState("");
   const [recipeIngredientId, setRecipeIngredientId] = useState("");
@@ -183,10 +189,18 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
   const [recipeQuantity, setRecipeQuantity] = useState("");
   const [recipeUnit, setRecipeUnit] = useState("g");
   const [recipeWaste, setRecipeWaste] = useState("0");
+  const [recipeCustomName, setRecipeCustomName] = useState("");
+  const [recipeCustomCost, setRecipeCustomCost] = useState("");
   const [selectedRecipeVersionId, setSelectedRecipeVersionId] = useState("");
   const [recipeDraftProductId, setRecipeDraftProductId] = useState("");
   const [recipeDraftSourceId, setRecipeDraftSourceId] = useState("");
   const [recipeDraftItems, setRecipeDraftItems] = useState<ProductRecipeItem[]>([]);
+  const [packagingDraftItems, setPackagingDraftItems] = useState<ProductRecipeItem[]>([]);
+  const [packagingCategory, setPackagingCategory] = useState("");
+  const [packagingIngredientId, setPackagingIngredientId] = useState("");
+  const [packagingQuantity, setPackagingQuantity] = useState("");
+  const [packagingUnit, setPackagingUnit] = useState("");
+  const [packagingWaste, setPackagingWaste] = useState("0");
 
   useEffect(() => {
     if (!uatMode) {
@@ -257,11 +271,16 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
   const selectedVersion = selectedVersions.find((version) => version.id === selectedRecipeVersionId) || currentRecipe;
   const isCurrentRecipe = !selectedVersion || selectedVersion.id === currentRecipe?.id;
   const recipeItems = isCurrentRecipe && recipeDraftProductId === selectedProductId ? recipeDraftItems : selectedVersion?.items || [];
+  const packagingItems = isCurrentRecipe && recipeDraftProductId === selectedProductId ? packagingDraftItems : selectedVersion?.packagingItems || [];
   const recipeDraftDirty = recipeDraftProductId === selectedProductId && JSON.stringify(recipeDraftItems) !== JSON.stringify(currentRecipe?.items || []);
-  const recipeHasUnsavedChanges = recipeDraftDirty || Boolean(recipeQuantity.trim());
+  const packagingDraftDirty = recipeDraftProductId === selectedProductId && JSON.stringify(packagingDraftItems) !== JSON.stringify(currentRecipe?.packagingItems || []);
+  const recipeHasUnsavedChanges = recipeDraftDirty || packagingDraftDirty || Boolean(recipeQuantity.trim()) || Boolean(packagingQuantity.trim());
   const selectedProductErrors = selectedProduct ? productValidationErrors(selectedProduct, state.recipeVersions, state.ingredients) : [];
   const selectedProductCost = selectedProduct ? theoreticalProductCost(selectedProduct, state.recipeVersions, state.ingredients) : undefined;
+  const selectedProductIngredientCost = selectedProduct ? recipeItemsCost(activeRecipeVersion(selectedProduct.id, state.recipeVersions)?.items, state.ingredients) : undefined;
+  const selectedProductPackagingCost = selectedProduct ? (() => { const cost = recipeItemsCost(activeRecipeVersion(selectedProduct.id, state.recipeVersions)?.packagingItems, state.ingredients); return cost === undefined ? undefined : cost + selectedProduct.packagingCost; })() : undefined;
   const selectedProductMargin = selectedProductCost !== undefined && selectedProduct?.sellingPrice ? (selectedProduct.sellingPrice - selectedProductCost) / selectedProduct.sellingPrice * 100 : undefined;
+  const productDraftDirty = Boolean(selectedProduct && (parseAmount(productForm.sellingPrice) !== selectedProduct.sellingPrice));
   const recipePreviewVersion: RecipeVersion | undefined = selectedProduct ? {
     id: currentRecipe?.id || "draft",
     productId: selectedProduct.id,
@@ -270,6 +289,7 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
     status: "active",
     createdAt: currentRecipe?.createdAt || "",
     items: recipeItems,
+    packagingItems,
     expectedItemCount: currentRecipe?.expectedItemCount,
     importIssues: currentRecipe?.source === "workbook" && recipeItems.length < (currentRecipe.expectedItemCount || 0) ? currentRecipe.importIssues : [],
   } : undefined;
@@ -277,8 +297,12 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
   const selectedVersionCosts = useMemo(() => selectedVersions.slice().reverse().map((version) => ({ version, cost: recipeVersionCost(version, state.ingredients, selectedProduct?.packagingCost || 0) })), [selectedVersions, state.ingredients, selectedProduct?.packagingCost]);
   const selectedCapacity = capacityEstimate(isCurrentRecipe ? { ...(currentRecipe || { id: "", productId: selectedProductId, version: 0, effectiveFrom: "", status: "active" as const, createdAt: "" }), items: recipeItems } : selectedVersion, state.ingredients);
   const recipeCandidates = sortIngredientsForUse(selectableIngredients.filter((ingredient) => !recipeCategory || ingredient.category === recipeCategory)).sort((left, right) => Number(Boolean(conversionUnitForRecipe(right, uatMode))) - Number(Boolean(conversionUnitForRecipe(left, uatMode))));
+  const isOtherRecipeCategory = recipeCategory === "Khác";
   const selectedRecipeIngredient = state.ingredients.find((ingredient) => ingredient.id === recipeIngredientId);
   const allowedRecipeUnits = conversionUnitForRecipe(selectedRecipeIngredient, uatMode) ? [conversionUnitForRecipe(selectedRecipeIngredient, uatMode)!] : [];
+  const packagingCandidates = sortIngredientsForUse(selectableIngredients.filter((ingredient) => !packagingCategory || ingredient.category === packagingCategory));
+  const selectedPackagingIngredient = state.ingredients.find((ingredient) => ingredient.id === packagingIngredientId);
+  const allowedPackagingUnits = conversionUnitForRecipe(selectedPackagingIngredient, uatMode) ? [conversionUnitForRecipe(selectedPackagingIngredient, uatMode)!] : [];
 
   const stockIssues = useMemo<StockIssue[]>(() => {
     const issues = new Map<string, StockIssue>();
@@ -352,6 +376,7 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
 
   function resetUat() {
     if (!window.confirm("Xóa dữ liệu Sản phẩm UAT và đồng bộ lại Kho NVL/Finance?")) return;
+    window.localStorage.removeItem(MASTER_UAT_DELETED_SKUS_KEY);
     const resetState = applyUatWorkbookRecipes(mergeSourceData(emptyMasterDataState(), inventoryLots));
     setState(resetState);
     setSelectedProductId("");
@@ -359,32 +384,13 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
     setTab("queue");
   }
 
-  function openProduct(product: ProductMaster) {
-    setEditingProductId(product.id);
-    setProductForm({ sellingPrice: amountInput(product.sellingPrice), packagingCost: amountInput(product.packagingCost) });
-    setShowProductForm(true);
-  }
-
-  async function saveProduct(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const existing = state.products.find((product) => product.id === editingProductId);
-    if (!existing) return;
-    const product: ProductMaster = { ...existing, sellingPrice: parseAmount(productForm.sellingPrice), sellingPriceOverridden: true, packagingCost: parseAmount(productForm.packagingCost), updatedAt: new Date().toISOString() };
-    try {
-      if (!uatMode) await saveCloudProduct(product);
-      setState((current) => ({ ...current, products: current.products.map((entry) => entry.id === existing.id ? product : entry), auditEvents: [auditEvent("product", existing.id, "update", "Cập nhật giá bán/chi phí bao bì"), ...current.auditEvents] }));
-    } catch (error) { window.alert(error instanceof Error ? error.message : "Không thể lưu SKU."); return; }
-    setShowProductForm(false);
-    setSelectedProductId(existing.id);
-  }
-
   function startRecipeDraft(productId: string, items = activeRecipeVersion(productId, state.recipeVersions)?.items || []) {
     const source = activeRecipeVersion(productId, state.recipeVersions);
     setRecipeDraftProductId(productId);
     setRecipeDraftSourceId(source?.id || "");
     setRecipeDraftItems(items.map((item) => ({ ...item })));
+    setPackagingDraftItems((source?.packagingItems || []).map((item) => ({ ...item })));
     setSelectedRecipeVersionId(source?.id || "");
-    setDetailTab("recipe");
     setRecipePickerOpen(false);
   }
 
@@ -398,15 +404,8 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
     window.alert(`Công thức đang dùng ${ingredients.length} NVL không còn khả dụng:\n${ingredients.map((ingredient) => `- ${ingredient.name} - ${ingredient.brand}`).join("\n")}\n\nNVL có thể đã hết tồn, đã dùng hết hoặc được ghi nhận hư hỏng. Hãy bấm \"Thay thế\" trước khi lưu công thức mới.`);
   }
 
-  function selectDetailTab(nextTab: DetailTab) {
-    setRecipePickerOpen(false);
-    setInlineReplacementKey("");
-    setDetailTab(nextTab);
-    if (nextTab === "recipe" && selectedProductId) alertOutOfStockRecipe(selectedProductId);
-  }
-
   function closeDetail() {
-    if (recipeHasUnsavedChanges && !window.confirm("Công thức đang có dữ liệu chưa lưu. Bạn có chắc muốn đóng và bỏ các thay đổi này?")) return;
+    if ((recipeHasUnsavedChanges || productDraftDirty) && !window.confirm("Công thức hoặc giá đang có dữ liệu chưa lưu. Bạn có chắc muốn đóng và bỏ các thay đổi này?")) return;
     setRecipePickerOpen(false);
     setInlineReplacementKey("");
     setSelectedProductId("");
@@ -426,6 +425,12 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
   function selectRecipeCategory(category: string) {
     setRecipeCategory(category);
     setRecipePickerOpen(false);
+    if (category === "Khác") {
+      setRecipeIngredientId("");
+      setRecipeUnit("cái");
+      setRecipeWaste("0");
+      return;
+    }
     const preferred = sortIngredientsForUse(selectableIngredients.filter((ingredient) => ingredient.category === category && conversionUnitForRecipe(ingredient, uatMode)))[0];
     setRecipeIngredientId(preferred?.id || "");
     setRecipeUnit(conversionUnitForRecipe(preferred, uatMode) || "");
@@ -450,7 +455,16 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
   function addRecipeItem(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const quantity = Number(recipeQuantity);
-    if (!selectedProduct || !isCurrentRecipe || !recipeIngredientId || quantity <= 0) return;
+    if (!selectedProduct || !isCurrentRecipe || quantity <= 0) return;
+    if (isOtherRecipeCategory) {
+      if (!recipeCustomName.trim()) { window.alert("Nhập tên nguyên liệu/ thương hiệu Khác trước khi thêm."); return; }
+      const customCost = parseAmount(recipeCustomCost);
+      if (customCost <= 0) { window.alert("Nhập giá vốn cho nguyên liệu Khác trước khi thêm."); return; }
+      setRecipeDraftItems((current) => [...current, { id: crypto.randomUUID(), ingredientId: "", quantity, unit: recipeUnit || "cái", wastePercent: Math.max(0, Number(recipeWaste) || 0), customName: recipeCustomName.trim(), customBrand: "Khác", customCategory: "Khác", customCost }]);
+      setRecipeQuantity("");
+      return;
+    }
+    if (!recipeIngredientId) return;
     const ingredient = state.ingredients.find((entry) => entry.id === recipeIngredientId);
     const conversionUnit = conversionUnitForRecipe(ingredient, uatMode);
     if (!ingredient || !ingredientIsAvailable(ingredient)) {
@@ -468,14 +482,39 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
     setRecipeDraftItems((current) => current.filter((item) => item.id !== itemId));
   }
 
+  function addPackagingItem(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const quantity = Number(packagingQuantity);
+    const ingredient = state.ingredients.find((entry) => entry.id === packagingIngredientId);
+    const conversionUnit = conversionUnitForRecipe(ingredient, uatMode);
+    if (!ingredient || !ingredientIsAvailable(ingredient) || !conversionUnit || packagingUnit !== conversionUnit || quantity <= 0) {
+      window.alert("Chọn NVL bao bì còn khả dụng, có quy đổi hợp lệ và nhập định lượng lớn hơn 0.");
+      return;
+    }
+    setPackagingDraftItems((current) => [...current, { id: crypto.randomUUID(), ingredientId: ingredient.id, quantity, unit: packagingUnit, wastePercent: Math.max(0, Number(packagingWaste) || 0) }]);
+    setPackagingQuantity("");
+  }
+
+  function removePackagingItem(itemId: string) {
+    setPackagingDraftItems((current) => current.filter((item) => item.id !== itemId));
+  }
+
   async function saveRecipe() {
-    if (!selectedProduct || !isCurrentRecipe || !recipeDraftDirty) return;
+    if (!selectedProduct || !isCurrentRecipe || (!recipeDraftDirty && !packagingDraftDirty && !productDraftDirty)) return;
+    const product = { ...selectedProduct, sellingPrice: parseAmount(productForm.sellingPrice), sellingPriceOverridden: productDraftDirty ? true : selectedProduct.sellingPriceOverridden, packagingCost: packagingDraftDirty ? 0 : selectedProduct.packagingCost, updatedAt: new Date().toISOString() };
+    if (!recipeDraftDirty && !packagingDraftDirty) {
+      try {
+        if (!uatMode) await saveCloudProduct(product);
+        setState((current) => ({ ...current, products: current.products.map((entry) => entry.id === product.id ? product : entry), auditEvents: [auditEvent("product", product.id, "update", "Cập nhật giá bán/chi phí bao bì từ Công thức"), ...current.auditEvents] }));
+      } catch (error) { window.alert(error instanceof Error ? error.message : "Không thể lưu giá bán hoặc bao bì."); }
+      return;
+    }
     const currentWorkbookRecipe = activeRecipeVersion(selectedProduct.id, state.recipeVersions);
     if (currentWorkbookRecipe?.source === "workbook" && currentWorkbookRecipe.importIssues?.length && recipeDraftItems.length < (currentWorkbookRecipe.expectedItemCount || 0)) {
       window.alert(`Công thức Excel còn ${currentWorkbookRecipe.importIssues.length} flag chưa xử lý:\n- ${currentWorkbookRecipe.importIssues.join("\n- ")}\n\nHãy thêm đủ NVL còn thiếu rồi mới lưu phiên bản chính thức.`);
       return;
     }
-    const unavailableItem = recipeDraftItems.find((item) => {
+    const unavailableItem = [...recipeDraftItems, ...packagingDraftItems].find((item) => {
       const ingredient = state.ingredients.find((entry) => entry.id === item.ingredientId);
       return ingredient && !ingredientIsAvailable(ingredient);
     });
@@ -484,28 +523,30 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
       window.alert(`${ingredient?.name || "NVL trong công thức"} không còn khả dụng ở Kho hay Đang dùng. NVL có thể đã dùng hết hoặc hư hỏng; hãy bấm \"Thay thế\" trước khi lưu phiên bản mới.`);
       return;
     }
-    const invalidItem = recipeDraftItems.find((item) => {
+    const invalidItem = [...recipeDraftItems, ...packagingDraftItems].find((item) => {
+      if (item.customName) return !item.customCost || item.customCost <= 0;
       const ingredient = state.ingredients.find((entry) => entry.id === item.ingredientId);
       return !ingredient || recipeItemCost(item, ingredient) === undefined;
     });
     if (invalidItem) { window.alert("Không thể lưu vì có nguyên liệu không tồn tại, thiếu giá hoặc sai nhóm đơn vị."); return; }
     const now = new Date().toISOString();
     const effectiveFrom = now.slice(0, 10);
-    const version: RecipeVersion = { id: crypto.randomUUID(), productId: selectedProduct.id, version: Math.max(0, ...state.recipeVersions.filter((entry) => entry.productId === selectedProduct.id).map((entry) => entry.version)) + 1, effectiveFrom, status: "active", items: recipeDraftItems.map((item) => ({ ...item, id: crypto.randomUUID() })), createdAt: now, source: "manual" };
-    const cost = recipeVersionCost(version, state.ingredients, selectedProduct.packagingCost);
-    const margin = cost !== undefined && selectedProduct.sellingPrice ? (selectedProduct.sellingPrice - cost) / selectedProduct.sellingPrice * 100 : 0;
-    try { if (!uatMode) await saveCloudRecipe(version, selectedProduct.storeId, recipeDraftSourceId || undefined); }
+    const version: RecipeVersion = { id: crypto.randomUUID(), productId: selectedProduct.id, version: Math.max(0, ...state.recipeVersions.filter((entry) => entry.productId === selectedProduct.id).map((entry) => entry.version)) + 1, effectiveFrom, status: "active", items: recipeDraftItems.map((item) => ({ ...item, id: crypto.randomUUID() })), packagingItems: packagingDraftItems.map((item) => ({ ...item, id: crypto.randomUUID() })), createdAt: now, source: "manual" };
+    const cost = recipeVersionCost(version, state.ingredients, product.packagingCost);
+    const margin = cost !== undefined && product.sellingPrice ? (product.sellingPrice - cost) / product.sellingPrice * 100 : 0;
+    try { if (!uatMode) { if (productDraftDirty) await saveCloudProduct(product); await saveCloudRecipe(version, product.storeId, recipeDraftSourceId || undefined); } }
     catch (error) { window.alert(error instanceof Error ? error.message : "Không thể lưu công thức."); return; }
     setState((current) => ({
       ...current,
       recipeVersions: [version, ...current.recipeVersions.map((entry) => entry.productId === selectedProduct.id && entry.status === "active" ? { ...entry, status: "archived" as const, effectiveTo: effectiveFrom } : entry)],
-      products: current.products.map((entry) => entry.id === selectedProduct.id ? { ...entry, status: "active", updatedAt: now } : entry),
-      costSnapshots: cost === undefined ? current.costSnapshots : [{ id: crypto.randomUUID(), productId: selectedProduct.id, recipeVersionId: version.id, effectiveFrom, sellingPrice: selectedProduct.sellingPrice, theoreticalCost: cost, grossMarginPercent: margin, createdAt: now }, ...current.costSnapshots],
+      products: current.products.map((entry) => entry.id === selectedProduct.id ? { ...product, status: "active", updatedAt: now } : entry),
+      costSnapshots: cost === undefined ? current.costSnapshots : [{ id: crypto.randomUUID(), productId: selectedProduct.id, recipeVersionId: version.id, effectiveFrom, sellingPrice: product.sellingPrice, theoreticalCost: cost, grossMarginPercent: margin, createdAt: now }, ...current.costSnapshots],
       auditEvents: [auditEvent("recipe", version.id, "save", `Lưu công thức v${version.version}${recipeDraftSourceId ? ` thay v${current.recipeVersions.find((entry) => entry.id === recipeDraftSourceId)?.version || "cũ"}` : ""}`), ...current.auditEvents],
     }));
     setSelectedRecipeVersionId(version.id);
     setRecipeDraftSourceId(version.id);
     setRecipeDraftItems(version.items.map((item) => ({ ...item })));
+    setPackagingDraftItems((version.packagingItems || []).map((item) => ({ ...item })));
   }
 
   function replaceIngredient(issue: StockIssue) {
@@ -524,30 +565,84 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
     setInlineReplacementKey("");
   }
 
-  function openDetail(product: ProductMaster, nextTab: DetailTab = "summary") {
+  function openDetail(product: ProductMaster, focusRecipe = false) {
     setSelectedProductId(product.id);
+    setProductForm({ sellingPrice: amountInput(product.sellingPrice) });
     startRecipeDraft(product.id);
-    setDetailTab(nextTab);
     setRecipePickerOpen(false);
     setInlineReplacementKey("");
     setRecipeCategory("");
     setRecipeIngredientId("");
-    if (nextTab === "recipe") alertOutOfStockRecipe(product.id);
+    setRecipeCustomName("");
+    setRecipeCustomCost("");
+    if (focusRecipe) alertOutOfStockRecipe(product.id);
+  }
+
+  async function createManualProduct(source?: ProductMaster) {
+    const suggestedSku = source ? `${source.sku}-COPY` : "SKU-MOI";
+    const sku = window.prompt("Mã SKU sản phẩm", suggestedSku)?.trim();
+    if (!sku) return;
+    if (state.products.some((product) => normalizedText(product.sku) === normalizedText(sku))) { window.alert("SKU này đã tồn tại. Hãy dùng mã khác."); return; }
+    if (uatMode) {
+      const deletedSkus = readDeletedUatSkus();
+      deletedSkus.delete(normalizedText(sku));
+      window.localStorage.setItem(MASTER_UAT_DELETED_SKUS_KEY, JSON.stringify([...deletedSkus]));
+    }
+    const name = window.prompt("Tên sản phẩm", source ? `${source.name} - bản sao` : "Sản phẩm mới")?.trim();
+    if (!name) return;
+    const category = window.prompt("Category", source?.category || "Khác")?.trim() || "Khác";
+    const now = new Date().toISOString();
+    const product: ProductMaster = { id: crypto.randomUUID(), storeId: source?.storeId || state.stores[0]?.id || DEFAULT_STORE.id, sku, name, category, variant: source?.variant || "", sellingPrice: source?.sellingPrice || 0, sellingPriceOverridden: Boolean(source?.sellingPrice), packagingCost: 0, status: "active", source: "manual", updatedAt: now };
+    const sourceVersion = source ? activeRecipeVersion(source.id, state.recipeVersions) : undefined;
+    const version: RecipeVersion | undefined = sourceVersion ? { ...sourceVersion, id: crypto.randomUUID(), productId: product.id, version: 1, effectiveFrom: now.slice(0, 10), effectiveTo: undefined, status: "active", createdAt: now, items: sourceVersion.items.map((item) => ({ ...item, id: crypto.randomUUID() })), packagingItems: sourceVersion.packagingItems?.map((item) => ({ ...item, id: crypto.randomUUID() })) } : undefined;
+    try {
+      if (!uatMode) { await saveCloudProduct(product); if (version) await saveCloudRecipe(version, product.storeId); }
+    } catch (error) { window.alert(error instanceof Error ? error.message : "Không thể tạo sản phẩm."); return; }
+    setState((current) => ({ ...current, products: [product, ...current.products], recipeVersions: version ? [version, ...current.recipeVersions] : current.recipeVersions, auditEvents: [auditEvent("product", product.id, source ? "clone" : "create", source ? `Clone từ ${source.sku}` : "Tạo sản phẩm UAT mới"), ...current.auditEvents] }));
+    setTab("products");
+    setSelectedProductId(product.id);
+    setProductForm({ sellingPrice: amountInput(product.sellingPrice) });
+    setRecipeDraftProductId(product.id);
+    setRecipeDraftSourceId(version?.id || "");
+    setRecipeDraftItems((version?.items || []).map((item) => ({ ...item })));
+    setPackagingDraftItems((version?.packagingItems || []).map((item) => ({ ...item })));
+    setSelectedRecipeVersionId(version?.id || "");
+  }
+
+  async function deleteProduct(product: ProductMaster) {
+    if (!window.confirm(`Xoá ${product.sku} · ${product.name} cùng toàn bộ công thức${uatMode ? " UAT" : " dùng chung"}?`)) return;
+    if (uatMode) {
+      const deletedSkus = readDeletedUatSkus();
+      deletedSkus.add(normalizedText(product.sku));
+      window.localStorage.setItem(MASTER_UAT_DELETED_SKUS_KEY, JSON.stringify([...deletedSkus]));
+    } else {
+      try { await deleteCloudProduct(product.id); }
+      catch (error) { window.alert(error instanceof Error ? error.message : "Không thể xoá sản phẩm."); return; }
+    }
+    const versionIds = new Set(state.recipeVersions.filter((version) => version.productId === product.id).map((version) => version.id));
+    setState((current) => ({
+      ...current,
+      products: current.products.filter((entry) => entry.id !== product.id),
+      recipeVersions: current.recipeVersions.filter((version) => version.productId !== product.id),
+      costSnapshots: current.costSnapshots.filter((snapshot) => snapshot.productId !== product.id),
+      auditEvents: current.auditEvents.filter((event) => event.entityId !== product.id && !versionIds.has(event.entityId)),
+    }));
+    if (selectedProductId === product.id) setSelectedProductId("");
   }
 
   return <section className={styles.module}>
     <header className={styles.hero}>
-      <div><span className={styles.eyebrow}>SẢN PHẨM · {uatMode ? "UAT LOCAL" : "PRODUCTION"}</span><h1>Sản phẩm & giá vốn</h1></div>
+      <div><span className={styles.eyebrow}>SẢN PHẨM · {uatMode ? "UAT LOCAL" : "PRODUCTION"}</span><h1>Quản lý sản phẩm</h1></div>
       <div className={styles.logo}><Image src="/nha-coffee-logo-transparent.png" alt="Nhà Coffee & Tea" width={750} height={420} priority /></div>
       <div className={styles.heroMetric}><span>SKU đang dùng</span><strong>{activeProducts.length}/{state.products.length}</strong><small>{queueEntries.length} sản phẩm chờ xử lý · {numberLabel(totalEstimatedServings, 0)} ly ước tính</small></div>
     </header>
 
-    {uatMode ? <div className={styles.uatBanner}><span><b>UAT LOCAL</b> · Danh mục SKU lấy duy nhất từ Tài chính → Doanh thu → Mặt hàng.</span><div><button onClick={syncSources}>Đồng bộ Kho & Mặt hàng</button><button onClick={resetUat}>Reset công thức</button></div></div> : <div className={styles.uatBanner}><span><b>PRODUCTION</b> · SKU, giá bán và category theo báo cáo Mặt hàng; công thức lưu dùng chung trên Supabase.</span><div><button onClick={syncSources}>Đồng bộ dữ liệu</button></div></div>}
+    {uatMode ? <div className={styles.uatBanner}><span><b>UAT LOCAL</b> · Danh mục SKU lấy duy nhất từ Tài chính → Doanh thu → Mặt hàng.</span><div><button onClick={syncSources}>Đồng bộ Kho & Mặt hàng</button><button onClick={resetUat}>Reset công thức</button></div></div> : <div className={styles.uatBanner}><span><b>PRODUCTION</b> · SKU Finance và sản phẩm tạo tay, công thức/bao bì lưu dùng chung trên Supabase.</span><div><button onClick={syncSources}>Đồng bộ dữ liệu</button></div></div>}
 
     <nav className={styles.tabs} aria-label="Sản phẩm">
       <button className={tab === "overview" ? styles.active : ""} onClick={() => setTab("overview")}>Tổng quan</button>
       <button className={tab === "queue" ? styles.active : ""} onClick={() => setTab("queue")}>Chờ xử lý {queueEntries.length > 0 && <span>{queueEntries.length}</span>}</button>
-      <button className={tab === "products" ? styles.active : ""} onClick={() => setTab("products")}>Sản phẩm & Giá vốn</button>
+      <button className={tab === "products" ? styles.active : ""} onClick={() => setTab("products")}>Quản lý sản phẩm</button>
     </nav>
 
     <div className={styles.content}>
@@ -578,15 +673,15 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
       {tab === "queue" && <>
         <div className={styles.pageIntro}><div><span>DATA & RECIPE ALERTS</span><h2>Sản phẩm chờ xử lý</h2><p>Gom theo Category của báo cáo Mặt hàng; mỗi SKU chỉ hiện tóm tắt 1–2 dòng để xử lý nhanh.</p></div><button onClick={syncSources}>Đồng bộ lại Kho</button></div>
         {!queueEntries.length ? <div className={styles.empty}><b>Tất cả sản phẩm đã đủ dữ liệu</b><span>Công thức, giá bán và NVL hiện tại đều đã qua kiểm tra.</span></div> : <div className={styles.queueGroups}>{queueGroups.map(([category, entries]) => <section className={styles.categoryGroup} key={category}><div className={styles.categoryHeading}><span>{category}</span><b>{entries.length} SKU</b></div><div className={styles.queueList}>{entries.map((entry) => { const stockIssue = entry.stockIssues[0]; const workbookSummary = workbookRecipeSummary(entry.product, state.recipeVersions); const summary = [workbookSummary || (!activeRecipeVersion(entry.product.id, state.recipeVersions) ? "Chưa có công thức" : ""), entry.stockIssues.length ? `${entry.stockIssues.length} NVL cần thay` : "", entry.product.sellingPrice <= 0 ? "Thiếu giá bán" : ""].filter(Boolean).join(" · ") || `${entry.errors.length} điểm cần xử lý`; return <article className={styles.queueCard} key={entry.product.id}>
-          <button className={styles.queueMain} onClick={() => openDetail(entry.product, stockIssue ? "recipe" : "summary")}><span><b>{entry.product.name}{entry.product.variant ? ` · ${entry.product.variant}` : ""}</b><small>{entry.product.sku} · {summary}</small></span><em>›</em></button>
+          <button className={styles.queueMain} onClick={() => openDetail(entry.product, Boolean(stockIssue))}><span><b>{entry.product.name}{entry.product.variant ? ` · ${entry.product.variant}` : ""}</b><small>{entry.product.sku} · {summary}</small></span><em>›</em></button>
         </article>; })}</div></section>)}</div>}
       </>}
 
       {tab === "products" && <>
-        <div className={styles.pageIntro}><div><span>PRODUCT & COGS</span><h2>Sản phẩm và giá vốn</h2><p>Danh mục và Category đồng bộ từ Tài chính → Doanh thu → Mặt hàng. Không tạo SKU thủ công tại đây.</p></div></div>
+        <div className={styles.pageIntro}><div><span>PRODUCT & COGS</span><h2>Quản lý sản phẩm</h2><p>Danh mục Finance được đồng bộ tự động; sản phẩm tạo mới, bản clone và công thức được lưu theo môi trường hiện tại.</p></div><button onClick={() => void createManualProduct()}>+ Tạo sản phẩm</button></div>
         <div className={styles.toolbar}><label className={styles.search}><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Tìm SKU, sản phẩm, category..." /></label></div>
         {!loaded ? <div className={styles.empty}>Đang tải sản phẩm...</div> : !filteredProducts.length ? <div className={styles.empty}>Không có SKU phù hợp.</div> : <>
-          <div className={styles.productGroups}>{productGroups.map(([category, products]) => <section className={styles.categoryGroup} key={category}><div className={styles.categoryHeading}><span>{category}</span><b>{products.length} SKU</b></div><div className={styles.productTable}><div className={styles.tableHead}><span>SKU / Sản phẩm</span><span>Giá bán</span><span>Giá vốn</span><span>Biên gộp</span><span>Ước tính</span></div>{products.map((product) => { const cost = theoreticalProductCost(product, state.recipeVersions, state.ingredients); const margin = cost !== undefined && product.sellingPrice ? (product.sellingPrice - cost) / product.sellingPrice * 100 : undefined; const capacity = capacityEstimate(activeRecipeVersion(product.id, state.recipeVersions), state.ingredients); return <button className={styles.tableRow} onClick={() => openDetail(product)} key={product.id}><span><b>{product.sku}</b><strong>{product.name}{product.variant ? ` · ${product.variant}` : ""}</strong></span><span>{money(product.sellingPrice)}{product.sellingPriceOverridden && <small>Chỉnh tay</small>}</span><span>{cost === undefined ? "Chưa đủ" : money(cost)}</span><span className={margin !== undefined && margin < 55 ? styles.negative : ""}>{percent(margin)}</span><span>{capacity ? `${numberLabel(capacity.servings, 0)} ly` : "-"}</span></button>; })}</div><div className={styles.productCards}>{products.map((product) => { const cost = theoreticalProductCost(product, state.recipeVersions, state.ingredients); const margin = cost !== undefined && product.sellingPrice ? (product.sellingPrice - cost) / product.sellingPrice * 100 : undefined; const errors = productValidationErrors(product, state.recipeVersions, state.ingredients); return <button className={styles.productCard} onClick={() => openDetail(product)} key={product.id}><div><span>{product.sku}</span>{product.sellingPriceOverridden && <small>ĐÃ CHỈNH GIÁ</small>}</div><h3>{product.name}{product.variant ? ` · ${product.variant}` : ""}</h3><div className={styles.moneyGrid}><div><span>Giá bán</span><strong>{money(product.sellingPrice)}</strong></div><div><span>Giá vốn</span><strong>{cost === undefined ? "Chưa đủ" : money(cost)}</strong></div><div><span>Biên gộp</span><strong>{percent(margin)}</strong></div></div>{errors.length > 0 && <small className={styles.issueLine}>{errors.length} điểm cần xử lý · {errors[0]}</small>}</button>; })}</div></section>)}</div>
+          <div className={styles.productGroups}>{productGroups.map(([category, products]) => <details className={`${styles.categoryGroup} ${styles.productCategoryGroup}`} open key={category}><summary className={styles.productCategorySummary}><span>{category}</span><b>{products.length} SKU</b><i aria-hidden="true">+</i></summary><div className={styles.productCategoryBody}><div className={styles.productTable}><div className={styles.tableHead}><span>SKU / Sản phẩm</span><span>Giá bán</span><span>Giá vốn</span><span>Biên gộp</span><span>Ước tính</span><span>Thao tác</span></div>{products.map((product) => { const cost = theoreticalProductCost(product, state.recipeVersions, state.ingredients); const margin = cost !== undefined && product.sellingPrice ? (product.sellingPrice - cost) / product.sellingPrice * 100 : undefined; const capacity = capacityEstimate(activeRecipeVersion(product.id, state.recipeVersions), state.ingredients); return <div className={styles.tableRow} key={product.id}><button className={styles.tableMain} onClick={() => openDetail(product)}><span><b>{product.sku}</b><strong>{product.name}{product.variant ? ` · ${product.variant}` : ""}</strong></span><span>{money(product.sellingPrice)}{product.sellingPriceOverridden && <small>Chỉnh tay</small>}</span><span>{cost === undefined ? "Chưa đủ" : money(cost)}</span><span className={margin !== undefined && margin < 55 ? styles.negative : ""}>{percent(margin)}</span><span>{capacity ? `${numberLabel(capacity.servings, 0)} ly` : "-"}</span></button><div className={styles.rowActions}><button className={styles.cloneButton} title="Copy sản phẩm" aria-label={`Copy ${product.name}`} onClick={() => void createManualProduct(product)}>⧉<span>Copy</span></button><button className={styles.removeProductButton} title="Xoá sản phẩm" aria-label={`Xoá ${product.name}`} onClick={() => void deleteProduct(product)}>×<span>Xoá</span></button></div></div>; })}</div><div className={styles.productCards}>{products.map((product) => { const cost = theoreticalProductCost(product, state.recipeVersions, state.ingredients); const margin = cost !== undefined && product.sellingPrice ? (product.sellingPrice - cost) / product.sellingPrice * 100 : undefined; const errors = productValidationErrors(product, state.recipeVersions, state.ingredients); return <article className={styles.productCard} key={product.id}><button className={styles.cardMain} onClick={() => openDetail(product)}><div><span>{product.sku}</span>{product.sellingPriceOverridden && <small>ĐÃ CHỈNH GIÁ</small>}</div><h3>{product.name}{product.variant ? ` · ${product.variant}` : ""}</h3><div className={styles.moneyGrid}><div><span>Giá bán</span><strong>{money(product.sellingPrice)}</strong></div><div><span>Giá vốn</span><strong>{cost === undefined ? "Chưa đủ" : money(cost)}</strong></div><div><span>Biên gộp</span><strong>{percent(margin)}</strong></div></div>{errors.length > 0 && <small className={styles.issueLine}>{errors.length} điểm cần xử lý · {errors[0]}</small>}</button><div className={styles.cardActions}><button className={styles.cloneButton} onClick={() => void createManualProduct(product)}>⧉ Copy</button><button className={styles.removeProductButton} onClick={() => void deleteProduct(product)}>× Xoá</button></div></article>; })}</div></div></details>)}</div>
         </>}
       </>}
     </div>
@@ -594,29 +689,44 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
     {selectedProduct && <div className={styles.detailBackdrop} onMouseDown={closeDetail}><aside className={styles.detailPanel} onMouseDown={(event) => event.stopPropagation()}>
       <div className={styles.detailHeader}><div><span>{selectedProduct.sku}{selectedProduct.variant ? ` · ${selectedProduct.variant}` : ""}</span><h2>{selectedProduct.name}</h2><p>{selectedProduct.category} · Từ báo cáo Mặt hàng</p></div><button onClick={closeDetail}>×</button></div>
       <div className={styles.detailStatus}><i className={styles.autoActive}>SKU AUTO ACTIVE</i><span>{selectedProductErrors.length ? `${selectedProductErrors.length} điểm cần xử lý` : "Đủ dữ liệu"}</span><b>{selectedProductCost === undefined ? "Chưa có giá vốn" : `${money(selectedProductCost)} · Biên ${percent(selectedProductMargin)}`}</b></div>
-      <nav className={styles.detailTabs}><button className={detailTab === "summary" ? styles.active : ""} onClick={() => selectDetailTab("summary")}>Tổng quan</button><button className={detailTab === "recipe" ? styles.active : ""} onClick={() => selectDetailTab("recipe")}>Công thức & NVL</button><button className={detailTab === "history" ? styles.active : ""} onClick={() => selectDetailTab("history")}>Lịch sử</button></nav>
       <div className={styles.detailBody}>
-        {detailTab === "summary" && <>
-          <div className={styles.detailMetrics}><div><span>Giá bán</span><strong>{money(selectedProduct.sellingPrice)}</strong><small>{selectedProduct.sellingPriceOverridden ? "Đã chỉnh tay" : "Theo Finance"}</small></div><div><span>Giá vốn hiện hành</span><strong>{selectedProductCost === undefined ? "Chưa đủ" : money(selectedProductCost)}</strong></div><div><span>Biên gộp</span><strong className={selectedProductMargin !== undefined && selectedProductMargin < 55 ? styles.negative : ""}>{percent(selectedProductMargin)}</strong></div><div><span>Công thức</span><strong>{activeRecipeVersion(selectedProduct.id, state.recipeVersions) ? `v${activeRecipeVersion(selectedProduct.id, state.recipeVersions)?.version}` : "Chưa lưu"}</strong></div></div>
+        <section className={styles.detailSection}>
+          <div className={styles.detailSectionHeading}><span>01</span><div><b>Tổng quan</b><small>Giá bán, giá vốn và biên lợi nhuận hiện hành</small></div></div>
+          <div className={styles.detailMetrics}><div><span>Giá bán</span><strong>{money(parseAmount(productForm.sellingPrice))}</strong><small>{selectedProduct.sellingPriceOverridden ? "Đã chỉnh tay" : "Theo Finance"}</small></div><div><span>Giá vốn</span><strong>{selectedProductIngredientCost === undefined || selectedProductPackagingCost === undefined ? "Chưa đủ" : money(selectedProductIngredientCost + selectedProductPackagingCost)}</strong><small>{selectedProductIngredientCost === undefined || selectedProductPackagingCost === undefined ? "Thiếu giá NVL" : `Giá NVL ${money(selectedProductIngredientCost)} + Bao bì ${money(selectedProductPackagingCost)}`}</small></div><div><span>Biên lợi nhuận</span><strong className={selectedProductIngredientCost !== undefined && selectedProductPackagingCost !== undefined && parseAmount(productForm.sellingPrice) && (parseAmount(productForm.sellingPrice) - selectedProductIngredientCost - selectedProductPackagingCost) / parseAmount(productForm.sellingPrice) * 100 < 55 ? styles.negative : ""}>{selectedProductIngredientCost === undefined || selectedProductPackagingCost === undefined || !parseAmount(productForm.sellingPrice) ? "-" : percent((parseAmount(productForm.sellingPrice) - selectedProductIngredientCost - selectedProductPackagingCost) / parseAmount(productForm.sellingPrice) * 100)}</strong><small>Trên giá bán hiện hành</small></div><div><span>Công thức</span><strong>{activeRecipeVersion(selectedProduct.id, state.recipeVersions) ? `v${activeRecipeVersion(selectedProduct.id, state.recipeVersions)?.version}` : "Chưa lưu"}</strong></div></div>
           <CostTrendChart points={selectedVersionCosts} />
           <section className={styles.estimateCard}><div><span>ƯỚC TÍNH</span><h3>{selectedCapacity ? `${numberLabel(selectedCapacity.servings, 0)} ly` : "Chưa tính được"}</h3><p>{selectedCapacity?.limiting ? `Giới hạn bởi ${selectedCapacity.limiting.name} · ${selectedCapacity.limiting.brand}` : "Cần hoàn thiện công thức và dữ liệu NVL khả dụng."}</p></div>{selectedCapacity && <div className={styles.capacityRows}>{selectedCapacity.rows.map((row, index) => <div key={`${row.ingredient?.id || "missing"}-${index}`}><span><b>{row.ingredient?.name || "NVL không tồn tại"}</b><small>Cần {numberLabel(row.requiredBase)} {row.ingredient?.baseUnit || ""}/ly · Khả dụng {numberLabel(row.ingredient?.stockQuantityBase || 0)} {row.ingredient?.baseUnit || ""}</small></span><strong>{numberLabel(row.capacity, 0)} ly</strong></div>)}</div>}</section>
           {selectedProductErrors.length ? <div className={styles.blockerBox}><span>CẦN XỬ LÝ</span>{selectedProductErrors.map((error) => <p key={error}>• {error}</p>)}</div> : <div className={styles.readyBox}><b>SKU đã đủ dữ liệu vận hành.</b><span>Giá vốn và ước tính đang dùng công thức đã lưu cùng tồn Kho NVL hiện tại.</span></div>}
-          <div className={styles.detailActions}><button onClick={() => openProduct(selectedProduct)}>Chỉnh giá bán & bao bì</button></div>
-        </>}
+        </section>
 
-        {detailTab === "recipe" && <>
+        <section className={styles.detailSection}>
           <div className={styles.recipeToolbar}><label>Phiên bản đã lưu<select value={selectedVersion?.id || ""} onChange={(event) => selectRecipeVersion(event.target.value)}><option value="">Chưa có công thức</option>{selectedVersions.map((version) => <option value={version.id} key={version.id}>v{version.version} · {version.id === currentRecipe?.id ? "hiện hành" : "lưu trữ"} · {dateLabel(version.effectiveFrom)}</option>)}</select></label>{!isCurrentRecipe && <button onClick={() => startRecipeDraft(selectedProduct.id)}>Chỉnh công thức hiện hành</button>}</div>
+          <details className={styles.formulaGroup} open>
+            <summary><span><b>Công thức</b><small>Giá bán, nguyên liệu và bao bì</small></span><i>−</i></summary>
+            <details className={styles.formulaSubgroup}>
+              <summary><span><b>Giá bán</b><small>{selectedProduct.sellingPriceOverridden ? "Đã chỉnh tay" : "Theo Finance"}</small></span><strong>{money(parseAmount(productForm.sellingPrice))}</strong><i>+</i></summary>
+              <div className={styles.formulaSubgroupBody}><label className={styles.inlineMoneyField}>Giá bán / sản phẩm<input inputMode="numeric" value={productForm.sellingPrice} onChange={(event) => setProductForm((current) => ({ ...current, sellingPrice: amountInput(event.target.value) }))} /></label></div>
+            </details>
+            <details className={styles.formulaSubgroup} open>
+              <summary><span><b>Nguyên liệu</b><small>Công thức NVL cấu thành sản phẩm</small></span><strong>{selectedProductIngredientCost === undefined ? "Chưa tính được" : money(selectedProductIngredientCost)}</strong><i>−</i></summary>
+              <div className={styles.formulaSubgroupBody}>
           <div className={styles.recipeVersionMeta}><span>{currentRecipe ? `Đang chỉnh sửa từ v${currentRecipe.version}${currentRecipe.source === "workbook" ? " · CT Excel" : ""}` : "Công thức mới"}</span><i className={recipeDraftDirty ? styles.draft : styles.active}>{recipeDraftDirty ? "chưa lưu" : "đã lưu"}</i><b>{recipePreviewCost === undefined ? "Chưa tính được" : money(recipePreviewCost)}</b></div>
           {currentRecipe?.importIssues?.length ? <div className={styles.workbookIssues}><b>CT Excel cần bổ sung</b><span>{currentRecipe.importIssues.join(" · ")}</span><small>Các NVL đã khớp vẫn được điền sẵn; giá vốn chỉ tính sau khi xử lý đủ các flag.</small></div> : currentRecipe?.source === "workbook" ? <div className={styles.workbookReady}><b>Đã nạp từ CT Excel</b><span>{currentRecipe.items.length}/{currentRecipe.expectedItemCount || currentRecipe.items.length} NVL khớp Ingredient Master.</span></div> : null}
-          <div className={styles.recipeList}>{recipeItems.length ? recipeItems.map((item) => { const ingredient = state.ingredients.find((entry) => entry.id === item.ingredientId); const cost = recipeItemCost(item, ingredient); const required = ingredient ? convertToBase(item.quantity, item.unit, ingredient.baseUnit) : undefined; const itemCapacity = ingredient && required ? Math.floor(ingredient.stockQuantityBase / (required * (1 + item.wastePercent / 100))) : 0; const issue = ingredient && !ingredientIsAvailable(ingredient) ? { key: `${selectedProduct.id}-${ingredient.id}`, product: selectedProduct, version: currentRecipe || { id: "", productId: selectedProduct.id, version: 0, effectiveFrom: "", status: "active" as const, createdAt: "", items: recipeItems }, ingredient, candidates: sortIngredientsForUse(state.ingredients.filter((candidate) => candidate.id !== ingredient.id && ingredientIsAvailable(candidate) && candidate.category === ingredient.category && sameUnitFamily(ingredient, candidate))) } : undefined; return <div className={styles.recipeItemBlock} key={item.id}><div className={`${styles.recipeRow} ${issue ? styles.recipeOut : ""}`}><span><b>{ingredient ? `${ingredient.name} · ${ingredient.brand}` : "Nguyên liệu đã xóa"}</b><small>{ingredient?.category || "-"} · {item.quantity} {item.unit} · HH {item.wastePercent}% · ước tính {numberLabel(itemCapacity, 0)} ly</small></span><strong>{cost === undefined ? "Thiếu giá" : money(cost)}</strong>{isCurrentRecipe && issue ? <><button className={styles.replaceButton} onClick={() => setInlineReplacementKey((current) => current === issue.key ? "" : issue.key)}>Thay thế</button><button className={styles.deleteButton} onClick={() => removeRecipeItem(item.id)}>Xóa</button></> : isCurrentRecipe && <button className={styles.deleteButton} onClick={() => removeRecipeItem(item.id)}>Xóa</button>}</div>{isCurrentRecipe && issue && inlineReplacementKey === issue.key && <div className={styles.inlineReplacement}><div><span>THAY NGUYÊN LIỆU / THƯƠNG HIỆU</span><b>{issue.ingredient.category}</b></div>{issue.candidates.length ? <><select value={replacementSelection[issue.key] || issue.candidates[0].id} onChange={(event) => setReplacementSelection((current) => ({ ...current, [issue.key]: event.target.value }))}>{issue.candidates.map((candidate) => <option value={candidate.id} key={candidate.id}>{ingredientChoiceLabel(candidate)} · khả dụng {numberLabel(candidate.stockQuantityBase)} {candidate.baseUnit}</option>)}</select><button onClick={() => replaceIngredient(issue)}>Thay trong bản nháp</button></> : <p>Chưa có NVL còn trong kho hoặc đang dùng cùng category và nhóm đơn vị. Hãy nhập thêm ở Kho NVL.</p>}</div>}</div>; }) : <div className={styles.emptySmall}>Chưa có thành phần. Thêm NVL rồi lưu để tạo công thức đầu tiên.</div>}</div>
-          {isCurrentRecipe && <><form className={styles.recipeForm} onSubmit={addRecipeItem}><div className={styles.recipeSelectors}><label>1. Category<select required value={recipeCategory} onChange={(event) => selectRecipeCategory(event.target.value)}><option value="">Chọn category</option>{ingredientCategories.map((category) => <option value={category} key={category}>{category}</option>)}</select></label><div className={styles.recipePickerField}><span>2. Nguyên liệu / thương hiệu</span><div className={styles.recipeIngredientPicker} ref={recipePickerRef}><button type="button" className={styles.recipeIngredientTrigger} disabled={!recipeCategory} aria-haspopup="listbox" aria-expanded={recipePickerOpen} onClick={() => setRecipePickerOpen((open) => !open)}>{recipeIngredientId ? (() => { const ingredient = state.ingredients.find((entry) => entry.id === recipeIngredientId); return ingredient ? `${ingredientChoiceLabel(ingredient)} · quy đổi ${conversionUnitForRecipe(ingredient, uatMode)}` : "Chọn nguyên liệu"; })() : recipeCandidates.length ? "Chọn nguyên liệu" : "Chưa có NVL còn trong kho hoặc đang dùng"}<i>{recipePickerOpen ? "−" : "+"}</i></button>{recipePickerOpen && <div className={styles.recipeIngredientOptions} role="listbox" aria-label="Nguyên liệu và thương hiệu">{recipeCandidates.map((ingredient) => { const conversionUnit = conversionUnitForRecipe(ingredient, uatMode); return <button type="button" role="option" aria-selected={recipeIngredientId === ingredient.id} aria-disabled={!conversionUnit} className={!conversionUnit ? styles.unconvertedOption : ""} disabled={!conversionUnit} onClick={() => selectRecipeIngredient(ingredient.id)} key={ingredient.id}><span>{ingredientChoiceLabel(ingredient)}</span><b>{conversionUnit ? `QUY ĐỔI ${conversionUnit}` : "CHƯA QUY ĐỔI"}</b></button>; })}</div>}</div><small>Chỉ hiện NVL còn trong kho hoặc đang dùng; không hiện NVL đã dùng hết hay hư hỏng.</small></div></div><div><label>Định lượng<input required min="0.001" step="0.001" type="number" value={recipeQuantity} onChange={(event) => setRecipeQuantity(event.target.value)} /></label><label>Đơn vị quy đổi<select required disabled={!allowedRecipeUnits.length} value={recipeUnit} onChange={(event) => setRecipeUnit(event.target.value)}><option value="">Chọn đơn vị quy đổi</option>{allowedRecipeUnits.map((unit) => <option key={unit}>{unit}</option>)}</select></label><label>Hao hụt %<input min="0" step="0.1" type="number" value={recipeWaste} onChange={(event) => setRecipeWaste(event.target.value)} /></label></div><button disabled={!recipeIngredientId || !allowedRecipeUnits.length}>Thêm nguyên liệu</button></form><button className={styles.saveRecipe} disabled={!recipeDraftDirty} onClick={saveRecipe}>Lưu công thức{currentRecipe ? ` thành v${currentRecipe.version + 1}` : ""}</button></>}
-        </>}
+          <div className={styles.recipeList}>{recipeItems.length ? recipeItems.map((item) => { const ingredient = state.ingredients.find((entry) => entry.id === item.ingredientId); const cost = recipeItemCost(item, ingredient); const required = ingredient ? convertToBase(item.quantity, item.unit, ingredient.baseUnit) : undefined; const itemCapacity = ingredient && required ? Math.floor(ingredient.stockQuantityBase / (required * (1 + item.wastePercent / 100))) : 0; const issue = ingredient && !ingredientIsAvailable(ingredient) ? { key: `${selectedProduct.id}-${ingredient.id}`, product: selectedProduct, version: currentRecipe || { id: "", productId: selectedProduct.id, version: 0, effectiveFrom: "", status: "active" as const, createdAt: "", items: recipeItems }, ingredient, candidates: sortIngredientsForUse(state.ingredients.filter((candidate) => candidate.id !== ingredient.id && ingredientIsAvailable(candidate) && candidate.category === ingredient.category && sameUnitFamily(ingredient, candidate))) } : undefined; return <div className={styles.recipeItemBlock} key={item.id}><div className={`${styles.recipeRow} ${issue ? styles.recipeOut : ""}`}><span><b>{item.customName ? `${item.customName} · Khác` : ingredient ? `${ingredient.name} · ${ingredient.brand}` : "Nguyên liệu đã xóa"}</b><small>{item.customCategory || ingredient?.category || "-"} · {item.quantity} {item.unit} · HH {item.wastePercent}%{item.customName ? " · ngoại lệ chưa quy đổi" : ` · ước tính ${numberLabel(itemCapacity, 0)} ly`}</small></span><strong>{cost === undefined ? "Chưa có giá" : money(cost)}</strong>{isCurrentRecipe && issue ? <><button className={styles.replaceButton} onClick={() => setInlineReplacementKey((current) => current === issue.key ? "" : issue.key)}>Thay thế</button><button className={styles.deleteButton} onClick={() => removeRecipeItem(item.id)}>Xóa</button></> : isCurrentRecipe && <button className={styles.deleteButton} onClick={() => removeRecipeItem(item.id)}>Xóa</button>}</div>{isCurrentRecipe && issue && inlineReplacementKey === issue.key && <div className={styles.inlineReplacement}><div><span>THAY NGUYÊN LIỆU / THƯƠNG HIỆU</span><b>{issue.ingredient.category}</b></div>{issue.candidates.length ? <><select value={replacementSelection[issue.key] || issue.candidates[0].id} onChange={(event) => setReplacementSelection((current) => ({ ...current, [issue.key]: event.target.value }))}>{issue.candidates.map((candidate) => <option value={candidate.id} key={candidate.id}>{ingredientChoiceLabel(candidate)} · khả dụng {numberLabel(candidate.stockQuantityBase)} {candidate.baseUnit}</option>)}</select><button onClick={() => replaceIngredient(issue)}>Thay trong bản nháp</button></> : <p>Chưa có NVL còn trong kho hoặc đang dùng cùng category và nhóm đơn vị. Hãy nhập thêm ở Kho NVL.</p>}</div>}</div>; }) : <div className={styles.emptySmall}>Chưa có thành phần. Thêm NVL rồi lưu để tạo công thức đầu tiên.</div>}</div>
+          {isCurrentRecipe && <><form className={styles.recipeForm} onSubmit={addRecipeItem}><div className={styles.recipeSelectors}><label>1. Category<select required value={recipeCategory} onChange={(event) => selectRecipeCategory(event.target.value)}><option value="">Chọn category</option>{ingredientCategories.map((category) => <option value={category} key={category}>{category}</option>)}<option value="Khác">Khác</option></select></label>{isOtherRecipeCategory ? <div className={styles.recipePickerField}><span>2. Nguyên liệu / thương hiệu</span><div className={styles.customIngredientFields}><input required value={recipeCustomName} onChange={(event) => setRecipeCustomName(event.target.value)} placeholder="Tên nguyên liệu Khác" /><input required inputMode="numeric" value={recipeCustomCost} onChange={(event) => setRecipeCustomCost(amountInput(event.target.value))} placeholder="Giá vốn" /></div><small>Ngoại lệ không cần quy đổi từ Kho NVL; giá vốn này được cộng trực tiếp để so sánh với giá bán.</small></div> : <div className={styles.recipePickerField}><span>2. Nguyên liệu / thương hiệu</span><div className={styles.recipeIngredientPicker} ref={recipePickerRef}><button type="button" className={styles.recipeIngredientTrigger} disabled={!recipeCategory} aria-haspopup="listbox" aria-expanded={recipePickerOpen} onClick={() => setRecipePickerOpen((open) => !open)}>{recipeIngredientId ? (() => { const ingredient = state.ingredients.find((entry) => entry.id === recipeIngredientId); return ingredient ? `${ingredientChoiceLabel(ingredient)} · quy đổi ${conversionUnitForRecipe(ingredient, uatMode)}` : "Chọn nguyên liệu"; })() : recipeCandidates.length ? "Chọn nguyên liệu" : "Chưa có NVL còn trong kho hoặc đang dùng"}<i>{recipePickerOpen ? "−" : "+"}</i></button>{recipePickerOpen && <div className={styles.recipeIngredientOptions} role="listbox" aria-label="Nguyên liệu và thương hiệu">{recipeCandidates.map((ingredient) => { const conversionUnit = conversionUnitForRecipe(ingredient, uatMode); return <button type="button" role="option" aria-selected={recipeIngredientId === ingredient.id} aria-disabled={!conversionUnit} className={!conversionUnit ? styles.unconvertedOption : ""} disabled={!conversionUnit} onClick={() => selectRecipeIngredient(ingredient.id)} key={ingredient.id}><span>{ingredientChoiceLabel(ingredient)}</span><b>{conversionUnit ? `QUY ĐỔI ${conversionUnit}` : "CHƯA QUY ĐỔI"}</b></button>; })}</div>}</div><small>Chỉ hiện NVL còn trong kho hoặc đang dùng; không hiện NVL đã dùng hết hay hư hỏng.</small></div>}</div><div><label>Định lượng<input required min="0.001" step="0.001" type="number" value={recipeQuantity} onChange={(event) => setRecipeQuantity(event.target.value)} /></label><label>Đơn vị quy đổi{isOtherRecipeCategory ? <input required value={recipeUnit} onChange={(event) => setRecipeUnit(event.target.value)} placeholder="Đơn vị" /> : <select required disabled={!allowedRecipeUnits.length} value={recipeUnit} onChange={(event) => setRecipeUnit(event.target.value)}><option value="">Chọn đơn vị quy đổi</option>{allowedRecipeUnits.map((unit) => <option key={unit}>{unit}</option>)}</select>}</label><label>Hao hụt %<input min="0" step="0.1" type="number" value={recipeWaste} onChange={(event) => setRecipeWaste(event.target.value)} /></label></div><button disabled={isOtherRecipeCategory ? !recipeCustomName.trim() || !parseAmount(recipeCustomCost) : !recipeIngredientId || !allowedRecipeUnits.length}>Thêm nguyên liệu</button></form></>}
+              </div>
+            </details>
+            <details className={styles.formulaSubgroup}>
+              <summary><span><b>Bao bì</b><small>NVL bao bì được cộng trực tiếp vào giá vốn</small></span><strong>{selectedProductPackagingCost === undefined ? "Chưa tính được" : money(selectedProductPackagingCost)}</strong><i>+</i></summary>
+              <div className={styles.formulaSubgroupBody}><div className={styles.recipeList}>{packagingItems.length ? packagingItems.map((item) => { const ingredient = state.ingredients.find((entry) => entry.id === item.ingredientId); const cost = recipeItemCost(item, ingredient); return <div className={styles.recipeRow} key={item.id}><span><b>{ingredient ? `${ingredient.name} · ${ingredient.brand}` : "Nguyên liệu đã xóa"}</b><small>{ingredient?.category || "-"} · {item.quantity} {item.unit} · HH {item.wastePercent}%</small></span><strong>{cost === undefined ? "Thiếu giá" : money(cost)}</strong>{isCurrentRecipe && <button className={styles.deleteButton} onClick={() => removePackagingItem(item.id)}>Xóa</button>}</div>; }) : <div className={styles.emptySmall}>Chưa có NVL bao bì.</div>}</div>{isCurrentRecipe && <form className={styles.recipeForm} onSubmit={addPackagingItem}><div className={styles.recipeSelectors}><label>Category<select required value={packagingCategory} onChange={(event) => { const category = event.target.value; setPackagingCategory(category); const ingredient = packagingCandidates.find((entry) => entry.category === category && conversionUnitForRecipe(entry, uatMode)); setPackagingIngredientId(ingredient?.id || ""); setPackagingUnit(conversionUnitForRecipe(ingredient, uatMode) || ""); setPackagingWaste(String(ingredient?.standardWastePercent || 0)); }}><option value="">Chọn category</option>{ingredientCategories.map((category) => <option value={category} key={category}>{category}</option>)}</select></label><label>Nguyên liệu / thương hiệu<select required value={packagingIngredientId} onChange={(event) => { const ingredient = state.ingredients.find((entry) => entry.id === event.target.value); setPackagingIngredientId(event.target.value); setPackagingUnit(conversionUnitForRecipe(ingredient, uatMode) || ""); setPackagingWaste(String(ingredient?.standardWastePercent || 0)); }}><option value="">Chọn nguyên liệu</option>{packagingCandidates.map((ingredient) => <option value={ingredient.id} key={ingredient.id}>{ingredientChoiceLabel(ingredient)}</option>)}</select></label></div><div><label>Định lượng<input required min="0.001" step="0.001" type="number" value={packagingQuantity} onChange={(event) => setPackagingQuantity(event.target.value)} /></label><label>Đơn vị quy đổi<select required disabled={!allowedPackagingUnits.length} value={packagingUnit} onChange={(event) => setPackagingUnit(event.target.value)}><option value="">Chọn đơn vị</option>{allowedPackagingUnits.map((unit) => <option key={unit}>{unit}</option>)}</select></label><label>Hao hụt %<input min="0" step="0.1" type="number" value={packagingWaste} onChange={(event) => setPackagingWaste(event.target.value)} /></label></div><button disabled={!packagingIngredientId || !allowedPackagingUnits.length}>Thêm bao bì</button></form>}</div>
+            </details>
+            {isCurrentRecipe && <button className={styles.saveRecipe} disabled={!recipeDraftDirty && !packagingDraftDirty && !productDraftDirty} onClick={saveRecipe}>Lưu công thức</button>}
+          </details>
+        </section>
 
-        {detailTab === "history" && <div className={styles.historyList}>{state.auditEvents.filter((event) => event.entityId === selectedProduct.id || state.recipeVersions.some((version) => version.productId === selectedProduct.id && version.id === event.entityId)).length ? state.auditEvents.filter((event) => event.entityId === selectedProduct.id || state.recipeVersions.some((version) => version.productId === selectedProduct.id && version.id === event.entityId)).map((event) => <div key={event.id}><span><b>{event.action}</b><small>{event.detail}</small></span><time>{new Date(event.createdAt).toLocaleString("vi-VN", { dateStyle: "short", timeStyle: "short" })}</time></div>) : <div className={styles.emptySmall}>Chưa có lịch sử cho SKU này.</div>}</div>}
+        <section className={styles.detailSection}><div className={styles.detailSectionHeading}><span>03</span><div><b>Lịch sử</b><small>Thay đổi sản phẩm và các phiên bản công thức</small></div></div><div className={styles.historyList}>{state.auditEvents.filter((event) => event.entityId === selectedProduct.id || state.recipeVersions.some((version) => version.productId === selectedProduct.id && version.id === event.entityId)).length ? state.auditEvents.filter((event) => event.entityId === selectedProduct.id || state.recipeVersions.some((version) => version.productId === selectedProduct.id && version.id === event.entityId)).map((event) => <div key={event.id}><span><b>{event.action}</b><small>{event.detail}</small></span><time>{new Date(event.createdAt).toLocaleString("vi-VN", { dateStyle: "short", timeStyle: "short" })}</time></div>) : <div className={styles.emptySmall}>Chưa có lịch sử cho SKU này.</div>}</div></section>
       </div>
     </aside></div>}
 
-    {showProductForm && selectedProduct && <div className={styles.backdrop} onMouseDown={() => setShowProductForm(false)}><form className={styles.sheet} onSubmit={saveProduct} onMouseDown={(event) => event.stopPropagation()}><div className={styles.handle} /><div className={styles.sheetTitle}><div><span>{selectedProduct.sku} · {selectedProduct.category}</span><h2>Chỉnh giá {selectedProduct.name}</h2></div><button type="button" onClick={() => setShowProductForm(false)}>×</button></div><p className={styles.formNote}>Tên, SKU và Category luôn theo báo cáo Mặt hàng. Khi lưu giá bán tại đây, Finance sẽ không ghi đè giá này trong các lần đồng bộ sau.</p><div className={styles.formRow}><label className={styles.field}>Giá bán<input inputMode="numeric" value={productForm.sellingPrice} onChange={(event) => setProductForm((current) => ({ ...current, sellingPrice: amountInput(event.target.value) }))} /></label><label className={styles.field}>Chi phí bao bì<input inputMode="numeric" value={productForm.packagingCost} onChange={(event) => setProductForm((current) => ({ ...current, packagingCost: amountInput(event.target.value) }))} /></label></div><button className={styles.saveButton}>Lưu thay đổi</button></form></div>}
   </section>;
 }
 
