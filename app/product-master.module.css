@@ -377,6 +377,7 @@
 .recipeForm input, .recipeForm select { min-width: 0; width: 100%; padding: 9px 7px; border: 1px solid var(--line); border-radius: 8px; background: #fff; font: 10px Arial, sans-serif; }
 .recipeForm > button, .saveRecipe { width: 100%; padding: 10px; border: 0; border-radius: 9px; color: #fff; background: var(--pine); font: 800 9px Arial, sans-serif; }
 .saveRecipe { margin-top: 7px; background: var(--clay); }
+.saveNotice { margin: 7px 2px 0; color: #315d48; font: 700 9px/1.45 Arial, sans-serif; text-align: center; }
 .historyList { display: grid; }
 .historyList > div { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid #e8e6de; }
 .historyList > div:first-child { border-top: 0; }
