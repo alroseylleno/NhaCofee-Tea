@@ -8,8 +8,9 @@ This is the mandatory routing map for code changes in `Operations/nha-ops/`. Rea
 
 ## Current State
 
-- Production `main`: includes the three-module UAT workspace (`feat: ship three-module UAT workspace`).
+- Production `main`: includes the three-module UAT workspace and the Product Management/Finance Reports release (`9a52d3d`, `feat: ship product management and finance reports`), pushed on 14/08/2026.
 - Production deploy: Vercel tracks `main`; a normal Git push should redeploy the existing Vercel project.
+- The 14/08/2026 push adds migration `20260813000200_product_management_components.sql`, so it triggers `Apply Supabase migrations`. The workflow result remains unverified locally because GitHub Actions status could not be queried with the available credentials; do not treat the migration as applied until Actions reports success.
 - Production inventory and finance Excel imports use Supabase.
 - Localhost and `-uat` hosts use isolated browser storage for UAT inventory. They must not write to Production Supabase.
 - Product Master is available in both Local/UAT and Production. UAT uses isolated browser storage; Production reads and writes the shared Supabase Product Master tables.
@@ -110,6 +111,7 @@ Important boundaries:
 - Expense entry keeps the four expense-category filter cards. Inside the selected filter, record groups are `+` / `-` accordions by manual subcategory; Operating expenses also contain `Từ Kho NVL`, nested again by the Category carried from each inventory lot before showing individual COGS/waste events.
 - Every `Tài chính → Báo cáo tài chính` workspace (P&L, Cash Flow, Inventory and Assets/Depreciation) uses the same parent → subcategory → line-item accordion hierarchy with counts and `+` / `-`. Revenue/calculated totals use explicit composition subgroups; inventory and assets group by their source Category/subcategory.
 - Each Financial Report workspace also has a responsive dashboard above its accordion: P&L shows net revenue/profit KPIs and cost mix, Cash Flow shows inflow/outflow/net cash and outflow mix, Inventory shows opening/closing/issued values and closing Category concentration, and Assets shows original/accumulated/remaining values plus asset-category concentration.
+- `Tài chính → Doanh thu` has a third subtab, `Nền tảng`, for platform/channel dashboards and GRAB order reconciliation. The Import Center treats the SAPO bundle as four files: Revenue overview, Product catalog, Service type and Invoice list. Invoice rows keep all external-platform orders (GrabFood, Website, ShopeeFood, Green Food, etc.) in `platformOrders`/`finance_platform_order_rows`, powering platform revenue, order/AOV, discount, cancellation, channel-mix and daily-trend dashboards. GRAB reconciliation remains order-level: the user selects an unreconciled SAPO order and enters only actual received cash plus an optional note. UAT stores reconciliation in isolated browser state; Production stores it in `finance_grab_reconciliations` through authenticated Supabase CRUD.
 - On the first successful Production load after the expense migration, each device uses `nha-ops-finance-expenses-migrated-v1` to insert its browser-cached v2 expenses only once. Existing cloud IDs are never overwritten, and later cloud deletions cannot be resurrected by the cache.
 - Production Excel imports load from and replace the latest matching datasets in Supabase.
 - Importing a new dataset replaces that dataset through database RPCs; it must not silently clear unrelated inventory or expense data.
@@ -144,6 +146,7 @@ Current UAT data contract:
 - In every environment, a new recipe or packaging item may use only the NVL's explicit `Quy đổi sử dụng` unit. NVL without a valid conversion unit is excluded until its Kho NVL conversion is completed; purchase/base-unit fallback is forbidden because it can hide invalid COGS. Count conversions include `tờ`.
 - Recipe edits stay only in the open screen until saved. `Lưu công thức` automatically creates the next immutable version and archives the prior version; there is no recipe activation action.
 - Product detail uses progressive saving: price, recipe rows and packaging rows can be saved independently even while other data is missing, unavailable or cannot yet produce theoretical COGS. Missing price/NVL/unit data remains a non-blocking quality warning and keeps cost/margin in `Chưa đủ`; it must not prevent saving the data already entered.
+- A manual SKU whose Category normalizes to `Bao Bì` can be a reusable packaging template. Its saved `Bao bì` rows are copied as a snapshot into another product's current packaging draft when selected; legacy template SKUs that store their components in `Nguyên liệu` are also supported. Choosing a template replaces the existing draft only after confirmation, then the copied rows remain editable and save as the destination product's own recipe version. This stays browser-local in UAT and requires no Supabase schema change.
 - The parent page memoizes the Product Master inventory projection, and inventory refreshes must not clear the selected SKU or open recipe draft. Closing a product detail or changing saved recipe versions while a draft or quantity entry is unsaved requires explicit confirmation so incidental parent renders, backdrop clicks or version changes cannot discard data entry.
 - The UAT navigation label is `Sản phẩm`. It has three workspaces: Overview dashboard, waiting queue, and the combined Product/COGS catalog. The standalone Ingredient tab is intentionally removed; ingredients remain internal recipe choices sourced from Kho NVL.
 - Every Finance SKU is normalized to `active` automatically. SKU and recipe activation are not user workflows; saved recipes use the newest version automatically while prior versions remain archived for history.
@@ -191,6 +194,8 @@ Do not stage these files in an unrelated Kho NVL hotfix. Production Product Mast
 | Historical test cleanup | destructive one-time cleanup | `20260728000300` |
 | Finance imports | finance import/row tables and replace RPCs | `20260804000100` through `20260804000300` |
 | Manual finance expenses | `finance_expenses` with explicit authenticated table grants and authenticated CRUD RLS | `20260811000100` |
+| GRAB order reconciliation | `finance_grab_reconciliations` with authenticated CRUD RLS | `20260814000100` |
+| SAPO platform invoice detail | `finance_platform_order_rows`, four-file atomic import RPC, import metadata and authenticated CRUD RLS; used by platform dashboards and the GRAB picker | `20260815000100` |
 | Cost recognition month | `inventory_active_sessions.cost_recognition_month` | `20260805000200` |
 | Inventory conversion | conversion amount/unit fields | `20260807000100` |
 | CFO master-data foundation | stores, masters, recipes and finance facts | `20260805000100`, `20260809000200` - additive tables, versioned recipes and broad authenticated RLS during rollout |

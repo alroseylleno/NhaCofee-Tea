@@ -3,11 +3,15 @@
 import Image from "next/image";
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import {
+  deleteFinanceGrabReconciliation,
   loadFinanceImports,
   replaceFinanceImportBundle,
   upsertFinanceExpenses,
+  upsertFinanceGrabReconciliations,
   type FinanceExpenseRecord,
+  type FinanceGrabReconciliationRecord,
   type FinanceImportMeta,
+  type FinancePlatformOrderRecord,
   type FinanceProductRecord,
   type FinanceRevenueRecord,
   type FinanceServiceRecord,
@@ -45,15 +49,17 @@ type ExpenseCategory = "fixed" | "operating" | "sales" | "investment";
 type Recurrence = "once" | "weekly" | "monthly" | "quarterly" | "yearly";
 type PaymentStatus = "unpaid" | "partial" | "paid";
 type ReportView = "pnl" | "cash" | "inventory" | "assets";
-type RevenueSubTab = "overview" | "products";
+type RevenueSubTab = "overview" | "products" | "platform";
 
 type ExpenseRecord = FinanceExpenseRecord;
+type PlatformOrderRecord = FinancePlatformOrderRecord;
 
 type FinanceState = {
   expenses: ExpenseRecord[];
   revenues: FinanceRevenueRecord[];
   products: FinanceProductRecord[];
   services: FinanceServiceRecord[];
+  platformOrders: PlatformOrderRecord[];
   imports: FinanceImportMeta[];
   importHistory: FinanceImportMeta[];
   productSnapshots: Array<{ meta: FinanceImportMeta; records: FinanceProductRecord[] }>;
@@ -61,7 +67,10 @@ type FinanceState = {
   growthTargetPercent: number;
   revenueTargetAmount: number;
   closedPeriods: string[];
+  grabReconciliations: GrabReconciliationRecord[];
 };
+
+type GrabReconciliationRecord = FinanceGrabReconciliationRecord;
 
 type ExpenseForm = {
   name: string;
@@ -82,6 +91,16 @@ type ExpenseForm = {
   inServiceOn: string;
 };
 
+type GrabReconciliationForm = {
+  id?: string;
+  platformOrderId: string;
+  orderCode: string;
+  orderDate: string;
+  reportedAmount: string;
+  receivedAmount: string;
+  note: string;
+};
+
 type PeriodBounds = { start: string; end: string; label: string; key: string };
 type PnlDetail = { label: string; amount: number; date?: string };
 type PnlGroup = { label: string; details: PnlDetail[]; value: number };
@@ -90,7 +109,8 @@ type ImportMetaInput = Omit<FinanceImportMeta, "dataType" | "importedAt">;
 type ParsedRevenueImport = { type: "revenue"; meta: ImportMetaInput; importMeta: FinanceImportMeta; records: FinanceRevenueRecord[]; latestDate: string };
 type ParsedProductImport = { type: "products"; meta: ImportMetaInput; importMeta: FinanceImportMeta; records: FinanceProductRecord[] };
 type ParsedServiceImport = { type: "service"; meta: ImportMetaInput; importMeta: FinanceImportMeta; records: FinanceServiceRecord[] };
-type ParsedFinanceImport = ParsedRevenueImport | ParsedProductImport | ParsedServiceImport;
+type ParsedOrderImport = { type: "orders"; meta: ImportMetaInput; importMeta: FinanceImportMeta; records: PlatformOrderRecord[]; latestDate: string; periodStart: string; periodEnd: string };
+type ParsedFinanceImport = ParsedRevenueImport | ParsedProductImport | ParsedServiceImport | ParsedOrderImport;
 
 const FINANCE_STORAGE_KEY = "nha-ops-finance-v2";
 const FINANCE_PROD_LEGACY_STORAGE_KEY = "nha-ops-finance-v1";
@@ -140,6 +160,10 @@ function selectableMonthOptions(startMonth: string, endMonth: string) {
 function inRange(value: string, bounds: PeriodBounds) { return value >= bounds.start && value <= bounds.end; }
 function percent(value: number) { return `${value.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%`; }
 function normalizedHeader(value: unknown) { return String(value ?? "").trim().toLocaleLowerCase("vi").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d").replace(/\s+/g, " "); }
+function platformSignal(value: unknown) { return normalizedHeader(value).replace(/[._-]+/g, " "); }
+function isKnownPlatformSignal(value: unknown) {
+  return /grab\s*food|grabfood|shopee\s*food|shopeefood|green\s*food|greenfood|(^|\s)xanh(\s|$)|website|be\s*food|gofood/.test(platformSignal(value));
+}
 function numericCell(value: unknown) { if (typeof value === "number") return Number.isFinite(value) ? value : 0; const parsed = Number(String(value ?? "").replace(/,/g, "").replace(/[^\d.-]/g, "")); return Number.isFinite(parsed) ? parsed : 0; }
 function excelDateCell(value: unknown) {
   if (value instanceof Date && !Number.isNaN(value.getTime())) return dateAt(value.getFullYear(), value.getMonth() + 1, value.getDate());
@@ -150,6 +174,26 @@ function excelDateCell(value: unknown) {
   const iso = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
   return iso ? dateAt(Number(iso[1]), Number(iso[2]), Number(iso[3])) : undefined;
 }
+
+function excelDateTimeCell(value: unknown) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return `${dateAt(value.getFullYear(), value.getMonth() + 1, value.getDate())}T${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}:${String(value.getSeconds()).padStart(2, "0")}`;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const milliseconds = Math.round(value * 86_400_000);
+    const date = new Date(Date.UTC(1899, 11, 30) + milliseconds);
+    return `${dateAt(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate())}T${String(date.getUTCHours()).padStart(2, "0")}:${String(date.getUTCMinutes()).padStart(2, "0")}:${String(date.getUTCSeconds()).padStart(2, "0")}`;
+  }
+  const text = String(value ?? "").trim();
+  const match = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (!match) return undefined;
+  return `${dateAt(Number(match[3]), Number(match[2]), Number(match[1]))}T${String(match[4] || "0").padStart(2, "0")}:${match[5] || "00"}:${match[6] || "00"}`;
+}
+
+function firstColumn(headers: string[], names: string[]) { return names.map((name) => headers.indexOf(name)).find((index) => index >= 0) ?? -1; }
+function firstText(row: unknown[], headers: string[], names: string[]) { const index = firstColumn(headers, names); return index >= 0 ? String(row[index] ?? "").trim() : ""; }
+function firstNumber(row: unknown[], headers: string[], names: string[]) { const index = firstColumn(headers, names); return index >= 0 ? numericCell(row[index]) : 0; }
+function firstDate(row: unknown[], headers: string[], names: string[]) { const index = firstColumn(headers, names); return index >= 0 ? excelDateCell(row[index]) : undefined; }
 
 function parseExpenseRows(file: File, rows: unknown[][]): ExpenseRecord[] {
   const headerRowIndex = rows.findIndex((row) => {
@@ -222,8 +266,12 @@ function financeTemplateType(rows: unknown[][]) {
   for (const row of rows) {
     const headers = row.map(normalizedHeader);
     if (headers.includes("ngay") && headers.includes("sl don hang") && headers.includes("doanh thu thuc")) return "revenue" as const;
-    if (headers.includes("ten danh muc") && headers.includes("ma mat hang") && headers.includes("ten mat hang") && headers.includes("tong tien")) return "products" as const;
-    if (headers.includes("loai don hang") && headers.includes("sl don hang") && headers.includes("so don huy") && headers.includes("tien thu duoc")) return "service" as const;
+    if (headers.includes("ten danh muc") && headers.includes("ma mat hang") && headers.includes("ten mat hang") && (headers.includes("tong tien") || headers.includes("tien hang"))) return "products" as const;
+    if ((headers.includes("loai don hang") || headers.includes("ten") || headers.includes("phuong thuc thanh toan")) && headers.includes("sl don hang") && headers.includes("so don huy") && (headers.includes("tien thu duoc") || headers.includes("doanh thu gom thue") || headers.includes("doanh thu"))) return "service" as const;
+    const hasOrderCode = firstColumn(headers, ["ma don hang", "ma don", "ma hoa don", "so hoa don", "order code", "order id"]) >= 0;
+    const hasDate = firstColumn(headers, ["ngay", "ngay tao", "ngay dat hang", "thoi gian tao", "thoi gian dat hang", "thoi gian tao don"]) >= 0;
+    const hasAmount = firstColumn(headers, ["doanh thu thuc", "tien thu duoc", "tong tien", "thanh tien", "khach phai tra", "gia tri don hang", "tong tien thanh toan (1 + 2 + 3 - 4 + 5)"]) >= 0;
+    if (hasOrderCode && hasDate && hasAmount) return "orders" as const;
   }
   return undefined;
 }
@@ -302,12 +350,12 @@ function parseRevenueRows(file: File, rows: unknown[][]): ParsedRevenueImport {
 function parseProductRows(file: File, rows: unknown[][]): ParsedProductImport {
   const headerRowIndex = rows.findIndex((row) => {
     const headers = row.map(normalizedHeader);
-    return headers.includes("ten danh muc") && headers.includes("ma mat hang") && headers.includes("ten mat hang") && headers.includes("tong tien");
+    return headers.includes("ten danh muc") && headers.includes("ma mat hang") && headers.includes("ten mat hang") && (headers.includes("tong tien") || headers.includes("tien hang"));
   });
   if (headerRowIndex < 0) throw new Error(`${file.name}: không tìm thấy bảng Báo cáo mặt hàng.`);
   const headers = rows[headerRowIndex].map(normalizedHeader);
   const column = (name: string) => headers.indexOf(name);
-  const requiredColumns = ["ten danh muc", "ma mat hang", "ten mat hang", "so luong", "tien hang", "tong tien"];
+  const requiredColumns = ["ten danh muc", "ma mat hang", "ten mat hang", "so luong", "tien hang"];
   if (requiredColumns.some((name) => column(name) < 0)) throw new Error(`${file.name}: thiếu cột bắt buộc của báo cáo mặt hàng.`);
   const periodText = rows.slice(0, headerRowIndex).flat().map((value) => String(value ?? "").trim()).find((value) => value.startsWith("Từ ngày"));
   const parsedPeriod = reportPeriod(periodText);
@@ -321,6 +369,10 @@ function parseProductRows(file: File, rows: unknown[][]): ParsedProductImport {
     if (!name) continue;
     const sourceRow = headerRowIndex + index + 2;
     const sku = readText(row, "ma mat hang") || `ROW-${sourceRow}`;
+    const goodsAmount = read(row, "tien hang");
+    const discountAmount = read(row, "tong giam gia");
+    const amountAfterDiscount = headers.includes("tien sau giam gia") ? read(row, "tien sau giam gia") : Math.max(0, goodsAmount - discountAmount);
+    const totalAmount = headers.includes("tong tien") ? read(row, "tong tien") : amountAfterDiscount;
     records.push({
       id: `excel-product-${sourceRow}-${sku}`,
       sourceRow,
@@ -336,10 +388,10 @@ function parseProductRows(file: File, rows: unknown[][]): ParsedProductImport {
       quantityRatio: read(row, "ti le so luong"),
       goodsAmount: read(row, "tien hang"),
       goodsRatio: read(row, "ti le tien hang"),
-      discountAmount: read(row, "tong giam gia"),
-      amountAfterDiscount: read(row, "tien sau giam gia"),
+      discountAmount,
+      amountAfterDiscount,
       taxAmount: read(row, "thue"),
-      totalAmount: read(row, "tong tien"),
+      totalAmount,
     });
   }
   if (!records.length) throw new Error(`${file.name}: không có mặt hàng hợp lệ.`);
@@ -351,7 +403,7 @@ function parseProductRows(file: File, rows: unknown[][]): ParsedProductImport {
 function parseServiceRows(file: File, rows: unknown[][]): ParsedServiceImport {
   const headerRowIndex = rows.findIndex((row) => {
     const headers = row.map(normalizedHeader);
-    return headers.includes("loai don hang") && headers.includes("sl don hang") && headers.includes("so don huy") && headers.includes("tien thu duoc");
+    return (headers.includes("loai don hang") || headers.includes("ten") || headers.includes("phuong thuc thanh toan")) && headers.includes("sl don hang") && headers.includes("so don huy") && (headers.includes("tien thu duoc") || headers.includes("doanh thu gom thue") || headers.includes("doanh thu"));
   });
   if (headerRowIndex < 0) throw new Error(`${file.name}: không tìm thấy bảng Hình thức phục vụ.`);
   const headers = rows[headerRowIndex].map(normalizedHeader);
@@ -362,22 +414,82 @@ function parseServiceRows(file: File, rows: unknown[][]): ParsedServiceImport {
   const records: FinanceServiceRecord[] = [];
   for (const [index, row] of rows.slice(headerRowIndex + 1).entries()) {
     if (normalizedHeader(row[0]) === "tong") break;
-    const serviceName = String(row[column("loai don hang")] ?? "").trim();
+    const serviceName = firstText(row, headers, ["loai don hang", "phuong thuc thanh toan", "ten"]);
     if (!serviceName) continue;
     const sourceRow = headerRowIndex + index + 2;
     records.push({
       id: `excel-service-${sourceRow}-${normalizedHeader(serviceName).replace(/\s+/g, "-")}`,
       sourceRow,
       serviceName,
-      totalOrders: numericCell(row[column("sl don hang")]),
-      cancelledOrders: numericCell(row[column("so don huy")]),
-      revenue: numericCell(row[column("tien thu duoc")]),
+      totalOrders: firstNumber(row, headers, ["sl don hang"]),
+      cancelledOrders: firstNumber(row, headers, ["so don huy"]),
+      revenue: firstNumber(row, headers, ["tien thu duoc", "doanh thu gom thue", "doanh thu"]),
     });
   }
   if (!records.length) throw new Error(`${file.name}: không có hình thức phục vụ hợp lệ.`);
   const importedAt = new Date().toISOString();
   const meta = { fileName: file.name, periodStart: parsedPeriod.start, periodEnd: parsedPeriod.end, rowCount: records.length };
   return { type: "service", meta, importMeta: { dataType: "service", ...meta, importedAt }, records };
+}
+
+function parsePlatformOrderRows(file: File, rows: unknown[][]): ParsedOrderImport {
+  const headerRowIndex = rows.findIndex((row) => {
+    const headers = row.map(normalizedHeader);
+    return firstColumn(headers, ["ma don hang", "ma don", "ma hoa don", "so hoa don", "order code", "order id"]) >= 0
+      && firstColumn(headers, ["ngay", "ngay tao", "ngay dat hang", "thoi gian tao", "thoi gian dat hang", "thoi gian tao don"]) >= 0
+      && firstColumn(headers, ["doanh thu thuc", "tien thu duoc", "tong tien", "thanh tien", "khach phai tra", "gia tri don hang", "tong tien thanh toan (1 + 2 + 3 - 4 + 5)"]) >= 0;
+  });
+  if (headerRowIndex < 0) throw new Error(`${file.name}: không tìm thấy bảng chi tiết đơn hàng.`);
+  const headers = rows[headerRowIndex].map(normalizedHeader);
+  const periodText = rows.slice(0, headerRowIndex).flat().map((value) => String(value ?? "").trim()).find((value) => value.startsWith("Từ ngày"));
+  const importedAt = new Date().toISOString();
+  const records: PlatformOrderRecord[] = [];
+  for (const [index, row] of rows.slice(headerRowIndex + 1).entries()) {
+    if (normalizedHeader(row[0]) === "tong") break;
+    const orderCode = firstText(row, headers, ["ma don hang", "ma don", "ma hoa don", "so hoa don", "order code", "order id"]);
+    const orderCreatedAt = excelDateTimeCell(row[firstColumn(headers, ["thoi gian tao don", "thoi gian tao", "ngay tao", "ngay dat hang", "thoi gian dat hang", "ngay"])]);
+    const orderDate = orderCreatedAt?.slice(0, 10) || firstDate(row, headers, ["ngay", "ngay tao", "ngay dat hang", "thoi gian tao", "thoi gian dat hang", "thoi gian tao don"]);
+    if (!orderCode || !orderDate) continue;
+    const channelName = firstText(row, headers, ["nguon don", "kenh ban", "kenh", "nen tang", "platform", "loai don hang", "hinh thuc phuc vu"]) || "Không rõ kênh";
+    const paymentMethod = firstText(row, headers, ["phuong thuc tt", "phuong thuc thanh toan", "thanh toan"]);
+    const serviceType = firstText(row, headers, ["loai hinh phuc vu", "hinh thuc phuc vu", "loai don hang"]);
+    const deliveryPartner = firstText(row, headers, ["doi tac giao hang", "doi tac", "don vi giao hang"]);
+    const channelKey = normalizedHeader(channelName);
+    const orderPlatformSignal = `${channelName} ${paymentMethod} ${serviceType} ${deliveryPartner}`;
+    // Keep every external channel in the platform list, including SAPO's aliases
+    // such as Xanh/Green Food and ShopeeFood.
+    const isPlatformOrder = (channelKey !== "tai nha hang" && channelKey !== "khong ro kenh") || isKnownPlatformSignal(orderPlatformSignal);
+    if (!isPlatformOrder) continue;
+    const status = firstText(row, headers, ["trang thai", "trang thai don hang", "tinh trang"]);
+    const reportedAmount = firstNumber(row, headers, ["doanh thu thuc", "tien thu duoc", "tong tien thanh toan (1 + 2 + 3 - 4 + 5)", "tong tien", "thanh tien", "khach phai tra", "gia tri don hang"]);
+    const sourceRow = headerRowIndex + index + 2;
+    records.push({
+      id: `excel-order-${orderDate}-${normalizedHeader(orderCode).replace(/[^a-z0-9]+/g, "-") || sourceRow}`,
+      orderCode,
+      orderDate,
+      channelName,
+      reportedAmount,
+      orderCreatedAt,
+      paidAt: excelDateTimeCell(row[firstColumn(headers, ["thoi gian thanh toan", "ngay thanh toan"])]),
+      goodsAmount: firstNumber(row, headers, ["tong tien hang (1)", "tong tien hang", "tien hang"]),
+      discountAmount: firstNumber(row, headers, ["tong giam gia (4)", "tong giam gia", "giam gia"]),
+      serviceFee: firstNumber(row, headers, ["phi dich vu (3)", "phi dich vu"]),
+      deliveryFee: firstNumber(row, headers, ["phi gh thu khach (5)", "phi gh thu khach", "phi giao hang"]),
+      tipAmount: firstNumber(row, headers, ["tien tip", "tip"]),
+      refundAmount: firstNumber(row, headers, ["hoan tien don", "tien hoan"]),
+      paymentMethod: paymentMethod || undefined,
+      serviceType: serviceType || undefined,
+      deliveryPartner: deliveryPartner || undefined,
+      status: status || undefined,
+      sourceFileName: file.name,
+      importedAt,
+    });
+  }
+  if (!records.length) throw new Error(`${file.name}: có chi tiết đơn hàng nhưng không tìm thấy đơn nền tảng hợp lệ.`);
+  const orderedDates = records.map((record) => record.orderDate).sort();
+  const parsedPeriod = reportPeriod(periodText) || { start: orderedDates[0], end: orderedDates[orderedDates.length - 1] };
+  const meta = { fileName: file.name, periodStart: parsedPeriod.start, periodEnd: parsedPeriod.end, rowCount: records.length };
+  return { type: "orders", meta, importMeta: { dataType: "orders", ...meta, importedAt }, records, latestDate: orderedDates[orderedDates.length - 1], periodStart: parsedPeriod.start, periodEnd: parsedPeriod.end };
 }
 
 function periodBounds(mode: PeriodMode, selectedMonth: string, quarter: number, year: number): PeriodBounds {
@@ -408,8 +520,12 @@ function expenseFormDefaults(category: ExpenseCategory = "fixed"): ExpenseForm {
   return { name: "", category, subcategory: "", subcategoryIsCustom: false, amount: "", incurredOn: today, recurrence: category === "fixed" ? "monthly" : "once", paymentStatus: "paid", paymentDate: today, invoiceCode: "", vendor: "", vendorIsCustom: false, note: "", usefulLifeMonths: "36", salvageValue: "0", inServiceOn: today };
 }
 
+function grabReconciliationFormDefaults(): GrabReconciliationForm {
+  return { platformOrderId: "", orderCode: "", orderDate: todayISO(), reportedAmount: "", receivedAmount: "", note: "" };
+}
+
 function emptyFinanceState(): FinanceState {
-  return { expenses: [], revenues: [], products: [], services: [], imports: [], importHistory: [], productSnapshots: [], serviceSnapshots: [], growthTargetPercent: 10, revenueTargetAmount: 0, closedPeriods: [] };
+  return { expenses: [], revenues: [], products: [], services: [], platformOrders: [], imports: [], importHistory: [], productSnapshots: [], serviceSnapshots: [], growthTargetPercent: 10, revenueTargetAmount: 0, closedPeriods: [], grabReconciliations: [] };
 }
 
 function normalizeFinanceState(value: unknown, uatMode: boolean): FinanceState {
@@ -423,16 +539,49 @@ function normalizeFinanceState(value: unknown, uatMode: boolean): FinanceState {
     return { ...product, variant: legacyVariantPrice ? "" : product.variant, sellingPrice: Math.max(0, Math.round(sellingPrice)) };
   }) : [];
   const services = Array.isArray(stored.services) ? stored.services : [];
+  const platformOrders = Array.isArray(stored.platformOrders) ? stored.platformOrders.map((entry) => ({
+    id: String(entry.id || crypto.randomUUID()),
+    orderCode: String(entry.orderCode || "").trim(),
+    orderDate: String(entry.orderDate || todayISO()),
+    channelName: String(entry.channelName || "Không rõ kênh"),
+    reportedAmount: Math.max(0, Number(entry.reportedAmount) || 0),
+    orderCreatedAt: entry.orderCreatedAt ? String(entry.orderCreatedAt) : undefined,
+    paidAt: entry.paidAt ? String(entry.paidAt) : undefined,
+    goodsAmount: Math.max(0, Number(entry.goodsAmount) || 0),
+    discountAmount: Math.max(0, Number(entry.discountAmount) || 0),
+    serviceFee: Math.max(0, Number(entry.serviceFee) || 0),
+    deliveryFee: Math.max(0, Number(entry.deliveryFee) || 0),
+    tipAmount: Math.max(0, Number(entry.tipAmount) || 0),
+    refundAmount: Math.max(0, Number(entry.refundAmount) || 0),
+    paymentMethod: entry.paymentMethod ? String(entry.paymentMethod) : undefined,
+    serviceType: entry.serviceType ? String(entry.serviceType) : undefined,
+    deliveryPartner: entry.deliveryPartner ? String(entry.deliveryPartner) : undefined,
+    status: entry.status ? String(entry.status) : undefined,
+    sourceFileName: entry.sourceFileName ? String(entry.sourceFileName) : undefined,
+    importedAt: entry.importedAt ? String(entry.importedAt) : undefined,
+  })) : [];
   const imports = Array.isArray(stored.imports) ? stored.imports : [];
   const importHistory = Array.isArray(stored.importHistory) ? stored.importHistory : imports;
   const productSnapshots = Array.isArray(stored.productSnapshots) ? stored.productSnapshots : [];
   const serviceSnapshots = Array.isArray(stored.serviceSnapshots) ? stored.serviceSnapshots : [];
+  const grabReconciliations = Array.isArray(stored.grabReconciliations) ? stored.grabReconciliations.map((entry) => {
+    const legacyEntry = entry as GrabReconciliationRecord & { date?: string };
+    return {
+    id: String(entry.id || crypto.randomUUID()),
+    platformOrderId: entry.platformOrderId ? String(entry.platformOrderId) : undefined,
+    orderCode: String(entry.orderCode || "").trim(),
+    orderDate: String(entry.orderDate || legacyEntry.date || todayISO()),
+    reportedAmount: Math.max(0, Number(entry.reportedAmount) || 0),
+    receivedAmount: Math.max(0, Number(entry.receivedAmount) || 0),
+    note: entry.note ? String(entry.note) : undefined,
+  }}) : [];
   const isUatSample = (record: ExpenseRecord | FinanceRevenueRecord) => record.id.startsWith("uat-") || record.note?.includes("Dữ liệu mẫu UAT");
   return {
     expenses: uatMode ? expenses : expenses.filter((record) => !isUatSample(record)),
     revenues: uatMode ? revenues : revenues.filter((record) => !isUatSample(record)),
     products,
     services,
+    platformOrders,
     imports,
     importHistory,
     productSnapshots,
@@ -440,6 +589,7 @@ function normalizeFinanceState(value: unknown, uatMode: boolean): FinanceState {
     growthTargetPercent: Number.isFinite(Number(stored.growthTargetPercent)) ? Number(stored.growthTargetPercent) : 10,
     revenueTargetAmount: Number.isFinite(Number(stored.revenueTargetAmount)) ? Math.max(0, Number(stored.revenueTargetAmount)) : 0,
     closedPeriods: Array.isArray(stored.closedPeriods) ? stored.closedPeriods : [],
+    grabReconciliations,
   };
 }
 
@@ -464,6 +614,31 @@ function seedFinanceState(): FinanceState {
     ...makeRevenues(year, month, maxDay, "uat-revenue-current", 1),
     ...makeRevenues(previousYear, previousMonthNumber, Math.min(24, daysInMonth(previousYear, previousMonthNumber)), "uat-revenue-previous", 0.9),
   ];
+  const platformOrders: PlatformOrderRecord[] = Array.from({ length: Math.min(6, maxDay) }, (_, index) => {
+    const day = index + 1;
+    const orderDate = dateAt(year, month, day);
+    return {
+      id: `uat-grab-order-${orderDate}-${day}`,
+      orderCode: `GRAB-UAT-${String(day).padStart(3, "0")}`,
+      orderDate,
+      channelName: "Grab Food",
+      reportedAmount: 185_000 + day * 12_000,
+      orderCreatedAt: `${orderDate}T${String(10 + day).padStart(2, "0")}:15:00`,
+      paidAt: `${orderDate}T${String(10 + day).padStart(2, "0")}:28:00`,
+      goodsAmount: 205_000 + day * 12_000,
+      discountAmount: 20_000,
+      serviceFee: 0,
+      deliveryFee: 0,
+      tipAmount: 0,
+      refundAmount: 0,
+      paymentMethod: "GrabFood",
+      serviceType: "Kênh bán hàng",
+      deliveryPartner: "Grab Food",
+      status: "Hoàn thành",
+      sourceFileName: "Dữ liệu mẫu UAT",
+      importedAt: new Date().toISOString(),
+    };
+  });
   return {
     expenses: [
       { id: "uat-rent", name: "Tiền thuê mặt bằng", category: "fixed", subcategory: "Mặt bằng", amount: 15_000_000, incurredOn: dateAt(year, month, 1), recurrence: "monthly", paymentStatus: "paid", paymentDate: dateAt(year, month, 3), invoiceCode: "HD-THUE-UAT", vendor: "Chủ nhà", note: "Dữ liệu mẫu UAT", status: "active" },
@@ -476,6 +651,7 @@ function seedFinanceState(): FinanceState {
     revenues,
     products: [],
     services: [],
+    platformOrders,
     imports: [],
     importHistory: [],
     productSnapshots: [],
@@ -483,6 +659,7 @@ function seedFinanceState(): FinanceState {
     growthTargetPercent: 12,
     revenueTargetAmount: 0,
     closedPeriods: [],
+    grabReconciliations: [],
   };
 }
 
@@ -542,10 +719,13 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const [importingExpenses, setImportingExpenses] = useState(false);
   const [expenseImportNotice, setExpenseImportNotice] = useState<string | undefined>();
   const [importingFinance, setImportingFinance] = useState(false);
+  const [savingGrabReconciliation, setSavingGrabReconciliation] = useState(false);
+  const [showGrabReconciliationModal, setShowGrabReconciliationModal] = useState(false);
   const [financeImportNotice, setFinanceImportNotice] = useState<string | undefined>();
   const [financeSyncError, setFinanceSyncError] = useState<string | undefined>();
   const [editingExpenseId, setEditingExpenseId] = useState<string | undefined>();
   const [expenseForm, setExpenseForm] = useState<ExpenseForm>(expenseFormDefaults());
+  const [grabForm, setGrabForm] = useState<GrabReconciliationForm>(grabReconciliationFormDefaults());
 
   useEffect(() => {
     let cancelled = false;
@@ -572,7 +752,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
             cloud = await loadFinanceImports();
           }
           window.localStorage.setItem(FINANCE_EXPENSE_MIGRATION_KEY, "done");
-          nextState = { ...nextState, expenses: cloud.expenses, revenues: cloud.revenues, products: cloud.products, services: cloud.services, imports: cloud.imports };
+          nextState = { ...nextState, expenses: cloud.expenses, revenues: cloud.revenues, products: cloud.products, services: cloud.services, platformOrders: cloud.platformOrders, grabReconciliations: cloud.grabReconciliations, imports: cloud.imports };
         } catch (error) {
           setFinanceSyncError(error instanceof Error ? error.message : "Không thể tải dữ liệu tài chính từ Supabase.");
         }
@@ -594,11 +774,13 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     const knownMonths = [
       ...state.expenses.map((expense) => monthKey(expense.incurredOn)),
       ...state.revenues.map((revenue) => monthKey(revenue.date)),
+      ...state.platformOrders.map((entry) => monthKey(entry.orderDate)),
+      ...state.grabReconciliations.map((entry) => monthKey(entry.orderDate)),
       ...inventoryLots.map((lot) => monthKey(lot.purchasedOn)),
       ...inventorySessions.map((session) => session.costRecognitionMonth || monthKey(session.activatedAt)),
     ].filter((month) => /^\d{4}-\d{2}$/.test(month) && month <= currentMonth);
     return selectableMonthOptions([defaultStart, ...knownMonths].sort()[0], currentMonth);
-  }, [inventoryLots, inventorySessions, state.expenses, state.revenues, today]);
+  }, [inventoryLots, inventorySessions, state.expenses, state.grabReconciliations, state.platformOrders, state.revenues, today]);
   const previousBounds = useMemo(() => previousPeriodBounds(bounds, periodMode), [bounds, periodMode]);
   const currentPeriodClosed = periodMode === "month" && state.closedPeriods.includes(bounds.key);
   const activeExpenses = state.expenses.filter((expense) => expense.status === "active");
@@ -610,12 +792,43 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const revenueImport = state.imports.find((entry) => entry.dataType === "revenue");
   const productsImport = state.imports.find((entry) => entry.dataType === "products");
   const serviceImport = state.imports.find((entry) => entry.dataType === "service");
+  const ordersImport = state.imports.find((entry) => entry.dataType === "orders");
   const importOverlapsBounds = (entry: FinanceImportMeta | undefined) => Boolean(entry && entry.periodStart <= bounds.end && entry.periodEnd >= bounds.start);
   // Product/service imports are period aggregates; retain them whenever their period overlaps the selected view.
   const periodProducts = importOverlapsBounds(productsImport) ? state.products : [];
   const periodServices = importOverlapsBounds(serviceImport) ? state.services : [];
   // Revenue is stored by day, so every finance view can use the same selected period.
   const revenueDataset = periodRevenues;
+  const periodPlatformOrders = useMemo(() => state.platformOrders.filter((entry) => inRange(entry.orderDate, bounds)), [state.platformOrders, bounds]);
+  const grabOrderOptions = useMemo(() => periodPlatformOrders.filter((entry) => normalizedHeader(`${entry.channelName} ${entry.paymentMethod || ""} ${entry.deliveryPartner || ""}`).includes("grab") && !/huy|cancel/.test(normalizedHeader(entry.status))).sort((a, b) => b.orderDate.localeCompare(a.orderDate) || a.orderCode.localeCompare(b.orderCode, "vi")), [periodPlatformOrders]);
+  const grabReconciliationRows = useMemo(() => state.grabReconciliations.filter((entry) => inRange(entry.orderDate, bounds)).sort((a, b) => b.orderDate.localeCompare(a.orderDate) || a.orderCode.localeCompare(b.orderCode, "vi")), [state.grabReconciliations, bounds]);
+  const reconciledGrabOrderCodes = new Set(grabReconciliationRows.map((entry) => entry.platformOrderId || `${entry.orderDate}:${entry.orderCode.toLocaleLowerCase("vi")}`));
+  const unreconciledGrabOrders = grabOrderOptions.filter((order) => !reconciledGrabOrderCodes.has(order.id) && !reconciledGrabOrderCodes.has(`${order.orderDate}:${order.orderCode.toLocaleLowerCase("vi")}`));
+  const selectedGrabOrder = grabForm.platformOrderId ? state.platformOrders.find((order) => order.id === grabForm.platformOrderId) : undefined;
+  const platformOrderList = useMemo(() => [...periodPlatformOrders].sort((a, b) => b.orderDate.localeCompare(a.orderDate) || a.orderCode.localeCompare(b.orderCode, "vi")), [periodPlatformOrders]);
+
+  function selectRevenueSubTab(nextTab: RevenueSubTab) {
+    if (nextTab === "platform" && !periodPlatformOrders.length && state.platformOrders.length) {
+      const latestOrderMonth = [...state.platformOrders].sort((left, right) => right.orderDate.localeCompare(left.orderDate))[0].orderDate.slice(0, 7);
+      setPeriodMode("month");
+      setSelectedMonth(latestOrderMonth);
+      setSelectedYear(Number(latestOrderMonth.slice(0, 4)));
+    }
+    setRevenueSubTab(nextTab);
+  }
+
+  function isGrabPlatformOrder(order: PlatformOrderRecord) {
+    return /grab\s*food|grabfood/.test(platformSignal(`${order.channelName} ${order.paymentMethod || ""} ${order.deliveryPartner || ""}`));
+  }
+
+  function reconciliationForPlatformOrder(order: PlatformOrderRecord) {
+    return state.grabReconciliations.find((entry) => entry.platformOrderId === order.id || (entry.orderDate === order.orderDate && entry.orderCode.toLocaleLowerCase("vi") === order.orderCode.toLocaleLowerCase("vi")));
+  }
+  const grabReportedTotal = grabReconciliationRows.reduce((sum, entry) => sum + entry.reportedAmount, 0);
+  const grabReceivedTotal = grabReconciliationRows.reduce((sum, entry) => sum + entry.receivedAmount, 0);
+  const grabDifference = grabReceivedTotal - grabReportedTotal;
+  const grabCoverageRate = grabOrderOptions.length ? Math.min(100, grabReconciliationRows.length / grabOrderOptions.length * 100) : 0;
+  const grabUnreconciledOrders = Math.max(0, grabOrderOptions.length - grabReconciliationRows.length);
   const inventoryEvents = useMemo(() => inventorySessions.flatMap((session) => {
     const lot = inventoryLots.find((entry) => entry.id === session.sourceReceiptId);
     if (!lot) return [];
@@ -755,6 +968,42 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     { label: "Phí giao hàng", value: reportedDeliveryFees },
   ].filter((entry) => entry.value > 0);
   const maxPlatformFeeComponent = Math.max(...platformFeeComponents.map((entry) => entry.value), 1);
+  const successfulPlatformOrders = periodPlatformOrders.filter((entry) => !/huy|cancel/.test(normalizedHeader(entry.status)));
+  const platformOrderRevenue = successfulPlatformOrders.reduce((sum, entry) => sum + entry.reportedAmount, 0);
+  const platformGoodsAmount = successfulPlatformOrders.reduce((sum, entry) => sum + entry.goodsAmount, 0);
+  const platformDiscountAmount = successfulPlatformOrders.reduce((sum, entry) => sum + entry.discountAmount, 0);
+  const platformCancelledOrders = periodPlatformOrders.length - successfulPlatformOrders.length;
+  const platformAverageOrder = successfulPlatformOrders.length ? platformOrderRevenue / successfulPlatformOrders.length : 0;
+  const platformDiscountRate = platformGoodsAmount ? platformDiscountAmount / platformGoodsAmount * 100 : 0;
+  const channelPerformance = useMemo(() => {
+    const grouped = new Map<string, { orders: number; successfulOrders: number; cancelledOrders: number; revenue: number; discount: number }>();
+    for (const order of periodPlatformOrders) {
+      const label = order.channelName.trim() || "Không rõ kênh";
+      const current = grouped.get(label) || { orders: 0, successfulOrders: 0, cancelledOrders: 0, revenue: 0, discount: 0 };
+      const cancelled = /huy|cancel/.test(normalizedHeader(order.status));
+      current.orders += 1;
+      current.cancelledOrders += cancelled ? 1 : 0;
+      current.successfulOrders += cancelled ? 0 : 1;
+      current.revenue += cancelled ? 0 : order.reportedAmount;
+      current.discount += cancelled ? 0 : order.discountAmount;
+      grouped.set(label, current);
+    }
+    return [...grouped.entries()].map(([name, values]) => ({ name, ...values, averageOrder: values.successfulOrders ? values.revenue / values.successfulOrders : 0 })).sort((left, right) => right.revenue - left.revenue);
+  }, [periodPlatformOrders]);
+  const maxPlatformChannelRevenue = Math.max(...channelPerformance.map((entry) => entry.revenue), 1);
+  const platformDailyTrend = useMemo(() => {
+    const grouped = new Map<string, { orders: number; revenue: number }>();
+    for (const order of successfulPlatformOrders) {
+      const current = grouped.get(order.orderDate) || { orders: 0, revenue: 0 };
+      current.orders += 1;
+      current.revenue += order.reportedAmount;
+      grouped.set(order.orderDate, current);
+    }
+    return [...grouped.entries()].map(([date, values]) => ({ date, ...values })).sort((left, right) => left.date.localeCompare(right.date));
+  }, [successfulPlatformOrders]);
+  const maxPlatformDailyRevenue = Math.max(...platformDailyTrend.map((entry) => entry.revenue), 1);
+  const grabSapoOrderTotal = grabOrderOptions.reduce((sum, entry) => sum + entry.reportedAmount, 0);
+  const grabRetentionRate = grabReportedTotal ? grabReceivedTotal / grabReportedTotal * 100 : 0;
 
   const expenseCategorySections = (Object.keys(categoryLabels) as ExpenseCategory[]).map((category) => {
     const manualEntries = category === "investment"
@@ -936,7 +1185,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     const files = Array.from(event.target.files || []);
     event.target.value = "";
     if (!files.length) return;
-    if (files.length > 8) { window.alert("Mỗi lần chỉ nên import tối đa 8 file Excel."); return; }
+    if (files.length > 4) { window.alert("Bộ import SAPO hỗ trợ tối đa 4 file: Doanh thu, Mặt hàng, Phương thức/Hình thức và Danh sách hóa đơn."); return; }
     const invalidFile = files.find((file) => !/\.(xls|xlsx)$/i.test(file.name) || file.size > 10 * 1024 * 1024);
     if (invalidFile) { window.alert(`${invalidFile.name}: chỉ hỗ trợ Excel .xls/.xlsx và tối đa 10 MB mỗi file.`); return; }
     setImportingFinance(true);
@@ -948,20 +1197,33 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
         const sheet = workbook.Sheets[workbook.SheetNames[0]];
         if (!sheet) throw new Error(`${file.name}: không tìm thấy sheet dữ liệu.`);
+        // Some SAPO exports declare a range starting below their real header.
+        // Expand it from actual cell addresses before converting the worksheet.
+        const cellAddresses = Object.keys(sheet).filter((address) => /^[A-Z]+\d+$/.test(address));
+        if (cellAddresses.length) {
+          const cells = cellAddresses.map((address) => XLSX.utils.decode_cell(address));
+          sheet["!ref"] = XLSX.utils.encode_range({
+            s: { r: 0, c: 0 },
+            e: { r: Math.max(...cells.map((cell) => cell.r)), c: Math.max(...cells.map((cell) => cell.c)) },
+          });
+        }
         const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: true, defval: null });
         const templateType = financeTemplateType(rows);
-        if (!templateType) throw new Error(`${file.name}: chưa nhận diện được template. Hệ thống hiện hỗ trợ Doanh thu tổng quan, Mặt hàng và Hình thức phục vụ.`);
-        parsed.push(templateType === "revenue" ? parseRevenueRows(file, rows) : templateType === "products" ? parseProductRows(file, rows) : parseServiceRows(file, rows));
+        if (!templateType) throw new Error(`${file.name}: chưa nhận diện được template. Hệ thống hiện hỗ trợ Doanh thu tổng quan, Danh mục mặt hàng, Hình thức phục vụ và Danh sách hóa đơn.`);
+        parsed.push(templateType === "revenue" ? parseRevenueRows(file, rows) : templateType === "products" ? parseProductRows(file, rows) : templateType === "service" ? parseServiceRows(file, rows) : parsePlatformOrderRows(file, rows));
       }
       const revenueImports = parsed.filter((entry): entry is ParsedRevenueImport => entry.type === "revenue");
       const productImports = parsed.filter((entry): entry is ParsedProductImport => entry.type === "products");
       const serviceImports = parsed.filter((entry): entry is ParsedServiceImport => entry.type === "service");
-      if (revenueImports.length > 1 || productImports.length > 1 || serviceImports.length > 1) throw new Error("Mỗi lần chỉ chọn tối đa 1 file cho từng loại báo cáo để tránh ghi đè không rõ ràng.");
-      const replacing = [revenueImports.length && state.revenues.length ? "Doanh thu" : "", productImports.length && state.products.length ? "Mặt hàng" : "", serviceImports.length && state.services.length ? "Hình thức phục vụ" : ""].filter(Boolean);
+      const orderImports = parsed.filter((entry): entry is ParsedOrderImport => entry.type === "orders");
+      const pickImport = <T extends { meta: FinanceImportMeta | ImportMetaInput }>(entries: T[]) => [...entries].sort((left, right) => right.meta.periodEnd.localeCompare(left.meta.periodEnd) || right.meta.rowCount - left.meta.rowCount)[0];
+      const duplicateTypes = [revenueImports.length > 1 ? "Doanh thu" : "", productImports.length > 1 ? "Mặt hàng" : "", serviceImports.length > 1 ? "Phương thức/Hình thức" : "", orderImports.length > 1 ? "Danh sách hóa đơn" : ""].filter(Boolean);
+      const replacing = [revenueImports.length && state.revenues.length ? "Doanh thu" : "", productImports.length && state.products.length ? "Mặt hàng" : "", serviceImports.length && state.services.length ? "Hình thức phục vụ" : "", orderImports.length && state.platformOrders.length ? "Danh sách hóa đơn nền tảng" : ""].filter(Boolean);
       if (replacing.length && !window.confirm(uatMode ? `Import mới sẽ thay dữ liệu ${replacing.join(" và ")} trong đúng kỳ báo cáo; các kỳ khác và lịch sử import vẫn được giữ. Tiếp tục?` : `Import mới sẽ thay toàn bộ dữ liệu ${replacing.join(" và ")} hiện tại. Tiếp tục?`)) return;
-      const revenue = revenueImports[0];
-      const products = productImports[0];
-      const service = serviceImports[0];
+      const revenue = pickImport(revenueImports);
+      const products = pickImport(productImports);
+      const service = pickImport(serviceImports);
+      const orders = pickImport(orderImports);
       let verifiedCloudState: Awaited<ReturnType<typeof loadFinanceImports>> | undefined;
       if (!uatMode) {
         if (!isSupabaseConfigured) throw new Error("Production chưa cấu hình Supabase. Import đã dừng để tránh chỉ lưu dữ liệu trên trình duyệt.");
@@ -969,6 +1231,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           revenue: revenue ? { meta: revenue.meta, records: revenue.records } : undefined,
           products: products ? { meta: products.meta, records: products.records } : undefined,
           service: service ? { meta: service.meta, records: service.records } : undefined,
+          orders: orders ? { meta: orders.meta, records: orders.records } : undefined,
         });
         // Read after write so the success state always reflects the latest committed Supabase snapshot.
         verifiedCloudState = await loadFinanceImports();
@@ -979,23 +1242,32 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         if (revenue) imports = [...imports.filter((entry) => entry.dataType !== "revenue"), revenue.importMeta];
         if (products) imports = [...imports.filter((entry) => entry.dataType !== "products"), products.importMeta];
         if (service) imports = [...imports.filter((entry) => entry.dataType !== "service"), service.importMeta];
+        if (orders) imports = [...imports.filter((entry) => entry.dataType !== "orders"), orders.importMeta];
         const overlap = (left: FinanceImportMeta, right: FinanceImportMeta) => left.periodStart <= right.periodEnd && left.periodEnd >= right.periodStart;
         const existingProductSnapshots = current.productSnapshots.length || !current.products.length || !current.imports.find((entry) => entry.dataType === "products") ? current.productSnapshots : [...current.productSnapshots, { meta: current.imports.find((entry) => entry.dataType === "products")!, records: current.products }];
         const existingServiceSnapshots = current.serviceSnapshots.length || !current.services.length || !current.imports.find((entry) => entry.dataType === "service") ? current.serviceSnapshots : [...current.serviceSnapshots, { meta: current.imports.find((entry) => entry.dataType === "service")!, records: current.services }];
         const revenues = revenue ? [...current.revenues.filter((entry) => entry.date < revenue.meta.periodStart || entry.date > revenue.meta.periodEnd), ...revenue.records].sort((a, b) => b.date.localeCompare(a.date)) : current.revenues;
         const productSnapshots = products ? [...existingProductSnapshots.filter((snapshot) => !overlap(snapshot.meta, products.importMeta)), { meta: products.importMeta, records: products.records }] : existingProductSnapshots;
         const serviceSnapshots = service ? [...existingServiceSnapshots.filter((snapshot) => !overlap(snapshot.meta, service.importMeta)), { meta: service.importMeta, records: service.records }] : existingServiceSnapshots;
-        const importedBatches = [revenue?.importMeta, products?.importMeta, service?.importMeta].filter((entry): entry is FinanceImportMeta => Boolean(entry));
-        return { ...current, revenues, products: products?.records || current.products, services: service?.records || current.services, imports, importHistory: [...current.importHistory, ...importedBatches], productSnapshots, serviceSnapshots };
+        const platformOrders = orders ? [...orders.records, ...current.platformOrders.filter((entry) => entry.orderDate < orders.periodStart || entry.orderDate > orders.periodEnd)] : current.platformOrders;
+        const importedBatches = [revenue?.importMeta, products?.importMeta, service?.importMeta, orders?.importMeta].filter((entry): entry is FinanceImportMeta => Boolean(entry));
+        const nextState = { ...current, revenues, products: products?.records || current.products, services: service?.records || current.services, platformOrders, imports, importHistory: [...current.importHistory, ...importedBatches], productSnapshots, serviceSnapshots };
+        // Persist the complete UAT bundle atomically. This prevents a refresh or
+        // a pending state effect from restoring the pre-import empty order list.
+        if (uatMode) window.localStorage.setItem(storageKey, JSON.stringify(nextState));
+        return nextState;
       });
-      if (revenue) {
+      if (revenue || orders) {
+        const latestDate = orders?.latestDate || revenue?.latestDate;
         setPeriodMode("month");
-        setSelectedMonth(revenue.latestDate.slice(0, 7));
-        setSelectedYear(Number(revenue.latestDate.slice(0, 4)));
+        setSelectedMonth(latestDate!.slice(0, 7));
+        setSelectedYear(Number(latestDate!.slice(0, 4)));
       }
-      setRevenueSubTab(revenue || service ? "overview" : "products");
+      // When the invoice file is part of the bundle, land on the platform tab
+      // so the imported channel dashboards and order list are immediately visible.
+      setRevenueSubTab(orders ? "platform" : revenue ? "overview" : service ? "platform" : "products");
       setFinanceSyncError(undefined);
-      setFinanceImportNotice(`Đã tự nhận diện và map ${parsed.map((entry) => entry.type === "revenue" ? `Doanh thu (${entry.meta.rowCount} ngày)` : entry.type === "products" ? `Mặt hàng (${entry.meta.rowCount} SKU)` : `Hình thức phục vụ (${entry.meta.rowCount} kênh)`).join(" + ")}.`);
+      setFinanceImportNotice(`Đã tự nhận diện và map ${parsed.map((entry) => entry.type === "revenue" ? `Doanh thu (${entry.meta.rowCount} ngày)` : entry.type === "products" ? `Mặt hàng (${entry.meta.rowCount} SKU)` : entry.type === "service" ? `Phương thức/Hình thức (${entry.meta.rowCount} nhóm)` : `Danh sách hóa đơn nền tảng (${entry.records.length} đơn, ${entry.records.filter((record) => normalizedHeader(record.channelName).includes("grab")).length} Grab)`).join(" + ")}${duplicateTypes.length ? `; ưu tiên file có kỳ mới hơn trong nhóm trùng: ${duplicateTypes.join(", ")}` : ""}.`);
     } catch (error) {
       const objectMessage = error && typeof error === "object" && "message" in error ? String(error.message || "") : "";
       const message = error instanceof Error ? error.message : objectMessage || "Không thể phân tích các file Excel.";
@@ -1003,6 +1275,108 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       window.alert(message);
     } finally {
       setImportingFinance(false);
+    }
+  }
+
+  function editGrabReconciliation(entry: GrabReconciliationRecord) {
+    setGrabForm({
+      id: entry.id,
+      platformOrderId: entry.platformOrderId || state.platformOrders.find((order) => order.orderDate === entry.orderDate && order.orderCode.toLocaleLowerCase("vi") === entry.orderCode.toLocaleLowerCase("vi"))?.id || "",
+      orderCode: entry.orderCode,
+      orderDate: entry.orderDate,
+      reportedAmount: amountInput(String(entry.reportedAmount)),
+      receivedAmount: amountInput(String(entry.receivedAmount)),
+      note: entry.note || "",
+    });
+    setShowGrabReconciliationModal(true);
+  }
+
+  function selectGrabOrder(orderId: string) {
+    const order = state.platformOrders.find((entry) => entry.id === orderId);
+    if (!order) return;
+    const existing = state.grabReconciliations.find((entry) => entry.orderDate === order.orderDate && entry.orderCode.toLocaleLowerCase("vi") === order.orderCode.toLocaleLowerCase("vi"));
+    setGrabForm({
+      id: existing?.id,
+      platformOrderId: order.id,
+      orderCode: order.orderCode,
+      orderDate: order.orderDate,
+      reportedAmount: amountInput(String(order.reportedAmount)),
+      receivedAmount: existing ? amountInput(String(existing.receivedAmount)) : "",
+      note: existing?.note || "",
+    });
+  }
+
+  function openPlatformReconciliation(order: PlatformOrderRecord) {
+    if (!isGrabPlatformOrder(order)) return;
+    selectGrabOrder(order.id);
+    setShowGrabReconciliationModal(true);
+  }
+
+  async function persistGrabReconciliation(record: GrabReconciliationRecord) {
+    let persistedRecord = record;
+    if (!uatMode) {
+      if (!isSupabaseConfigured) throw new Error("Production chưa cấu hình Supabase. Đối soát GRAB chưa được lưu.");
+      const saved = await upsertFinanceGrabReconciliations([record]);
+      const cloudRecord = saved.find((entry) => entry.id === record.id);
+      if (!cloudRecord) throw new Error("Supabase không trả lại dòng đối soát GRAB sau khi lưu. Giao dịch đã dừng để tránh chỉ lưu local.");
+      persistedRecord = cloudRecord;
+    }
+    setState((current) => ({
+      ...current,
+      grabReconciliations: current.grabReconciliations.some((entry) => entry.id === persistedRecord.id)
+        ? current.grabReconciliations.map((entry) => entry.id === persistedRecord.id ? persistedRecord : entry)
+        : [persistedRecord, ...current.grabReconciliations],
+    }));
+  }
+
+  async function saveGrabReconciliation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const orderCode = grabForm.orderCode.trim();
+    const reportedAmount = parseAmount(grabForm.reportedAmount);
+    const receivedAmount = parseAmount(grabForm.receivedAmount);
+    if (!grabForm.platformOrderId || !orderCode || !grabForm.orderDate || receivedAmount < 0 || reportedAmount < 0) {
+      window.alert("Vui lòng chọn đơn Grab từ file SAPO và nhập số tiền thực nhận hợp lệ.");
+      return;
+    }
+    const existingSameOrder = state.grabReconciliations.find((entry) => entry.orderCode.toLocaleLowerCase("vi") === orderCode.toLocaleLowerCase("vi") && entry.orderDate === grabForm.orderDate);
+    const record: GrabReconciliationRecord = {
+      id: grabForm.id || existingSameOrder?.id || `grab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      platformOrderId: grabForm.platformOrderId,
+      orderCode,
+      orderDate: grabForm.orderDate,
+      reportedAmount,
+      receivedAmount,
+      note: grabForm.note.trim() || undefined,
+    };
+    setSavingGrabReconciliation(true);
+    setFinanceSyncError(undefined);
+    try {
+      await persistGrabReconciliation(record);
+      setGrabForm(grabReconciliationFormDefaults());
+      setShowGrabReconciliationModal(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Không thể lưu đối soát GRAB.";
+      setFinanceSyncError(message);
+      window.alert(message);
+    } finally {
+      setSavingGrabReconciliation(false);
+    }
+  }
+
+  async function deleteGrabReconciliation(id: string) {
+    if (!window.confirm("Xoá dòng đối soát GRAB này?")) return;
+    setFinanceSyncError(undefined);
+    try {
+      if (!uatMode) {
+        if (!isSupabaseConfigured) throw new Error("Production chưa cấu hình Supabase. Không thể xoá đối soát GRAB.");
+        await deleteFinanceGrabReconciliation(id);
+      }
+      setState((current) => ({ ...current, grabReconciliations: current.grabReconciliations.filter((entry) => entry.id !== id) }));
+      if (grabForm.id === id) setGrabForm(grabReconciliationFormDefaults());
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Không thể xoá đối soát GRAB.";
+      setFinanceSyncError(message);
+      window.alert(message);
     }
   }
 
@@ -1160,14 +1534,15 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
 
     {tab === "revenue" && <section className={`${styles.content} ${styles.revenueContent}`}>
       <div className={styles.revenueSubTabs}>
-        <button className={revenueSubTab === "overview" ? styles.selected : ""} onClick={() => setRevenueSubTab("overview")}><span>Tổng quan</span><small>{revenueImport?.rowCount || 0} ngày</small></button>
-        <button className={revenueSubTab === "products" ? styles.selected : ""} onClick={() => setRevenueSubTab("products")}><span>Mặt hàng</span><small>{productsImport?.rowCount || 0} SKU</small></button>
+        <button type="button" className={revenueSubTab === "overview" ? styles.selected : ""} onClick={() => selectRevenueSubTab("overview")}><span>Tổng quan</span><small>{revenueImport?.rowCount || 0} ngày</small></button>
+        <button type="button" className={revenueSubTab === "products" ? styles.selected : ""} onClick={() => selectRevenueSubTab("products")}><span>Mặt hàng</span><small>{productsImport?.rowCount || 0} SKU</small></button>
+        <button type="button" className={revenueSubTab === "platform" ? styles.selected : ""} onClick={() => selectRevenueSubTab("platform")}><span>Nền tảng</span><small>{periodPlatformOrders.length || state.platformOrders.length} hóa đơn</small></button>
       </div>
 
       <section className={styles.financeImportHub}>
-        <div className={styles.importHubCopy}><span>IMPORT CENTER</span><h2>Một nơi cho tất cả file Excel</h2><p>Chọn cùng lúc file Doanh thu tổng quan, Mặt hàng và Hình thức phục vụ. Hệ thống tự đọc header, nhận diện template và map vào đúng dashboard.</p></div>
-        <label className={`${styles.importHubButton} ${importingFinance ? styles.importing : ""}`}><input type="file" accept=".xls,.xlsx" multiple disabled={importingFinance} onChange={importFinanceExcel} /><span>{importingFinance ? "Đang phân tích & đồng bộ…" : "⇧ Chọn nhiều file Excel"}</span><small>.xls / .xlsx · tối đa 10 MB mỗi file</small></label>
-        <div className={styles.importHubTypes}><span><i>DT</i>Doanh thu tổng quan</span><span><i>MH</i>Báo cáo mặt hàng</span><span><i>PV</i>Hình thức phục vụ</span><b>Tự nhận diện bằng header</b></div>
+        <div className={styles.importHubCopy}><span>IMPORT CENTER</span><h2>Bộ 4 file SAPO</h2><p>Chọn cùng lúc Doanh thu tổng quan, Danh mục mặt hàng, Hình thức phục vụ và Danh sách hóa đơn. Hệ thống tự nhận diện từng file và map vào đúng dashboard.</p></div>
+        <label className={`${styles.importHubButton} ${importingFinance ? styles.importing : ""}`}><input type="file" accept=".xls,.xlsx" multiple disabled={importingFinance} onChange={importFinanceExcel} /><span>{importingFinance ? "Đang phân tích & đồng bộ…" : "⇧ Chọn 4 file Excel cùng lúc"}</span><small>Doanh thu · Mặt hàng · Phương thức/Hình thức · Hóa đơn</small></label>
+        <div className={styles.importHubTypes}><span><i>DT</i>Doanh thu tổng quan</span><span><i>MH</i>Danh mục mặt hàng</span><span><i>PV</i>Hình thức phục vụ</span><span><i>ĐH</i>Danh sách hóa đơn</span><b>{[revenueImport, productsImport, serviceImport, ordersImport].filter(Boolean).length}/4 loại đã có dữ liệu</b></div>
         {financeImportNotice && <div className={styles.importHubSuccess}><b>Import hoàn tất</b><span>{financeImportNotice}</span></div>}
       </section>
 
@@ -1187,32 +1562,6 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
             <article className={cancellationRate > 3 ? styles.warningKpi : ""}><span>Tỷ lệ hủy</span><strong>{percent(cancellationRate)}</strong><small>{cancelledOrders.toLocaleString("vi-VN")} đơn · {money(reportedCancelledAmount)}</small></article>
           </div>
           <div className={styles.revenueInsightGrid}>
-            <article className={`${styles.revenuePanel} ${styles.platformTakeCard}`}>
-              <div className={styles.revenuePanelTitle}><div><span>PHÍ NỀN TẢNG / GIAO HÀNG</span><strong>{money(reportedPartnerFees)}</strong></div><small>{percent(platformTakeRate)} {deliveryRevenue ? "doanh thu giao hàng" : "doanh thu thực"}</small></div>
-              <div className={styles.platformTakeBody}>
-                <div className={styles.platformTakeRing} style={{ background: `conic-gradient(#e87d5c 0 ${Math.min(100, platformTakeRate)}%, #e8ede5 ${Math.min(100, platformTakeRate)}% 100%)` }}><i><strong>{percent(platformTakeRate)}</strong><small>bị giữ lại</small></i></div>
-                <div className={styles.platformTakeStats}><div><span>{deliveryRevenue ? "DT giao hàng/nền tảng" : "DT thực làm mẫu số"}</span><b>{money(platformTakeBase)}</b></div><div><span>Doanh thu sau nhóm phí</span><b>{money(revenueAfterPlatformFees)}</b></div>{grabService && <div><span>Riêng Grab Food</span><b>{money(grabService.revenue)}</b></div>}<div><span>Ngày phát sinh phí</span><b>{revenueDataset.length ? `${platformFeeDays}/${revenueDataset.length}` : "—"}</b></div><div><span>Phí đối tác / tiền hàng</span><b>{percent(partnerCommissionRate)}</b></div></div>
-              </div>
-              <div className={styles.platformFeeList}>{platformFeeComponents.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><div><i style={{ width: `${entry.value / maxPlatformFeeComponent * 100}%` }} /></div></div>)}</div>
-              <p className={styles.metricDisclaimer}>{deliveryRevenue ? "Tỷ lệ phí dùng doanh thu của các hình thức giao hàng/nền tảng làm mẫu số." : "Chưa có file Hình thức phục vụ nên tạm dùng toàn bộ doanh thu thực làm mẫu số."} Các cột phí trong báo cáo Sapo đang gộp nhiều đối tác, vì vậy không quy toàn bộ phí cho riêng Grab.</p>
-            </article>
-            <article className={`${styles.revenuePanel} ${styles.channelMixCard}`}>
-              <div className={styles.revenuePanelTitle}><div><span>PHÂN BỔ HÌNH THỨC PHỤC VỤ</span><strong>{serviceOrders ? `${serviceOrders.toLocaleString("vi-VN")} đơn` : "Chờ file phục vụ"}</strong></div><small>{serviceCancelledOrders ? `${serviceCancelledOrders.toLocaleString("vi-VN")} đơn hủy` : "Theo doanh thu & đơn"}</small></div>
-              {periodServices.length ? <>
-                <div className={styles.serviceSegmentBar} aria-label={`Offline ${percent(offlineOrderShare)}, giao hàng và nền tảng ${percent(deliveryOrderShare)}`}><i style={{ width: `${offlineOrderShare}%` }} /><b style={{ width: `${deliveryOrderShare}%` }} /></div>
-                <div className={styles.serviceLegend}><span><i />Offline <b>{percent(offlineOrderShare)}</b></span><span><i />Giao hàng / nền tảng <b>{percent(deliveryOrderShare)}</b></span></div>
-                <div className={styles.serviceSummary}>
-                  <div><span>OFFLINE</span><b>{offlineOrders.toLocaleString("vi-VN")} đơn</b><strong>{money(offlineRevenue)}</strong><small>{percent(offlineRevenueShare)} doanh thu</small></div>
-                  <div><span>GIAO HÀNG / NỀN TẢNG</span><b>{deliveryOrders.toLocaleString("vi-VN")} đơn</b><strong>{money(deliveryRevenue)}</strong><small>{percent(deliveryRevenueShare)} doanh thu</small></div>
-                </div>
-                <div className={styles.serviceModeList}>{periodServices.map((entry) => {
-                  const orderShare = serviceOrders ? entry.totalOrders / serviceOrders * 100 : 0;
-                  const isGrab = normalizedHeader(entry.serviceName).includes("grab");
-                  return <div className={isGrab ? styles.grabHighlight : ""} key={entry.id}><div><span><b>{entry.serviceName}</b><small>{entry.totalOrders.toLocaleString("vi-VN")} đơn · {percent(orderShare)} tổng đơn{entry.cancelledOrders ? ` · ${entry.cancelledOrders.toLocaleString("vi-VN")} hủy` : ""}</small></span><strong>{money(entry.revenue)}</strong></div><div className={styles.serviceModeTrack}><i style={{ width: `${entry.revenue / maxServiceRevenue * 100}%` }} /></div></div>;
-                })}</div>
-                <div className={`${styles.serviceReconciliation} ${revenueDataset.length && Math.abs(serviceRevenueGap) < 1 ? styles.reconciled : ""}`}><span>Đối soát với Doanh thu tổng quan</span><b>{!revenueDataset.length ? "Chờ file doanh thu" : Math.abs(serviceRevenueGap) < 1 ? "Khớp 100%" : `Lệch ${money(Math.abs(serviceRevenueGap))}`}</b></div>
-              </> : <div className={styles.panelEmpty}>Import file Hình thức phục vụ tại Import Center để xem phân bổ thật giữa tại bàn, mang đi, Grab Food và các kênh giao hàng.</div>}
-            </article>
             <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>GROSS-TO-NET</span><strong>{money(reportedGoodsAmount)} tiền hàng</strong></div><small>{percent(discountRate)} giảm giá</small></div><div className={styles.adjustmentList}>{revenueAdjustments.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>-{money(entry.value)}</b></div><div className={styles.adjustmentTrack}><i style={{ width: `${entry.value / maxRevenueAdjustment * 100}%` }} /></div></div>)}<div className={styles.netRevenueRow}><span>Doanh thu thực</span><b>{money(datasetRevenue)}</b></div></div></article>
             <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>ĐỐI SOÁT HAI BÁO CÁO</span><strong>{periodProducts.length ? money(Math.abs(revenueProductGap)) : "Chờ file mặt hàng"}</strong></div><small>Chênh lệch</small></div>{periodProducts.length ? <div className={styles.reconciliation}><div><span>Doanh thu thực</span><b>{money(datasetRevenue)}</b><i style={{ width: "100%" }} /></div><div><span>Tổng tiền mặt hàng</span><b>{money(productNetAmount)}</b><i style={{ width: `${datasetRevenue ? Math.min(100, productNetAmount / datasetRevenue * 100) : 0}%` }} /></div><p>Chênh lệch có thể đến từ đơn hủy, phí hoặc cấu hình báo cáo Sapo. Dùng ô này để kiểm tra hai file cùng kỳ.</p></div> : <div className={styles.panelEmpty}>Import thêm Báo cáo mặt hàng để đối soát doanh thu và cơ cấu sản phẩm.</div>}</article>
           </div>
@@ -1231,6 +1580,73 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           </div>
           <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>MẶT HÀNG GIẢM GIÁ CAO</span><strong>Cần kiểm tra biên lợi nhuận</strong></div><small>% trên tiền hàng</small></div><div className={styles.discountProductList}>{highDiscountProducts.map((entry) => <div key={entry.id}><span><b>{entry.name} {entry.variant ? `· ${entry.variant}` : ""}</b><small>{entry.sku} · {money(entry.goodsAmount)} tiền hàng</small></span><strong>{percent(entry.goodsAmount ? entry.discountAmount / entry.goodsAmount * 100 : 0)}<small>{money(entry.discountAmount)}</small></strong></div>)}</div></article>
         </>}
+      </>}
+
+      {revenueSubTab === "platform" && <>
+        <div className={styles.revenueHeader}>
+          <div><span>NỀN TẢNG & ĐỐI SOÁT</span><h2>{bounds.label}</h2><p>Danh sách lấy toàn bộ đơn Grab, Xanh/Green Food và Shopee từ SAPO; đối soát Grab chỉ cần chọn mã đơn và nhập tiền thực nhận.</p></div>
+        </div>
+        <div className={styles.revenueKpis}>
+          <article className={styles.primaryRevenueKpi}><span>DOANH THU NỀN TẢNG · SAPO</span><strong>{money(platformOrderRevenue)}</strong><small>{successfulPlatformOrders.length.toLocaleString("vi-VN")} đơn thành công · {channelPerformance.length.toLocaleString("vi-VN")} kênh</small></article>
+          <article><span>Trung bình/đơn</span><strong>{money(platformAverageOrder)}</strong><small>theo Danh sách hóa đơn</small></article>
+          <article><span>Giảm giá nền tảng</span><strong>{money(platformDiscountAmount)}</strong><small>{percent(platformDiscountRate)} tiền hàng</small></article>
+          <article><span>Đơn hủy</span><strong>{platformCancelledOrders.toLocaleString("vi-VN")}</strong><small>{periodPlatformOrders.length ? percent(platformCancelledOrders / periodPlatformOrders.length * 100) : "0%"} tổng đơn nền tảng</small></article>
+          <article><span>Coverage Grab</span><strong>{grabOrderOptions.length ? percent(grabCoverageRate) : "-"}</strong><small>{grabUnreconciledOrders ? `còn ${grabUnreconciledOrders.toLocaleString("vi-VN")} đơn` : grabOrderOptions.length ? "đã đối soát đủ" : "chưa có hóa đơn Grab"}</small></article>
+          <article className={grabDifference < 0 ? styles.warningKpi : ""}><span>Lệch thực nhận Grab</span><strong>{money(grabDifference)}</strong><small>{grabReconciliationRows.length ? `${percent(grabRetentionRate)} số SAPO đã đối soát` : "chưa nhập thực nhận"}</small></article>
+        </div>
+        <div className={styles.revenueInsightGrid}>
+          <article className={styles.revenuePanel}>
+            <div className={styles.revenuePanelTitle}><div><span>DOANH THU THEO NỀN TẢNG</span><strong>{channelPerformance.length ? `${channelPerformance.length} kênh bán` : "Chờ Danh sách hóa đơn"}</strong></div><small>Theo Nguồn đơn</small></div>
+            {channelPerformance.length ? <div className={styles.categoryBars}>{channelPerformance.map((entry) => <div key={entry.name}><div><span><b>{entry.name}</b><small>{entry.successfulOrders.toLocaleString("vi-VN")} đơn · TB {money(entry.averageOrder)}{entry.cancelledOrders ? ` · ${entry.cancelledOrders} hủy` : ""}</small></span><strong>{money(entry.revenue)}</strong></div><div><i style={{ width: `${entry.revenue / maxPlatformChannelRevenue * 100}%` }} /></div></div>)}</div> : <div className={styles.panelEmpty}>Import file Danh sách hóa đơn trong bộ 4 file SAPO để xem cơ cấu GrabFood, Website, ShopeeFood và các kênh khác.</div>}
+          </article>
+          <article className={`${styles.revenuePanel} ${styles.platformTrendPanel}`}>
+            <div className={styles.revenuePanelTitle}><div><span>NHỊP DOANH THU NỀN TẢNG</span><strong>{platformDailyTrend.length ? `${platformDailyTrend.length} ngày có đơn` : "Chờ Danh sách hóa đơn"}</strong></div><small>{money(platformOrderRevenue)}</small></div>
+            {platformDailyTrend.length ? <div className={styles.miniBars}>{platformDailyTrend.map((entry) => <div className={styles.barColumn} key={entry.date} title={`${dateLabel(entry.date)} · ${entry.orders} đơn · ${money(entry.revenue)}`}><div className={styles.barTrack}><i style={{ height: `${Math.max(3, entry.revenue / maxPlatformDailyRevenue * 100)}%` }} /></div><span>{Number(entry.date.slice(8, 10))}</span></div>)}</div> : <div className={styles.panelEmpty}>Chưa có dữ liệu hóa đơn nền tảng trong kỳ đang chọn.</div>}
+            <p className={styles.metricDisclaimer}>Mỗi cột là một ngày có đơn. Di chuột để xem số đơn và doanh thu SAPO của ngày đó.</p>
+          </article>
+        </div>
+        <div className={styles.revenueInsightGrid}>
+          <article className={`${styles.revenuePanel} ${styles.platformTakeCard}`}>
+            <div className={styles.revenuePanelTitle}><div><span>PHÍ NỀN TẢNG / GIAO HÀNG</span><strong>{money(reportedPartnerFees)}</strong></div><small>{percent(platformTakeRate)} {deliveryRevenue ? "doanh thu giao hàng" : "doanh thu thực"}</small></div>
+            <div className={styles.platformTakeBody}>
+              <div className={styles.platformTakeRing} style={{ background: `conic-gradient(#e87d5c 0 ${Math.min(100, platformTakeRate)}%, #e8ede5 ${Math.min(100, platformTakeRate)}% 100%)` }}><i><strong>{percent(platformTakeRate)}</strong><small>bị giữ lại</small></i></div>
+              <div className={styles.platformTakeStats}><div><span>{deliveryRevenue ? "DT giao hàng/nền tảng" : "DT thực làm mẫu số"}</span><b>{money(platformTakeBase)}</b></div><div><span>Doanh thu sau nhóm phí</span><b>{money(revenueAfterPlatformFees)}</b></div>{grabService && <div><span>Riêng Grab Food</span><b>{money(grabService.revenue)}</b></div>}<div><span>Ngày phát sinh phí</span><b>{revenueDataset.length ? `${platformFeeDays}/${revenueDataset.length}` : "-"}</b></div><div><span>Phí đối tác / tiền hàng</span><b>{percent(partnerCommissionRate)}</b></div></div>
+            </div>
+            <div className={styles.platformFeeList}>{platformFeeComponents.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><div><i style={{ width: `${entry.value / maxPlatformFeeComponent * 100}%` }} /></div></div>)}</div>
+            <p className={styles.metricDisclaimer}>{deliveryRevenue ? "Tỷ lệ phí dùng doanh thu của các hình thức giao hàng/nền tảng làm mẫu số." : "Chưa có file Hình thức phục vụ nên tạm dùng toàn bộ doanh thu thực làm mẫu số."} Các cột phí trong báo cáo Sapo đang gộp nhiều đối tác, vì vậy không quy toàn bộ phí cho riêng Grab.</p>
+          </article>
+          <article className={`${styles.revenuePanel} ${styles.channelMixCard}`}>
+            <div className={styles.revenuePanelTitle}><div><span>PHÂN BỔ HÌNH THỨC PHỤC VỤ</span><strong>{serviceOrders ? `${serviceOrders.toLocaleString("vi-VN")} đơn` : "Chờ file phục vụ"}</strong></div><small>{serviceCancelledOrders ? `${serviceCancelledOrders.toLocaleString("vi-VN")} đơn hủy` : "Theo doanh thu & đơn"}</small></div>
+            {periodServices.length ? <>
+              <div className={styles.serviceSegmentBar} aria-label={`Offline ${percent(offlineOrderShare)}, giao hàng và nền tảng ${percent(deliveryOrderShare)}`}><i style={{ width: `${offlineOrderShare}%` }} /><b style={{ width: `${deliveryOrderShare}%` }} /></div>
+              <div className={styles.serviceLegend}><span><i />Offline <b>{percent(offlineOrderShare)}</b></span><span><i />Giao hàng / nền tảng <b>{percent(deliveryOrderShare)}</b></span></div>
+              <div className={styles.serviceSummary}>
+                <div><span>OFFLINE</span><b>{offlineOrders.toLocaleString("vi-VN")} đơn</b><strong>{money(offlineRevenue)}</strong><small>{percent(offlineRevenueShare)} doanh thu</small></div>
+                <div><span>GIAO HÀNG / NỀN TẢNG</span><b>{deliveryOrders.toLocaleString("vi-VN")} đơn</b><strong>{money(deliveryRevenue)}</strong><small>{percent(deliveryRevenueShare)} doanh thu</small></div>
+              </div>
+              <div className={styles.serviceModeList}>{periodServices.map((entry) => {
+                const orderShare = serviceOrders ? entry.totalOrders / serviceOrders * 100 : 0;
+                const isGrab = normalizedHeader(entry.serviceName).includes("grab");
+                return <div className={isGrab ? styles.grabHighlight : ""} key={entry.id}><div><span><b>{entry.serviceName}</b><small>{entry.totalOrders.toLocaleString("vi-VN")} đơn · {percent(orderShare)} tổng đơn{entry.cancelledOrders ? ` · ${entry.cancelledOrders.toLocaleString("vi-VN")} hủy` : ""}</small></span><strong>{money(entry.revenue)}</strong></div><div className={styles.serviceModeTrack}><i style={{ width: `${entry.revenue / maxServiceRevenue * 100}%` }} /></div></div>;
+              })}</div>
+              <div className={`${styles.serviceReconciliation} ${revenueDataset.length && Math.abs(serviceRevenueGap) < 1 ? styles.reconciled : ""}`}><span>Đối soát với Doanh thu tổng quan</span><b>{!revenueDataset.length ? "Chờ file doanh thu" : Math.abs(serviceRevenueGap) < 1 ? "Khớp 100%" : `Lệch ${money(Math.abs(serviceRevenueGap))}`}</b></div>
+            </> : <div className={styles.panelEmpty}>Import file Hình thức phục vụ tại Import Center để xem phân bổ thật giữa tại bàn, mang đi, Grab Food và các kênh giao hàng.</div>}
+          </article>
+        </div>
+        <article className={`${styles.revenuePanel} ${styles.grabReconciliationPanel}`}>
+          <div className={styles.revenuePanelTitle}><div><span>DANH SÁCH ĐƠN NỀN TẢNG</span><strong>Grab · Xanh/Green Food · Shopee</strong></div><small>{platformOrderList.length} đơn trong kỳ</small></div>
+          <div className={styles.grabReconciliationSummary}><div><span>SAPO toàn bộ đơn nền tảng</span><b>{money(platformOrderRevenue)}</b></div><div><span>SAPO đơn Grab đã đối soát</span><b>{money(grabReportedTotal)}</b></div><div><span>Thực nhận Grab đã nhập</span><b>{money(grabReceivedTotal)}</b></div><div className={grabDifference < 0 ? styles.negativeSummary : ""}><span>Chênh lệch Grab</span><b>{money(grabDifference)}</b></div></div>
+          <div className={styles.platformOrderList}>{platformOrderList.length ? platformOrderList.map((order) => {
+            const reconciliation = reconciliationForPlatformOrder(order);
+            const isGrab = isGrabPlatformOrder(order);
+            return <div className={styles.platformOrderRow} key={order.id}>
+              <div className={styles.platformOrderMain}><span className={styles.platformOrderChannel}>{order.channelName}</span><b>{order.orderCode}</b><small>{dateLabel(order.orderDate)} · SAPO {money(order.reportedAmount)}</small></div>
+              <div className={styles.platformOrderStatus}>{isGrab ? <span className={reconciliation ? styles.reconciliationDone : styles.reconciliationPending}>{reconciliation ? "Đối soát done" : "Chưa đối soát"}</span> : <span className={styles.reconciliationNotApplicable}>Theo dõi</span>}</div>
+              <div className={styles.platformOrderAction}>{isGrab && <button type="button" onClick={() => openPlatformReconciliation(order)}>{reconciliation ? "Xem / sửa" : "Đối soát"}</button>}</div>
+            </div>;
+          }) : <div className={styles.panelEmpty}>Chưa có danh sách đơn nền tảng trong kỳ này. Hãy import file Danh sách hóa đơn SAPO.</div>}</div>
+        </article>
+        {showGrabReconciliationModal && <div className={styles.backdrop} role="presentation" onMouseDown={() => !savingGrabReconciliation && setShowGrabReconciliationModal(false)}><form className={`${styles.sheet} ${styles.grabReconciliationSheet}`} onSubmit={(event) => void saveGrabReconciliation(event)} onMouseDown={(event) => event.stopPropagation()}><div className={styles.sheetHandle} /><div className={styles.sheetTitle}><div><span>ĐỐI SOÁT ĐƠN NỀN TẢNG</span><h2>{grabForm.id ? "Cập nhật thực nhận" : "Nhập tiền thực nhận"}</h2></div><button type="button" disabled={savingGrabReconciliation} onClick={() => setShowGrabReconciliationModal(false)}>×</button></div>{selectedGrabOrder ? <><div className={styles.grabOrderPreview}><div><span>Nền tảng</span><b>{selectedGrabOrder.channelName}</b></div><div><span>Mã đơn</span><b>{selectedGrabOrder.orderCode}</b></div><div><span>Ngày đơn</span><b>{dateLabel(selectedGrabOrder.orderDate)}</b></div><div><span>SAPO ghi nhận</span><b>{money(selectedGrabOrder.reportedAmount)}</b></div></div><label className={styles.modalField}>Tiền thực nhận<input autoFocus required inputMode="numeric" value={grabForm.receivedAmount} onChange={(event) => setGrabForm((current) => ({ ...current, receivedAmount: amountInput(event.target.value) }))} placeholder="Nhập số tiền thực nhận" /></label><label className={styles.modalField}>Ghi chú<input value={grabForm.note} onChange={(event) => setGrabForm((current) => ({ ...current, note: event.target.value }))} placeholder="Kỳ thanh toán, lý do lệch..." /></label><div className={styles.grabFormActions}><button type="button" disabled={savingGrabReconciliation} onClick={() => setShowGrabReconciliationModal(false)}>Hủy</button><button type="submit" disabled={savingGrabReconciliation}>{savingGrabReconciliation ? "Đang lưu..." : grabForm.id ? "Lưu thay đổi" : "Lưu đối soát"}</button></div></> : <div className={styles.panelEmpty}>Chọn một đơn nền tảng để bắt đầu đối soát.</div>}</form></div>}
       </>}
     </section>}
 
@@ -1252,7 +1668,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       <div className={styles.targetCard}><div><span>MỤC TIÊU DOANH THU</span><strong>{money(revenueTarget)}</strong><p>{state.revenueTargetAmount ? previousNetRevenue ? `Mục tiêu nhập trực tiếp · tương đương ${targetGrowthRate.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% so với ${money(previousNetRevenue)} kỳ trước` : "Mục tiêu doanh thu nhập trực tiếp." : previousNetRevenue ? `Tự tính tăng ${growthTargetPercent.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% từ ${money(previousNetRevenue)} kỳ trước` : "Nhập mục tiêu doanh thu để bắt đầu theo dõi."}</p></div><div className={styles.targetPercent}>{targetProgress.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%</div><div className={styles.progressTrack}><i style={{ width: `${targetProgress}%` }} /></div><div className={styles.targetInputs}><label>Mục tiêu doanh thu (₫)<input inputMode="numeric" placeholder="Ví dụ: 50,000,000" value={state.revenueTargetAmount ? amountInput(String(state.revenueTargetAmount)) : ""} onChange={(event) => setState((current) => ({ ...current, revenueTargetAmount: parseAmount(event.target.value) }))} /></label><label>Tăng trưởng tự tính (%)<input min="0" step="0.1" type="number" value={state.growthTargetPercent} onChange={(event) => setState((current) => ({ ...current, growthTargetPercent: Math.max(0, Number(event.target.value) || 0), revenueTargetAmount: 0 }))} /></label><div className={styles.targetAuto}><span>MỤC TIÊU LY TỰ TÍNH</span><strong>{cupTarget.toLocaleString("vi-VN")} ly</strong><small>≈ {money(baselineAveragePerCup)}/ly theo kỳ trước</small></div></div><p>Đã đạt {money(netRevenue)} · còn thiếu {money(revenueRemaining)}</p></div>
       <div className={styles.kpiGrid}><article className={styles.averageCup}><span>Trung bình/đơn</span><strong>{money(averagePerOrder)}</strong><small>{totalReportedOrders.toLocaleString("vi-VN")} đơn toàn báo cáo</small></article><article><span>Trung bình/sản phẩm</span><strong>{money(averageProductValue || averagePerItem)}</strong><small>sau giảm giá</small></article><article><span>Sản phẩm bán</span><strong>{(productQuantity || datasetItems).toLocaleString("vi-VN")}</strong><small>{periodProducts.length || importedRevenueRows.length} dòng dữ liệu</small></article><article className={cancellationRate > 3 ? styles.attention : ""}><span>Tỷ lệ hủy đơn</span><strong>{percent(cancellationRate)}</strong><small>{cancelledOrders.toLocaleString("vi-VN")} đơn hủy</small></article><article className={productDiscountRate > 15 ? styles.attention : ""}><span>Tỷ lệ giảm giá</span><strong>{percent(productDiscountRate || discountRate)}</strong><small>{money(productDiscountAmount || reportedDiscountAmount)}</small></article><article><span>Gross margin</span><strong>{percent(grossMargin)}</strong><small>{bounds.label}</small></article></div>
 
-      <div className={styles.dashboardDataNote}><span>Doanh thu: <b>{revenueImport ? `${dateLabel(revenueImport.periodStart)} – ${dateLabel(revenueImport.periodEnd)}` : "chưa import"}</b></span><span>Mặt hàng: <b>{productsImport ? `${dateLabel(productsImport.periodStart)} – ${dateLabel(productsImport.periodEnd)}` : "chưa import"}</b></span><span>Phục vụ: <b>{serviceImport ? `${dateLabel(serviceImport.periodStart)} – ${dateLabel(serviceImport.periodEnd)}` : "chưa import"}</b></span></div>
+      <div className={styles.dashboardDataNote}><span>Doanh thu: <b>{revenueImport ? `${dateLabel(revenueImport.periodStart)} – ${dateLabel(revenueImport.periodEnd)}` : "chưa import"}</b></span><span>Mặt hàng: <b>{productsImport ? `${dateLabel(productsImport.periodStart)} – ${dateLabel(productsImport.periodEnd)}` : "chưa import"}</b></span><span>Phục vụ: <b>{serviceImport ? `${dateLabel(serviceImport.periodStart)} – ${dateLabel(serviceImport.periodEnd)}` : "chưa import"}</b></span><span>Hóa đơn: <b>{ordersImport ? `${dateLabel(ordersImport.periodStart)} – ${dateLabel(ordersImport.periodEnd)}` : "chưa import"}</b></span></div>
 
       <div className={styles.productVisualGrid}>
         <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>CƠ CẤU DOANH THU</span><strong>Theo danh mục</strong></div></div>{categoryPerformance.length ? <div className={styles.categoryBars}>{categoryPerformance.slice(0, 8).map((entry) => <div key={entry.name}><div><span><b>{entry.name}</b><small>{entry.quantity.toLocaleString("vi-VN")} sản phẩm</small></span><strong>{money(entry.revenue)}</strong></div><div><i style={{ width: `${entry.revenue / maxCategoryRevenue * 100}%` }} /></div></div>)}</div> : <div className={styles.panelEmpty}>Import Báo cáo mặt hàng để xem cơ cấu danh mục.</div>}</article>
