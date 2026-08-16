@@ -1,6 +1,6 @@
 # Nha Ops - Code Map
 
-> Last reviewed: 2026-08-13
+> Last reviewed: 2026-08-17
 > Production branch: `main`
 > GitHub: `alroseylleno/NhaCofee-Tea`
 
@@ -136,12 +136,12 @@ Current UAT data contract:
 - UAT browser storage uses `nha-ops-master-data-uat-v5`. Its first load intentionally discards every legacy Product/recipe/cost record, while Ingredient Master continues to rebuild from current Kho NVL.
 - Finance product imports reconcile Product Master exactly by normalized SKU in both modes: missing Finance SKUs are created, matching SKUs refresh name/category/variant, and SKUs absent from the latest Finance snapshot are removed with their recipes.
 - Selling price defaults from the Finance `Giá mặt hàng` column; an edit may override it, and manual products/clones can be created with their own SKU. Finance reconciliation refreshes imported products but preserves manual products and price overrides.
-- Kho NVL lots feed Ingredient Master automatically with currently usable quantity, usable conversion, latest purchase price and a source-lot link for traceability. Product Master availability is sealed stock plus lifecycle sessions whose status is `active`; sessions closed as `used` or `wasted` are excluded. Supabase sync is source-of-truth: a master row no longer represented by a current Kho NVL lot is retained only for recipe history, set to inactive with zero availability, and excluded from new recipe choices.
+- Kho NVL lots feed Ingredient Master automatically with currently usable quantity, explicit conversion, operational source price and a source-lot link for traceability. Product Master availability is sealed stock plus lifecycle sessions whose status is `active`; sessions closed as `used` or `wasted` are excluded. Supabase sync is source-of-truth: a master row no longer represented by a current Kho NVL lot is retained only for recipe history, set to inactive with zero availability, and excluded from new recipe choices.
 - The recipe cascade offers only active current-inventory master rows with usable quantity greater than zero: Category is sourced from rows that are either still sealed in Kho NVL or currently in `Đang dùng`, then the ingredient/brand picker is constrained to the selected Category. Inactive, depleted, used-up or wasted historical rows remain resolvable by saved recipes but are never selectable for new recipe items.
 - Ingredient Master has no manual activation queue. Inventory ingredients become available to new recipe items while they have sealed stock or an active lifecycle session; a saved recipe that later has neither raises a replacement alert explaining that it may be depleted, used up or wasted, and cannot be saved as a new version until the ingredient is replaced or removed.
 - Ingredient/brand choices show the latest Kho NVL purchase month as `M/YYYY`. The custom picker closes from its `+` / `-` trigger, after selection, on outside click, on Escape and whenever the product detail context changes; the remaining Product Master dropdowns use native select behavior.
-- Multiple lots with the same name, category and brand are aggregated. Recipe selection prefers an available ingredient whose oldest sealed-or-active lot has the earliest purchase date (FIFO), while theoretical cost keeps the latest purchase price.
-- In Local/UAT, a new recipe item may use only the NVL's explicit `Quy đổi sử dụng` unit. NVL without a valid conversion unit is excluded until its Kho NVL conversion is completed; purchase and specification units are never substituted.
+- Multiple lots with the same name, category and brand are aggregated. Conversion and theoretical price use one consistent operational source: the oldest active lot first, otherwise the oldest sealed lot (FIFO). Editing that source lot refreshes active-session quantity/unit/provisional cost and Product Master instead of mixing conversion from one lot with price from another.
+- In every environment, a new recipe or packaging item may use only the NVL's explicit `Quy đổi sử dụng` unit. NVL without a valid conversion unit is excluded until its Kho NVL conversion is completed; purchase/base-unit fallback is forbidden because it can hide invalid COGS. Count conversions include `tờ`.
 - Recipe edits stay only in the open screen until saved. `Lưu công thức` automatically creates the next immutable version and archives the prior version; there is no recipe activation action.
 - Product detail uses progressive saving: price, recipe rows and packaging rows can be saved independently even while other data is missing, unavailable or cannot yet produce theoretical COGS. Missing price/NVL/unit data remains a non-blocking quality warning and keeps cost/margin in `Chưa đủ`; it must not prevent saving the data already entered.
 - The parent page memoizes the Product Master inventory projection, and inventory refreshes must not clear the selected SKU or open recipe draft. Closing a product detail or changing saved recipe versions while a draft or quantity entry is unsaved requires explicit confirmation so incidental parent renders, backdrop clicks or version changes cannot discard data entry.
@@ -196,6 +196,7 @@ Do not stage these files in an unrelated Kho NVL hotfix. Production Product Mast
 | CFO master-data foundation | stores, masters, recipes and finance facts | `20260805000100`, `20260809000200` - additive tables, versioned recipes and broad authenticated RLS during rollout |
 | Finance-driven Product catalog reset | `finance_product_rows.selling_price`, Product price override, exact Finance reconciliation, one-time Product/Ingredient reset | `20260812000100` |
 | Product Management component persistence | `product_recipe_items.component_type`, manual component cost/name fields, Product catalog exclusions and guarded Product delete RPC | `20260813000200` |
+| Product Master packaging conversion sync | persists `ingredient_master.conversion_unit`, recalculates linked receipt unit cost, refreshes active session snapshots and corrects CM-M Giấy chống tràn to `tờ` | `20260816000100` |
 | July CARNATION EXTRA cost correction | exact receipt `010726-027`; verifies 16 total/13 July rows, preserves 4 legitimate July issues, 2 other-period rows and 1 active August box, then snapshots/deletes the latest 9 closed July excess rows; sealed stock 32 -> 41 | `20260812000200` |
 
 Migration rules:

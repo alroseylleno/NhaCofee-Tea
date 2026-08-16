@@ -18,6 +18,8 @@ export type InventorySourceLot = {
   unit: string;
   quantity: number;
   stockQuantity: number;
+  sealedQuantity?: number;
+  activeQuantity?: number;
   specification: string;
   conversion?: { amount: number; unit: string };
   unitCost: number;
@@ -156,7 +158,7 @@ export const DEFAULT_STORE: StoreMaster = {
 
 export const MASS_UNITS = ["mg", "g", "kg"] as const;
 export const VOLUME_UNITS = ["ml", "l", "oz"] as const;
-export const COUNT_UNITS = ["cái", "viên", "phần", "gói", "túi", "hộp", "chai", "lon", "trái", "miếng", "muỗng", "vá"] as const;
+export const COUNT_UNITS = ["cái", "tờ", "viên", "phần", "gói", "túi", "hộp", "chai", "lon", "trái", "miếng", "muỗng", "vá"] as const;
 export const ALL_RECIPE_UNITS = [...MASS_UNITS, ...VOLUME_UNITS, ...COUNT_UNITS];
 const MASTER_STATUSES: MasterStatus[] = ["unmapped", "draft", "ready", "active", "inactive"];
 
@@ -167,18 +169,19 @@ const unitFactors: Record<string, { family: UnitFamily; factor: number; base: st
   ml: { family: "volume", factor: 1, base: "ml" },
   l: { family: "volume", factor: 1000, base: "ml" },
   oz: { family: "volume", factor: 29.5735, base: "ml" },
-  "cái": { family: "count", factor: 1, base: "cái" },
-  "viên": { family: "count", factor: 1, base: "cái" },
-  "phần": { family: "count", factor: 1, base: "cái" },
-  "gói": { family: "count", factor: 1, base: "cái" },
-  "túi": { family: "count", factor: 1, base: "cái" },
-  "hộp": { family: "count", factor: 1, base: "cái" },
+  cai: { family: "count", factor: 1, base: "cái" },
+  to: { family: "count", factor: 1, base: "cái" },
+  vien: { family: "count", factor: 1, base: "cái" },
+  phan: { family: "count", factor: 1, base: "cái" },
+  goi: { family: "count", factor: 1, base: "cái" },
+  tui: { family: "count", factor: 1, base: "cái" },
+  hop: { family: "count", factor: 1, base: "cái" },
   "chai": { family: "count", factor: 1, base: "cái" },
   "lon": { family: "count", factor: 1, base: "cái" },
-  "trái": { family: "count", factor: 1, base: "cái" },
-  "miếng": { family: "count", factor: 1, base: "cái" },
-  "muỗng": { family: "count", factor: 1, base: "cái" },
-  "vá": { family: "count", factor: 1, base: "cái" },
+  trai: { family: "count", factor: 1, base: "cái" },
+  mieng: { family: "count", factor: 1, base: "cái" },
+  muong: { family: "count", factor: 1, base: "cái" },
+  va: { family: "count", factor: 1, base: "cái" },
 };
 
 export function normalizedText(value: string) {
@@ -219,7 +222,7 @@ function specificationBase(specification: string, purchaseUnit: string, conversi
     const definition = unitDefinition(conversion.unit)!;
     return { baseUnit: definition.base, baseQuantity: conversion.amount * definition.factor };
   }
-  const match = specification.trim().match(/^([\d.,]+)\s*(mg|g|kg|ml|l|oz|cái|viên|phần|gói|túi|hộp|chai|lon)\b/i);
+  const match = specification.trim().match(/^([\d.,]+)\s*(mg|g|kg|ml|l|oz|cái|tờ|viên|phần|gói|túi|hộp|chai|lon|trái|miếng|muỗng|vá)\b/i);
   if (match) {
     const amount = Number(match[1].replace(",", "."));
     const unit = normalizedText(match[2]);
@@ -239,9 +242,11 @@ export function ingredientDraftsFromInventory(lots: InventorySourceLot[], storeI
   return [...grouped.entries()].map(([key, sourceLots], index): IngredientMaster => {
     const latestLot = [...sourceLots].sort((a, b) => b.purchasedOn.localeCompare(a.purchasedOn))[0];
     const inStockLots = sourceLots.filter((lot) => lot.stockQuantity > 0).sort((a, b) => a.purchasedOn.localeCompare(b.purchasedOn));
-    const preferredLot = inStockLots[0] || latestLot;
+    const activeLots = inStockLots.filter((lot) => (lot.activeQuantity || 0) > 0);
+    const sealedLots = inStockLots.filter((lot) => (lot.sealedQuantity || 0) > 0);
+    // Formula cost follows the lot being used now; otherwise it follows FIFO sealed stock.
+    const preferredLot = activeLots[0] || sealedLots[0] || inStockLots[0] || latestLot;
     const preferredSpecification = specificationBase(preferredLot.specification, preferredLot.unit, preferredLot.conversion);
-    const latestSpecification = specificationBase(latestLot.specification, latestLot.unit, latestLot.conversion);
     const stockQuantityBase = sourceLots.reduce((sum, lot) => {
       const definition = specificationBase(lot.specification, lot.unit, lot.conversion);
       if (definition.baseUnit !== preferredSpecification.baseUnit) return sum;
@@ -258,10 +263,10 @@ export function ingredientDraftsFromInventory(lots: InventorySourceLot[], storeI
       baseUnit: preferredSpecification.baseUnit,
       conversionUnit: preferredLot.conversion?.amount && unitDefinition(preferredLot.conversion.unit) ? preferredLot.conversion.unit.trim() : undefined,
       purchaseUnit: preferredLot.unit,
-      latestPurchasePrice: latestLot.unitCost,
-      latestPurchasePricePerBaseUnit: latestSpecification.baseQuantity ? latestLot.unitCost / latestSpecification.baseQuantity : 0,
+      latestPurchasePrice: preferredLot.unitCost,
+      latestPurchasePricePerBaseUnit: preferredSpecification.baseQuantity ? preferredLot.unitCost / preferredSpecification.baseQuantity : 0,
       standardWastePercent: 0,
-      latestPurchasedOn: latestLot.purchasedOn,
+      latestPurchasedOn: preferredLot.purchasedOn,
       oldestInStockPurchasedOn: inStockLots[0]?.purchasedOn,
       sourceInventoryLotId: preferredLot.id,
       stockQuantityBase,

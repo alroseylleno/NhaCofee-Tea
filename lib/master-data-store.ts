@@ -11,6 +11,7 @@ import {
   type RecipeVersion,
   emptyMasterDataState,
   mergeInventoryDrafts,
+  unitDefinition,
 } from "@/lib/master-data";
 import { supabase } from "@/lib/supabase";
 
@@ -19,10 +20,11 @@ type CloudLoad = { state: MasterDataState; products: ImportedProductSource[]; im
 function requireClient() { if (!supabase) throw new Error("Supabase chưa được cấu hình."); return supabase; }
 function number(value: unknown) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : 0; }
 function aliases(value: unknown) { return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : []; }
+function conversionUnit(value: unknown) { const unit = typeof value === "string" ? value.trim() : ""; return unit && unitDefinition(unit) ? unit : undefined; }
 function codeFor(sourceKey: string) { let hash = 0; for (let index = 0; index < sourceKey.length; index += 1) hash = (hash * 31 + sourceKey.charCodeAt(index)) | 0; return `NVL-${(hash >>> 0).toString(36).toUpperCase()}`; }
 
 function toIngredient(row: Record<string, unknown>): IngredientMaster {
-  return { id: String(row.id), storeId: String(row.store_id), code: String(row.code), name: String(row.name), aliases: aliases(row.aliases), category: String(row.category), brand: String(row.brand), baseUnit: String(row.base_unit), purchaseUnit: String(row.purchase_unit), latestPurchasePrice: number(row.latest_purchase_price), latestPurchasePricePerBaseUnit: number(row.latest_purchase_price_per_base_unit), standardWastePercent: number(row.standard_waste_percent), latestPurchasedOn: row.latest_purchased_on ? String(row.latest_purchased_on) : undefined, oldestInStockPurchasedOn: row.oldest_in_stock_purchased_on ? String(row.oldest_in_stock_purchased_on) : undefined, sourceInventoryLotId: row.source_inventory_receipt_id ? String(row.source_inventory_receipt_id) : undefined, stockQuantityBase: number(row.stock_quantity_base), stockLotCount: number(row.stock_lot_count), sourceKey: String(row.source_key), status: row.status === "inactive" ? "inactive" : "active", updatedAt: String(row.updated_at || new Date().toISOString()) };
+  return { id: String(row.id), storeId: String(row.store_id), code: String(row.code), name: String(row.name), aliases: aliases(row.aliases), category: String(row.category), brand: String(row.brand), baseUnit: String(row.base_unit), conversionUnit: conversionUnit(row.conversion_unit), purchaseUnit: String(row.purchase_unit), latestPurchasePrice: number(row.latest_purchase_price), latestPurchasePricePerBaseUnit: number(row.latest_purchase_price_per_base_unit), standardWastePercent: number(row.standard_waste_percent), latestPurchasedOn: row.latest_purchased_on ? String(row.latest_purchased_on) : undefined, oldestInStockPurchasedOn: row.oldest_in_stock_purchased_on ? String(row.oldest_in_stock_purchased_on) : undefined, sourceInventoryLotId: row.source_inventory_receipt_id ? String(row.source_inventory_receipt_id) : undefined, stockQuantityBase: number(row.stock_quantity_base), stockLotCount: number(row.stock_lot_count), sourceKey: String(row.source_key), status: row.status === "inactive" ? "inactive" : "active", updatedAt: String(row.updated_at || new Date().toISOString()) };
 }
 function toProduct(row: Record<string, unknown>): ProductMaster {
   return { id: String(row.id), storeId: String(row.store_id), sku: String(row.sku), name: String(row.name), category: String(row.category), variant: String(row.variant || ""), sellingPrice: number(row.selling_price), sellingPriceOverridden: Boolean(row.selling_price_overridden), packagingCost: number(row.packaging_cost), status: "active", source: row.source === "manual" ? "manual" : "import", updatedAt: String(row.updated_at || new Date().toISOString()) };
@@ -49,8 +51,15 @@ export async function loadCloudMasterData(inventoryLots: InventorySourceLot[]): 
   ]);
   if (ingredientsResult.error) throw ingredientsResult.error;
   const syncedIngredients = mergeInventoryDrafts((ingredientsResult.data || []).map((row) => toIngredient(row)), inventoryLots);
-  const ingredientRows = syncedIngredients.map((ingredient) => ({ store_id: storeId, code: ingredient.code || codeFor(ingredient.sourceKey), name: ingredient.name, aliases: ingredient.aliases, category: ingredient.category, brand: ingredient.brand, base_unit: ingredient.baseUnit, purchase_unit: ingredient.purchaseUnit, latest_purchase_price: ingredient.latestPurchasePrice, latest_purchase_price_per_base_unit: ingredient.latestPurchasePricePerBaseUnit, standard_waste_percent: ingredient.standardWastePercent, latest_purchased_on: ingredient.latestPurchasedOn || null, oldest_in_stock_purchased_on: ingredient.oldestInStockPurchasedOn || null, source_inventory_receipt_id: ingredient.sourceInventoryLotId || null, stock_quantity_base: ingredient.stockQuantityBase, stock_lot_count: ingredient.stockLotCount, source_key: ingredient.sourceKey, status: ingredient.status, updated_at: new Date().toISOString() }));
-  if (ingredientRows.length) { const { error } = await client.from("ingredient_master").upsert(ingredientRows, { onConflict: "store_id,source_key" }); if (error) throw error; }
+  const ingredientRows = syncedIngredients.map((ingredient) => ({ store_id: storeId, code: ingredient.code || codeFor(ingredient.sourceKey), name: ingredient.name, aliases: ingredient.aliases, category: ingredient.category, brand: ingredient.brand, base_unit: ingredient.baseUnit, conversion_unit: ingredient.conversionUnit || null, purchase_unit: ingredient.purchaseUnit, latest_purchase_price: ingredient.latestPurchasePrice, latest_purchase_price_per_base_unit: ingredient.latestPurchasePricePerBaseUnit, standard_waste_percent: ingredient.standardWastePercent, latest_purchased_on: ingredient.latestPurchasedOn || null, oldest_in_stock_purchased_on: ingredient.oldestInStockPurchasedOn || null, source_inventory_receipt_id: ingredient.sourceInventoryLotId || null, stock_quantity_base: ingredient.stockQuantityBase, stock_lot_count: ingredient.stockLotCount, source_key: ingredient.sourceKey, status: ingredient.status, updated_at: new Date().toISOString() }));
+  if (ingredientRows.length) {
+    let result = await client.from("ingredient_master").upsert(ingredientRows, { onConflict: "store_id,source_key" });
+    if (result.error?.code === "PGRST204" && result.error.message.includes("conversion_unit")) {
+      const legacyRows = ingredientRows.map(({ conversion_unit: _conversionUnit, ...row }) => row);
+      result = await client.from("ingredient_master").upsert(legacyRows, { onConflict: "store_id,source_key" });
+    }
+    if (result.error) throw result.error;
+  }
   const { error: reconcileError } = await client.rpc("reconcile_product_master_from_finance", { p_store_id: storeId });
   if (reconcileError) throw reconcileError;
   const [freshIngredients, freshProducts, versionsResult, eventsResult] = await Promise.all([

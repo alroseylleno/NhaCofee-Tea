@@ -131,8 +131,9 @@ function sameUnitFamily(left: IngredientMaster, right: IngredientMaster) {
 }
 
 function conversionUnitForRecipe(ingredient: IngredientMaster | undefined, uatMode: boolean) {
-  // UAT recipes must use the unit explicitly declared in Kho NVL's Quy đổi field.
-  return ingredient?.conversionUnit || (!uatMode ? ingredient?.baseUnit : undefined);
+  // Every environment must use the explicit Kho NVL conversion; base-unit fallback hides bad COGS data.
+  void uatMode;
+  return ingredient?.conversionUnit;
 }
 
 function ingredientIsAvailable(ingredient: IngredientMaster | undefined) {

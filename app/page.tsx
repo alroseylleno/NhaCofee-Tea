@@ -328,7 +328,7 @@ export default function Home() {
     return items.map((item) => {
       const counts = lifecycleCounts.get(item.id) || { issued: 0, active: 0 };
       const sealedQuantity = Math.max(0, item.quantity - counts.issued);
-      return { id: item.id, name: item.name, category: item.category, brand: item.brand, unit: item.unit, quantity: item.quantity, stockQuantity: sealedQuantity + counts.active, specification: item.specification, conversion: item.conversion, unitCost: item.unitCost, purchasedOn: item.purchasedOn };
+      return { id: item.id, name: item.name, category: item.category, brand: item.brand, unit: item.unit, quantity: item.quantity, stockQuantity: sealedQuantity + counts.active, sealedQuantity, activeQuantity: counts.active, specification: item.specification, conversion: item.conversion, unitCost: item.unitCost, purchasedOn: item.purchasedOn };
     });
   }, [items, activeSessions]);
   const inventoryViewGroups = useMemo(() => filteredGroups.map((group) => {
@@ -690,7 +690,7 @@ export default function Home() {
     const metaChanged = JSON.stringify(lotMeta[item.id] || {}) !== JSON.stringify(nextMeta);
     const updatedActive = current ? activeSessions
       .filter((activeSession) => activeSession.status === "active" && activeSession.sourceReceiptId === item.id)
-      .map((activeSession) => ({ ...activeSession, ingredientKey: ingredientKey(item), useBy: useByFor(activeSession.activatedAt, nextMeta) })) : [];
+      .map((activeSession) => ({ ...activeSession, ingredientKey: ingredientKey(item), useBy: useByFor(activeSession.activatedAt, nextMeta), openedAmount: item.conversion?.amount, openedUnit: item.conversion?.unit, provisionalCost: item.unitCost })) : [];
     setLotMeta((metadata) => ({ ...metadata, [item.id]: nextMeta }));
     if (current && !changes.length && !metaChanged) { closeForm(); return; }
     if (updatedActive.length) setActiveSessions((sessions) => sessions.map((activeSession) => updatedActive.find((updated) => updated.id === activeSession.id) || activeSession));
