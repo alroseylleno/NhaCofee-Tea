@@ -50,7 +50,10 @@ const MASTER_LEGACY_UAT_STORAGE_KEYS = ["nha-ops-master-data-uat-v4", "nha-ops-m
 const FINANCE_UAT_STORAGE_KEY = "nha-ops-finance-uat-v2";
 
 function money(value: number) {
-  return new Intl.NumberFormat("vi-VN", { style: "currency", currency: "VND", maximumFractionDigits: 0 }).format(value || 0);
+  // Ingredient conversions can produce fractional VND costs (for example,
+  // 250d / 1,000 caps = 0.25d per cap). Preserve those values in recipes.
+  const hasFraction = Math.abs(value - Math.round(value)) > 0.000001;
+  return new Intl.NumberFormat("vi-VN", { style: "currency", currency: "VND", maximumFractionDigits: hasFraction ? 4 : 0 }).format(value || 0);
 }
 
 function numberLabel(value: number, maximumFractionDigits = 1) {
