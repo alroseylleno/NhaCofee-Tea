@@ -40,8 +40,8 @@ type CapacityRow = { ingredient?: IngredientMaster; requiredBase: number; capaci
 type CapacityEstimate = { servings: number; limiting?: IngredientMaster; rows: CapacityRow[] };
 type StockIssue = { key: string; product: ProductMaster; version: RecipeVersion; ingredient: IngredientMaster; candidates: IngredientMaster[] };
 type ProductQueueEntry = { product: ProductMaster; errors: string[]; stockIssues: StockIssue[] };
-type ProductCostMetric = { product: ProductMaster; cost: number; margin?: number };
-type FinanceCategoryMetric = { name: string; revenue: number; quantity: number; skuCount: number };
+type ProductCostMetric = { product: ProductMaster; cost: number; margin?: number; costPercent?: number };
+type FinanceCategoryMetric = { name: string; revenue: number; quantity: number; skuCount: number; costValue: number; costRevenue: number };
 
 const MASTER_UAT_STORAGE_KEY = "nha-ops-master-data-uat-v5";
 const MASTER_UAT_RESET_KEY = "nha-ops-master-data-uat-v5-reset-20260812";
@@ -353,26 +353,43 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
   const productCostMetrics = useMemo<ProductCostMetric[]>(() => state.products.flatMap((product) => {
     const cost = theoreticalProductCost(product, state.recipeVersions, state.ingredients);
     if (cost === undefined) return [];
-    return [{ product, cost, margin: product.sellingPrice > 0 ? (product.sellingPrice - cost) / product.sellingPrice * 100 : undefined }];
+    const costPercent = product.sellingPrice > 0 ? cost / product.sellingPrice * 100 : undefined;
+    return [{ product, cost, costPercent, margin: costPercent === undefined ? undefined : 100 - costPercent }];
   }), [state.products, state.recipeVersions, state.ingredients]);
   const averageProductCost = productCostMetrics.length ? productCostMetrics.reduce((sum, entry) => sum + entry.cost, 0) / productCostMetrics.length : 0;
   const averageMargin = productCostMetrics.filter((entry) => entry.margin !== undefined).length ? productCostMetrics.reduce((sum, entry) => sum + (entry.margin || 0), 0) / productCostMetrics.filter((entry) => entry.margin !== undefined).length : undefined;
   const highestCostProducts = [...productCostMetrics].sort((left, right) => right.cost - left.cost).slice(0, 5);
   const lowestCostProducts = [...productCostMetrics].sort((left, right) => left.cost - right.cost).slice(0, 5);
+  const costRateProducts = productCostMetrics.filter((entry): entry is ProductCostMetric & { costPercent: number } => entry.costPercent !== undefined);
+  const highestCostRateProducts = [...costRateProducts].sort((left, right) => right.costPercent - left.costPercent).slice(0, 5);
+  const lowestCostRateProducts = [...costRateProducts].sort((left, right) => left.costPercent - right.costPercent).slice(0, 5);
   const financeProducts = financeSnapshot.products || [];
-  const topFinanceProducts = [...financeProducts].sort((left, right) => (right.totalAmount || 0) - (left.totalAmount || 0)).slice(0, 6);
+  const costBySku = useMemo(() => new Map(productCostMetrics.map((entry) => [normalizedText(entry.product.sku), entry])), [productCostMetrics]);
+  const financeProductsWithCost = useMemo(() => financeProducts.map((product) => {
+    const metric = costBySku.get(normalizedText(product.sku));
+    const revenue = product.totalAmount || 0;
+    const quantity = product.quantity || 0;
+    const costPercent = metric && revenue > 0 && quantity > 0 ? metric.cost * quantity / revenue * 100 : undefined;
+    return { ...product, costPercent };
+  }), [financeProducts, costBySku]);
+  const topFinanceProducts = [...financeProductsWithCost].sort((left, right) => (right.totalAmount || 0) - (left.totalAmount || 0)).slice(0, 6);
   const financeCategories = useMemo<FinanceCategoryMetric[]>(() => {
     const categories = new Map<string, FinanceCategoryMetric>();
     for (const product of financeProducts) {
       const name = product.category?.trim() || "Chưa phân loại";
-      const current = categories.get(name) || { name, revenue: 0, quantity: 0, skuCount: 0 };
+      const current = categories.get(name) || { name, revenue: 0, quantity: 0, skuCount: 0, costValue: 0, costRevenue: 0 };
       current.revenue += product.totalAmount || 0;
       current.quantity += product.quantity || 0;
       current.skuCount += 1;
+      const metric = costBySku.get(normalizedText(product.sku));
+      if (metric && (product.totalAmount || 0) > 0 && (product.quantity || 0) > 0) {
+        current.costValue += metric.cost * (product.quantity || 0);
+        current.costRevenue += product.totalAmount || 0;
+      }
       categories.set(name, current);
     }
     return [...categories.values()].sort((left, right) => right.revenue - left.revenue).slice(0, 6);
-  }, [financeProducts]);
+  }, [financeProducts, costBySku]);
   const productsImport = [...(financeSnapshot.importHistory || []), ...(financeSnapshot.imports || [])].filter((entry) => entry.dataType === "products").sort((left, right) => right.importedAt.localeCompare(left.importedAt))[0];
 
   function syncSources() {
@@ -684,11 +701,16 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
           <article className={styles.dashboardPanel}><div className={styles.panelTitle}><div><span>TOP 5 GIÁ VỐN THẤP</span><h3>Sản phẩm cost thấp nhất</h3></div></div>{lowestCostProducts.length ? <div className={styles.costChart}>{lowestCostProducts.map((entry, index) => <button key={entry.product.id} onClick={() => openDetail(entry.product)}><span><i>{index + 1}</i><b>{entry.product.name}</b></span><strong>{money(entry.cost)}</strong><em><i style={{ width: `${entry.cost / Math.max(1, ...lowestCostProducts.map((item) => item.cost)) * 100}%` }} /></em></button>)}</div> : <div className={styles.panelEmpty}>Chưa có sản phẩm đủ công thức.</div>}</article>
         </section>
 
+        <section className={styles.costDashboard}>
+          <article className={styles.dashboardPanel}><div className={styles.panelTitle}><div><span>TOP 5 GIÁ VỐN CAO NHẤT (%)</span><h3>Tỷ lệ giá vốn cao nhất</h3></div></div>{highestCostRateProducts.length ? <div className={styles.costChart}>{highestCostRateProducts.map((entry, index) => <button key={entry.product.id} onClick={() => openDetail(entry.product)}><span><i>{index + 1}</i><b>{entry.product.name}</b></span><strong>{percent(entry.costPercent)}</strong><em><i style={{ width: `${Math.min(100, entry.costPercent)}%` }} /></em></button>)}</div> : <div className={styles.panelEmpty}>Cần giá bán và công thức để tính tỷ lệ giá vốn.</div>}</article>
+          <article className={styles.dashboardPanel}><div className={styles.panelTitle}><div><span>TOP 5 GIÁ VỐN THẤP NHẤT (%)</span><h3>Tỷ lệ giá vốn thấp nhất</h3></div></div>{lowestCostRateProducts.length ? <div className={styles.costChart}>{lowestCostRateProducts.map((entry, index) => <button key={entry.product.id} onClick={() => openDetail(entry.product)}><span><i>{index + 1}</i><b>{entry.product.name}</b></span><strong>{percent(entry.costPercent)}</strong><em><i style={{ width: `${Math.min(100, entry.costPercent)}%` }} /></em></button>)}</div> : <div className={styles.panelEmpty}>Cần giá bán và công thức để tính tỷ lệ giá vốn.</div>}</article>
+        </section>
+
         <section className={styles.financeDashboard}>
           <div className={styles.financeDashboardHead}><div><span>FINANCE · MẶT HÀNG</span><h2>Hiệu suất bán hàng</h2></div><p>{productsImport ? `${productsImport.fileName} · ${dateLabel(productsImport.periodStart)}–${dateLabel(productsImport.periodEnd)}` : "Import Báo cáo Mặt hàng ở Tài Chính để hiển thị dữ liệu thật."}</p></div>
           <div className={styles.financeGrid}>
-            <article className={styles.dashboardPanel}><div className={styles.panelTitle}><div><span>TOP MẶT HÀNG</span><h3>Theo tổng tiền</h3></div></div>{topFinanceProducts.length ? <div className={styles.rankList}>{topFinanceProducts.map((entry, index) => <div key={`${entry.sku}-${entry.variant || "base"}`}><i>{index + 1}</i><span><b>{entry.name}{entry.variant ? ` · ${entry.variant}` : ""}</b><small>{entry.category} · {numberLabel(entry.quantity || 0, 0)} SP</small></span><strong>{money(entry.totalAmount || 0)}</strong></div>)}</div> : <div className={styles.panelEmpty}>Chưa import Báo cáo Mặt hàng.</div>}</article>
-            <article className={styles.dashboardPanel}><div className={styles.panelTitle}><div><span>TOP DANH MỤC</span><h3>Theo doanh thu mặt hàng</h3></div></div>{financeCategories.length ? <div className={styles.categoryBars}>{financeCategories.map((entry) => <div key={entry.name}><div><span><b>{entry.name}</b><small>{numberLabel(entry.quantity, 0)} SP · {entry.skuCount} SKU</small></span><strong>{money(entry.revenue)}</strong></div><div><i style={{ width: `${entry.revenue / Math.max(1, financeCategories[0].revenue) * 100}%` }} /></div></div>)}</div> : <div className={styles.panelEmpty}>Chưa có dữ liệu danh mục.</div>}</article>
+            <article className={styles.dashboardPanel}><div className={styles.panelTitle}><div><span>TOP MẶT HÀNG</span><h3>Theo tổng tiền</h3></div></div>{topFinanceProducts.length ? <div className={styles.rankList}>{topFinanceProducts.map((entry, index) => <div key={`${entry.sku}-${entry.variant || "base"}`}><i>{index + 1}</i><span><b>{entry.name}{entry.variant ? ` · ${entry.variant}` : ""}</b><small>{entry.category} · {numberLabel(entry.quantity || 0, 0)} SP{entry.costPercent === undefined ? " · Chưa có giá vốn" : ` · Cost ${percent(entry.costPercent)}`}</small></span><strong>{money(entry.totalAmount || 0)}</strong></div>)}</div> : <div className={styles.panelEmpty}>Chưa import Báo cáo Mặt hàng.</div>}</article>
+            <article className={styles.dashboardPanel}><div className={styles.panelTitle}><div><span>TOP DANH MỤC</span><h3>Theo doanh thu mặt hàng</h3></div></div>{financeCategories.length ? <div className={styles.categoryBars}>{financeCategories.map((entry) => <div key={entry.name}><div><span><b>{entry.name}</b><small>{numberLabel(entry.quantity, 0)} SP · {entry.skuCount} SKU{entry.costRevenue > 0 ? ` · Cost ${percent(entry.costValue / entry.costRevenue * 100)}` : " · Chưa có giá vốn"}</small></span><strong>{money(entry.revenue)}</strong></div><div><i style={{ width: `${entry.revenue / Math.max(1, financeCategories[0].revenue) * 100}%` }} /></div></div>)}</div> : <div className={styles.panelEmpty}>Chưa có dữ liệu danh mục.</div>}</article>
           </div>
         </section>
       </>}
