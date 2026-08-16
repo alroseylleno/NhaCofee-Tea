@@ -199,6 +199,7 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
   const [recipeDraftSourceId, setRecipeDraftSourceId] = useState("");
   const [recipeDraftItems, setRecipeDraftItems] = useState<ProductRecipeItem[]>([]);
   const [packagingDraftItems, setPackagingDraftItems] = useState<ProductRecipeItem[]>([]);
+  const [packagingTemplateProductId, setPackagingTemplateProductId] = useState("");
   const [packagingCategory, setPackagingCategory] = useState("");
   const [packagingIngredientId, setPackagingIngredientId] = useState("");
   const [packagingQuantity, setPackagingQuantity] = useState("");
@@ -310,6 +311,11 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
   const packagingCandidates = sortIngredientsForUse(selectableIngredients.filter((ingredient) => !packagingCategory || ingredient.category === packagingCategory));
   const selectedPackagingIngredient = state.ingredients.find((ingredient) => ingredient.id === packagingIngredientId);
   const allowedPackagingUnits = conversionUnitForRecipe(selectedPackagingIngredient, uatMode) ? [conversionUnitForRecipe(selectedPackagingIngredient, uatMode)!] : [];
+  const packagingTemplates = useMemo(() => state.products.flatMap((product) => {
+    if (product.id === selectedProductId || normalizedText(product.category) !== "bao bi") return [];
+    const recipe = activeRecipeVersion(product.id, state.recipeVersions);
+    return recipe?.packagingItems?.length ? [{ product, recipe }] : [];
+  }).sort((left, right) => `${left.product.sku} ${left.product.name}`.localeCompare(`${right.product.sku} ${right.product.name}`, "vi")), [state.products, state.recipeVersions, selectedProductId]);
 
   const stockIssues = useMemo<StockIssue[]>(() => {
     const issues = new Map<string, StockIssue>();
@@ -397,6 +403,7 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
     setRecipeDraftSourceId(source?.id || "");
     setRecipeDraftItems(items.map((item) => ({ ...item })));
     setPackagingDraftItems((source?.packagingItems || []).map((item) => ({ ...item })));
+    setPackagingTemplateProductId("");
     setSelectedRecipeVersionId(source?.id || "");
     setRecipePickerOpen(false);
   }
@@ -504,6 +511,22 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
 
   function removePackagingItem(itemId: string) {
     setPackagingDraftItems((current) => current.filter((item) => item.id !== itemId));
+  }
+
+  function loadPackagingTemplate(productId: string) {
+    if (!productId) { setPackagingTemplateProductId(""); return; }
+    const template = packagingTemplates.find((entry) => entry.product.id === productId);
+    if (!template) {
+      window.alert("SKU Bao Bì này chưa có cấu hình bao bì để nạp.");
+      return;
+    }
+    if (packagingDraftItems.length && !window.confirm(`Dùng mẫu ${template.product.sku} sẽ thay ${packagingDraftItems.length} dòng bao bì đang nhập. Tiếp tục?`)) return;
+    setPackagingTemplateProductId(productId);
+    setPackagingDraftItems(template.recipe.packagingItems!.map((item) => ({ ...item, id: crypto.randomUUID() })));
+    setPackagingCategory("");
+    setPackagingIngredientId("");
+    setPackagingQuantity("");
+    setPackagingUnit("");
   }
 
   async function saveRecipe() {
@@ -713,7 +736,7 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
             </details>
             <details className={styles.formulaSubgroup}>
               <summary><span><b>Bao bì</b><small>NVL bao bì được cộng trực tiếp vào giá vốn</small></span><strong>{selectedProductPackagingCost === undefined ? "Chưa tính được" : money(selectedProductPackagingCost)}</strong><i>+</i></summary>
-              <div className={styles.formulaSubgroupBody}><div className={styles.recipeList}>{packagingItems.length ? packagingItems.map((item) => { const ingredient = state.ingredients.find((entry) => entry.id === item.ingredientId); const cost = recipeItemCost(item, ingredient); return <div className={styles.recipeRow} key={item.id}><span><b>{ingredient ? `${ingredient.name} · ${ingredient.brand}` : "Nguyên liệu đã xóa"}</b><small>{ingredient?.category || "-"} · {item.quantity} {item.unit} · HH {item.wastePercent}%</small></span><strong>{cost === undefined ? "Thiếu giá" : money(cost, true)}</strong>{isCurrentRecipe && <button className={styles.deleteButton} onClick={() => removePackagingItem(item.id)}>Xóa</button>}</div>; }) : <div className={styles.emptySmall}>Chưa có NVL bao bì.</div>}</div>{isCurrentRecipe && <form className={styles.recipeForm} onSubmit={addPackagingItem}><div className={styles.recipeSelectors}><label>Category<select required value={packagingCategory} onChange={(event) => { const category = event.target.value; setPackagingCategory(category); const ingredient = packagingCandidates.find((entry) => entry.category === category && conversionUnitForRecipe(entry, uatMode)); setPackagingIngredientId(ingredient?.id || ""); setPackagingUnit(conversionUnitForRecipe(ingredient, uatMode) || ""); setPackagingWaste(String(ingredient?.standardWastePercent || 0)); }}><option value="">Chọn category</option>{ingredientCategories.map((category) => <option value={category} key={category}>{category}</option>)}</select></label><label>Nguyên liệu / thương hiệu<select required value={packagingIngredientId} onChange={(event) => { const ingredient = state.ingredients.find((entry) => entry.id === event.target.value); setPackagingIngredientId(event.target.value); setPackagingUnit(conversionUnitForRecipe(ingredient, uatMode) || ""); setPackagingWaste(String(ingredient?.standardWastePercent || 0)); }}><option value="">Chọn nguyên liệu</option>{packagingCandidates.map((ingredient) => <option value={ingredient.id} key={ingredient.id}>{ingredientChoiceLabel(ingredient)}</option>)}</select></label></div><div><label>Định lượng<input required min="0.001" step="0.001" type="number" value={packagingQuantity} onChange={(event) => setPackagingQuantity(event.target.value)} /></label><label>Đơn vị quy đổi<select required disabled={!allowedPackagingUnits.length} value={packagingUnit} onChange={(event) => setPackagingUnit(event.target.value)}><option value="">Chọn đơn vị</option>{allowedPackagingUnits.map((unit) => <option key={unit}>{unit}</option>)}</select></label><label>Hao hụt %<input min="0" step="0.1" type="number" value={packagingWaste} onChange={(event) => setPackagingWaste(event.target.value)} /></label></div><button disabled={!packagingIngredientId || !allowedPackagingUnits.length}>Thêm bao bì</button></form>}</div>
+              <div className={styles.formulaSubgroupBody}>{isCurrentRecipe && <div className={styles.packagingTemplate}><label><span>Chọn SKU Bao Bì đã định nghĩa</span><select value={packagingTemplateProductId} onChange={(event) => loadPackagingTemplate(event.target.value)} disabled={!packagingTemplates.length}><option value="">{packagingTemplates.length ? "Chọn SKU để tự nạp cấu hình" : "Chưa có SKU thuộc category Bao Bì"}</option>{packagingTemplates.map(({ product, recipe }) => <option value={product.id} key={product.id}>{product.sku} · {product.name} · {recipe.packagingItems?.length || 0} dòng</option>)}</select></label><small>{packagingTemplates.length ? "Chọn SKU sẽ thay toàn bộ dòng bao bì hiện tại bằng cấu hình đã lưu của SKU đó. Sau khi nạp, bạn vẫn có thể chỉnh thêm trước khi lưu." : "Hãy tạo một sản phẩm có category Bao Bì, khai báo các thành phần trong phần Bao bì và lưu lại để dùng làm mẫu."}</small></div>}<div className={styles.recipeList}>{packagingItems.length ? packagingItems.map((item) => { const ingredient = state.ingredients.find((entry) => entry.id === item.ingredientId); const cost = recipeItemCost(item, ingredient); return <div className={styles.recipeRow} key={item.id}><span><b>{ingredient ? `${ingredient.name} · ${ingredient.brand}` : "Nguyên liệu đã xóa"}</b><small>{ingredient?.category || "-"} · {item.quantity} {item.unit} · HH {item.wastePercent}%</small></span><strong>{cost === undefined ? "Thiếu giá" : money(cost, true)}</strong>{isCurrentRecipe && <button className={styles.deleteButton} onClick={() => removePackagingItem(item.id)}>Xóa</button>}</div>; }) : <div className={styles.emptySmall}>Chưa có NVL bao bì.</div>}</div>{isCurrentRecipe && <form className={styles.recipeForm} onSubmit={addPackagingItem}><div className={styles.recipeSelectors}><label>Category<select required value={packagingCategory} onChange={(event) => { const category = event.target.value; setPackagingCategory(category); const ingredient = packagingCandidates.find((entry) => entry.category === category && conversionUnitForRecipe(entry, uatMode)); setPackagingIngredientId(ingredient?.id || ""); setPackagingUnit(conversionUnitForRecipe(ingredient, uatMode) || ""); setPackagingWaste(String(ingredient?.standardWastePercent || 0)); }}><option value="">Chọn category</option>{ingredientCategories.map((category) => <option value={category} key={category}>{category}</option>)}</select></label><label>Nguyên liệu / thương hiệu<select required value={packagingIngredientId} onChange={(event) => { const ingredient = state.ingredients.find((entry) => entry.id === event.target.value); setPackagingIngredientId(event.target.value); setPackagingUnit(conversionUnitForRecipe(ingredient, uatMode) || ""); setPackagingWaste(String(ingredient?.standardWastePercent || 0)); }}><option value="">Chọn nguyên liệu</option>{packagingCandidates.map((ingredient) => <option value={ingredient.id} key={ingredient.id}>{ingredientChoiceLabel(ingredient)}</option>)}</select></label></div><div><label>Định lượng<input required min="0.001" step="0.001" type="number" value={packagingQuantity} onChange={(event) => setPackagingQuantity(event.target.value)} /></label><label>Đơn vị quy đổi<select required disabled={!allowedPackagingUnits.length} value={packagingUnit} onChange={(event) => setPackagingUnit(event.target.value)}><option value="">Chọn đơn vị</option>{allowedPackagingUnits.map((unit) => <option key={unit}>{unit}</option>)}</select></label><label>Hao hụt %<input min="0" step="0.1" type="number" value={packagingWaste} onChange={(event) => setPackagingWaste(event.target.value)} /></label></div><button disabled={!packagingIngredientId || !allowedPackagingUnits.length}>Thêm bao bì</button></form>}</div>
             </details>
             {isCurrentRecipe && <><button className={styles.saveRecipe} disabled={!recipeDraftDirty && !packagingDraftDirty && !productDraftDirty} onClick={saveRecipe}>Lưu dữ liệu hiện có</button>{saveNotice && <p className={styles.saveNotice}>{saveNotice}</p>}</>}
           </details>

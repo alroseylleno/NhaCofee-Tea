@@ -338,6 +338,10 @@
 .workbookIssues span, .workbookReady span { font: 700 9px/1.4 Arial, sans-serif; }
 .workbookIssues small { color: #9a5a49; font: 8px/1.4 Arial, sans-serif; }
 .recipeList { display: grid; gap: 6px; margin-top: 10px; }
+.packagingTemplate { display: grid; gap: 6px; margin-top: 10px; padding: 10px; border: 1px solid #cbdccf; border-radius: 10px; background: #f2f7f1; }
+.packagingTemplate label { display: grid; gap: 5px; color: #315d48; font: 800 8px Arial, sans-serif; }
+.packagingTemplate select { min-width: 0; width: 100%; padding: 9px 7px; border: 1px solid #b9cfbe; border-radius: 8px; color: var(--ink); background: #fff; font: 10px Arial, sans-serif; }
+.packagingTemplate small { color: #506a58; font: 8px/1.4 Arial, sans-serif; }
 .recipeItemBlock { display: grid; gap: 5px; }
 .recipeRow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
 .recipeRow.recipeOut { border-color: #e5bbae; background: #fff8f5; }
