@@ -1210,6 +1210,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: true, defval: null });
         const templateType = financeTemplateType(rows);
         if (!templateType) throw new Error(`${file.name}: chưa nhận diện được template. Hệ thống hiện hỗ trợ Doanh thu tổng quan, Danh mục mặt hàng, Hình thức phục vụ và Danh sách hóa đơn.`);
+        if (!uatMode && templateType === "orders") throw new Error("Danh sách hóa đơn nền tảng và đối soát GRAB hiện chỉ có ở UAT.");
         parsed.push(templateType === "revenue" ? parseRevenueRows(file, rows) : templateType === "products" ? parseProductRows(file, rows) : templateType === "service" ? parseServiceRows(file, rows) : parsePlatformOrderRows(file, rows));
       }
       const revenueImports = parsed.filter((entry): entry is ParsedRevenueImport => entry.type === "revenue");
@@ -1231,7 +1232,6 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           revenue: revenue ? { meta: revenue.meta, records: revenue.records } : undefined,
           products: products ? { meta: products.meta, records: products.records } : undefined,
           service: service ? { meta: service.meta, records: service.records } : undefined,
-          orders: orders ? { meta: orders.meta, records: orders.records } : undefined,
         });
         // Read after write so the success state always reflects the latest committed Supabase snapshot.
         verifiedCloudState = await loadFinanceImports();
@@ -1265,7 +1265,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       }
       // When the invoice file is part of the bundle, land on the platform tab
       // so the imported channel dashboards and order list are immediately visible.
-      setRevenueSubTab(orders ? "platform" : revenue ? "overview" : service ? "platform" : "products");
+      setRevenueSubTab(uatMode && orders ? "platform" : revenue || service ? "overview" : "products");
       setFinanceSyncError(undefined);
       setFinanceImportNotice(`Đã tự nhận diện và map ${parsed.map((entry) => entry.type === "revenue" ? `Doanh thu (${entry.meta.rowCount} ngày)` : entry.type === "products" ? `Mặt hàng (${entry.meta.rowCount} SKU)` : entry.type === "service" ? `Phương thức/Hình thức (${entry.meta.rowCount} nhóm)` : `Danh sách hóa đơn nền tảng (${entry.records.length} đơn, ${entry.records.filter((record) => normalizedHeader(record.channelName).includes("grab")).length} Grab)`).join(" + ")}${duplicateTypes.length ? `; ưu tiên file có kỳ mới hơn trong nhóm trùng: ${duplicateTypes.join(", ")}` : ""}.`);
     } catch (error) {
@@ -1536,13 +1536,13 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       <div className={styles.revenueSubTabs}>
         <button type="button" className={revenueSubTab === "overview" ? styles.selected : ""} onClick={() => selectRevenueSubTab("overview")}><span>Tổng quan</span><small>{revenueImport?.rowCount || 0} ngày</small></button>
         <button type="button" className={revenueSubTab === "products" ? styles.selected : ""} onClick={() => selectRevenueSubTab("products")}><span>Mặt hàng</span><small>{productsImport?.rowCount || 0} SKU</small></button>
-        <button type="button" className={revenueSubTab === "platform" ? styles.selected : ""} onClick={() => selectRevenueSubTab("platform")}><span>Nền tảng</span><small>{periodPlatformOrders.length || state.platformOrders.length} hóa đơn</small></button>
+        {uatMode && <button type="button" className={revenueSubTab === "platform" ? styles.selected : ""} onClick={() => selectRevenueSubTab("platform")}><span>Nền tảng</span><small>{periodPlatformOrders.length || state.platformOrders.length} hóa đơn</small></button>}
       </div>
 
       <section className={styles.financeImportHub}>
-        <div className={styles.importHubCopy}><span>IMPORT CENTER</span><h2>Bộ 4 file SAPO</h2><p>Chọn cùng lúc Doanh thu tổng quan, Danh mục mặt hàng, Hình thức phục vụ và Danh sách hóa đơn. Hệ thống tự nhận diện từng file và map vào đúng dashboard.</p></div>
-        <label className={`${styles.importHubButton} ${importingFinance ? styles.importing : ""}`}><input type="file" accept=".xls,.xlsx" multiple disabled={importingFinance} onChange={importFinanceExcel} /><span>{importingFinance ? "Đang phân tích & đồng bộ…" : "⇧ Chọn 4 file Excel cùng lúc"}</span><small>Doanh thu · Mặt hàng · Phương thức/Hình thức · Hóa đơn</small></label>
-        <div className={styles.importHubTypes}><span><i>DT</i>Doanh thu tổng quan</span><span><i>MH</i>Danh mục mặt hàng</span><span><i>PV</i>Hình thức phục vụ</span><span><i>ĐH</i>Danh sách hóa đơn</span><b>{[revenueImport, productsImport, serviceImport, ordersImport].filter(Boolean).length}/4 loại đã có dữ liệu</b></div>
+        <div className={styles.importHubCopy}><span>IMPORT CENTER</span><h2>{uatMode ? "Bộ 4 file SAPO" : "Bộ 3 file SAPO"}</h2><p>{uatMode ? "Chọn cùng lúc Doanh thu tổng quan, Danh mục mặt hàng, Hình thức phục vụ và Danh sách hóa đơn. Hệ thống tự nhận diện từng file và map vào đúng dashboard." : "Chọn cùng lúc Doanh thu tổng quan, Danh mục mặt hàng và Hình thức phục vụ. Dữ liệu được map vào đúng dashboard."}</p></div>
+        <label className={`${styles.importHubButton} ${importingFinance ? styles.importing : ""}`}><input type="file" accept=".xls,.xlsx" multiple disabled={importingFinance} onChange={importFinanceExcel} /><span>{importingFinance ? "Đang phân tích & đồng bộ…" : `⇧ Chọn ${uatMode ? "4" : "3"} file Excel cùng lúc`}</span><small>{uatMode ? "Doanh thu · Mặt hàng · Phương thức/Hình thức · Hóa đơn" : "Doanh thu · Mặt hàng · Phương thức/Hình thức"}</small></label>
+        <div className={styles.importHubTypes}><span><i>DT</i>Doanh thu tổng quan</span><span><i>MH</i>Danh mục mặt hàng</span><span><i>PV</i>Hình thức phục vụ</span>{uatMode && <span><i>ĐH</i>Danh sách hóa đơn</span>}<b>{[revenueImport, productsImport, serviceImport, ...(uatMode ? [ordersImport] : [])].filter(Boolean).length}/{uatMode ? 4 : 3} loại đã có dữ liệu</b></div>
         {financeImportNotice && <div className={styles.importHubSuccess}><b>Import hoàn tất</b><span>{financeImportNotice}</span></div>}
       </section>
 
@@ -1582,7 +1582,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         </>}
       </>}
 
-      {revenueSubTab === "platform" && <>
+      {uatMode && revenueSubTab === "platform" && <>
         <div className={styles.revenueHeader}>
           <div><span>NỀN TẢNG & ĐỐI SOÁT</span><h2>{bounds.label}</h2><p>Danh sách lấy toàn bộ đơn Grab, Xanh/Green Food và Shopee từ SAPO; đối soát Grab chỉ cần chọn mã đơn và nhập tiền thực nhận.</p></div>
         </div>

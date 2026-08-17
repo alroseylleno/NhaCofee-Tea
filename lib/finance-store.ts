@@ -216,22 +216,18 @@ function supabaseFailure(error: unknown, context: string) {
 
 export async function loadFinanceImports(): Promise<FinanceCloudState> {
   const client = requireClient();
-  const [expensesResult, importsResult, revenueResult, productsResult, servicesResult, platformOrdersResult, grabResult] = await Promise.all([
+  const [expensesResult, importsResult, revenueResult, productsResult, servicesResult] = await Promise.all([
     client.from("finance_expenses").select("*").order("incurred_on", { ascending: false }),
     client.from("finance_imports").select("*").order("imported_at", { ascending: false }),
     client.from("finance_revenue_rows").select("*").order("report_date", { ascending: false }),
     client.from("finance_product_rows").select("*").order("source_row", { ascending: true }),
     client.from("finance_service_rows").select("*").order("source_row", { ascending: true }),
-    client.from("finance_platform_order_rows").select("*").order("order_date", { ascending: false }),
-    client.from("finance_grab_reconciliations").select("*").order("order_date", { ascending: false }),
   ]);
   if (expensesResult.error) throw supabaseFailure(expensesResult.error, "Không thể tải chi phí ghi nhận");
   if (importsResult.error) throw supabaseFailure(importsResult.error, "Không thể tải metadata import");
   if (revenueResult.error) throw supabaseFailure(revenueResult.error, "Không thể tải dữ liệu doanh thu");
   if (productsResult.error) throw supabaseFailure(productsResult.error, "Không thể tải dữ liệu mặt hàng");
   if (servicesResult.error) throw supabaseFailure(servicesResult.error, "Không thể tải dữ liệu hình thức phục vụ");
-  if (platformOrdersResult.error) throw supabaseFailure(platformOrdersResult.error, "Không thể tải chi tiết đơn nền tảng");
-  if (grabResult.error) throw supabaseFailure(grabResult.error, "Không thể tải đối soát GRAB");
 
   const imports: FinanceImportMeta[] = (importsResult.data || []).map((row) => ({
     dataType: row.data_type,
@@ -319,10 +315,9 @@ export async function loadFinanceImports(): Promise<FinanceCloudState> {
     revenue: numberValue(row.revenue),
   }));
 
-  const platformOrders: FinancePlatformOrderRecord[] = (platformOrdersResult.data || []).map((row) => platformOrderFromRow(row));
-  const grabReconciliations: FinanceGrabReconciliationRecord[] = (grabResult.data || []).map((row) => grabReconciliationFromRow(row));
-
-  return { expenses, revenues, products, services, platformOrders, grabReconciliations, imports };
+  // Platform-order and GRAB reconciliation are UAT-only while their schema is
+  // still under test. Production must not query experimental tables.
+  return { expenses, revenues, products, services, platformOrders: [], grabReconciliations: [], imports };
 }
 
 function expenseRows(records: FinanceExpenseRecord[]) {
@@ -510,9 +505,8 @@ export async function replaceFinanceImportBundle(bundle: {
   revenue?: { meta: Omit<FinanceImportMeta, "dataType" | "importedAt">; records: FinanceRevenueRecord[] };
   products?: { meta: Omit<FinanceImportMeta, "dataType" | "importedAt">; records: FinanceProductRecord[] };
   service?: { meta: Omit<FinanceImportMeta, "dataType" | "importedAt">; records: FinanceServiceRecord[] };
-  orders?: { meta: Omit<FinanceImportMeta, "dataType" | "importedAt">; records: FinancePlatformOrderRecord[] };
 }) {
-  const { error } = await requireClient().rpc("replace_finance_import_bundle_v2", {
+  const { error } = await requireClient().rpc("replace_finance_import_bundle", {
     p_revenue_file_name: bundle.revenue?.meta.fileName ?? null,
     p_revenue_period_start: bundle.revenue?.meta.periodStart ?? null,
     p_revenue_period_end: bundle.revenue?.meta.periodEnd ?? null,
@@ -525,10 +519,6 @@ export async function replaceFinanceImportBundle(bundle: {
     p_service_period_start: bundle.service?.meta.periodStart ?? null,
     p_service_period_end: bundle.service?.meta.periodEnd ?? null,
     p_service_rows: bundle.service ? serviceRpcRows(bundle.service.records) : null,
-    p_orders_file_name: bundle.orders?.meta.fileName ?? null,
-    p_orders_period_start: bundle.orders?.meta.periodStart ?? null,
-    p_orders_period_end: bundle.orders?.meta.periodEnd ?? null,
-    p_orders_rows: bundle.orders ? platformOrderRows(bundle.orders.records) : null,
   });
   if (error) throw supabaseFailure(error, "Không thể lưu bộ file tài chính");
 }
