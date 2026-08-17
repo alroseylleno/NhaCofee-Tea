@@ -1,6 +1,7 @@
 export type MasterStatus = "unmapped" | "draft" | "ready" | "active" | "inactive";
 export type UnitFamily = "mass" | "volume" | "count";
 export type RecipeVersionStatus = "draft" | "active" | "archived";
+export type ProductType = "sellable" | "prepared_component" | "packaging";
 
 export type StoreMaster = {
   id: string;
@@ -73,6 +74,7 @@ export type ProductMaster = {
   packagingCost: number;
   status: MasterStatus;
   source: "import" | "manual";
+  productType?: ProductType;
   updatedAt: string;
 };
 
@@ -87,6 +89,9 @@ export type ProductRecipeItem = {
   customBrand?: string;
   customCategory?: string;
   customCost?: number;
+  // A prepared component keeps a reference to its source formula version.
+  preparedProductId?: string;
+  preparedRecipeVersionId?: string;
 };
 
 export type RecipeVersion = {
@@ -98,6 +103,8 @@ export type RecipeVersion = {
   status: RecipeVersionStatus;
   items: ProductRecipeItem[];
   packagingItems?: ProductRecipeItem[];
+  outputQuantity?: number;
+  outputUnit?: string;
   createdAt: string;
   source?: "workbook" | "manual";
   sourceLabel?: string;
@@ -339,39 +346,83 @@ export function recipeItemCost(recipe: ProductRecipeItem, ingredient?: Ingredien
   return baseQuantity * ingredient.latestPurchasePricePerBaseUnit * (1 + Math.max(0, recipe.wastePercent) / 100);
 }
 
-export function recipeItemsCost(items: ProductRecipeItem[] | undefined, ingredients: IngredientMaster[]) {
+function preparedRecipeItemCost(
+  item: ProductRecipeItem,
+  ingredients: IngredientMaster[],
+  products: ProductMaster[],
+  versions: RecipeVersion[],
+  visited: Set<string>,
+) {
+  if (!item.preparedProductId || !item.preparedRecipeVersionId) return undefined;
+  const product = products.find((entry) => entry.id === item.preparedProductId);
+  const version = versions.find((entry) => entry.id === item.preparedRecipeVersionId && entry.productId === item.preparedProductId);
+  if (!product || !version || product.productType !== "prepared_component" || !version.outputQuantity || !version.outputUnit || visited.has(version.id)) return undefined;
+  const requiredOutput = convertToBase(item.quantity, item.unit, version.outputUnit);
+  if (requiredOutput === undefined) return undefined;
+  const nextVisited = new Set(visited);
+  nextVisited.add(version.id);
+  const batchCost = recipeVersionCost(version, ingredients, product.packagingCost, products, versions, nextVisited);
+  return batchCost === undefined ? undefined : batchCost * requiredOutput / version.outputQuantity * (1 + Math.max(0, item.wastePercent) / 100);
+}
+
+export function recipeItemsCost(items: ProductRecipeItem[] | undefined, ingredients: IngredientMaster[], products: ProductMaster[] = [], versions: RecipeVersion[] = [], visited = new Set<string>()) {
   if (!items?.length) return 0;
   let total = 0;
   for (const item of items) {
-    const cost = recipeItemCost(item, ingredients.find((ingredient) => ingredient.id === item.ingredientId));
+    const cost = item.preparedProductId
+      ? preparedRecipeItemCost(item, ingredients, products, versions, visited)
+      : recipeItemCost(item, ingredients.find((ingredient) => ingredient.id === item.ingredientId));
     if (cost === undefined) return undefined;
     total += cost;
   }
   return total;
 }
 
-export function recipeVersionCost(version: RecipeVersion | undefined, ingredients: IngredientMaster[], packagingCost = 0) {
+export function recipeVersionCost(version: RecipeVersion | undefined, ingredients: IngredientMaster[], packagingCost = 0, products: ProductMaster[] = [], versions: RecipeVersion[] = [], visited = new Set<string>()) {
   if (!version?.items.length || version.importIssues?.length || (version.expectedItemCount !== undefined && version.items.length < version.expectedItemCount)) return undefined;
-  const ingredientCost = recipeItemsCost(version.items, ingredients);
-  const packagingIngredientCost = recipeItemsCost(version.packagingItems, ingredients);
+  const ingredientCost = recipeItemsCost(version.items, ingredients, products, versions, visited);
+  const packagingIngredientCost = recipeItemsCost(version.packagingItems, ingredients, products, versions, visited);
   return ingredientCost === undefined || packagingIngredientCost === undefined ? undefined : ingredientCost + packagingIngredientCost + packagingCost;
 }
 
 export function theoreticalProductCost(product: ProductMaster, versions: RecipeVersion[], ingredients: IngredientMaster[]) {
-  return recipeVersionCost(activeRecipeVersion(product.id, versions), ingredients, product.packagingCost);
+  return theoreticalProductCostWithComponents(product, [product], versions, ingredients);
 }
 
-export function productValidationErrors(product: ProductMaster, versions: RecipeVersion[], ingredients: IngredientMaster[]) {
+export function theoreticalProductCostWithComponents(product: ProductMaster, products: ProductMaster[], versions: RecipeVersion[], ingredients: IngredientMaster[]) {
+  const version = activeRecipeVersion(product.id, versions);
+  return recipeVersionCost(version, ingredients, product.packagingCost, products, versions, new Set(version ? [version.id] : []));
+}
+
+export function preparedComponentUnitCost(product: ProductMaster, products: ProductMaster[], versions: RecipeVersion[], ingredients: IngredientMaster[]) {
+  if (product.productType !== "prepared_component") return undefined;
+  const version = activeRecipeVersion(product.id, versions);
+  if (!version?.outputQuantity || !version.outputUnit) return undefined;
+  const batchCost = theoreticalProductCostWithComponents(product, products, versions, ingredients);
+  return batchCost === undefined ? undefined : batchCost / version.outputQuantity;
+}
+
+export function productValidationErrors(product: ProductMaster, versions: RecipeVersion[], ingredients: IngredientMaster[], products: ProductMaster[] = []) {
   const errors: string[] = [];
   const activeRecipe = activeRecipeVersion(product.id, versions);
   const recipe = activeRecipe;
   if (!product.sku.trim()) errors.push("Thiếu mã SKU");
   if (!product.name.trim()) errors.push("Thiếu tên sản phẩm");
   if (!product.category.trim() || product.category === "Chưa phân loại") errors.push("Thiếu category chuẩn");
-  if (product.sellingPrice <= 0) errors.push("Thiếu giá bán");
+  if (product.productType !== "prepared_component" && product.sellingPrice <= 0) errors.push("Thiếu giá bán");
   if (!recipe?.items.length) errors.push("Chưa có công thức");
+  if (product.productType === "prepared_component" && (!recipe?.outputQuantity || !recipe.outputUnit)) errors.push("Công thức nền chưa có sản lượng đầu ra");
   for (const issue of recipe?.importIssues || []) errors.push(`CT Excel: ${issue}`);
   for (const item of recipe?.items || []) {
+    if (item.preparedProductId) {
+      const preparedProduct = products.find((entry) => entry.id === item.preparedProductId);
+      const preparedVersion = versions.find((entry) => entry.id === item.preparedRecipeVersionId);
+      if (!preparedProduct || !preparedVersion) errors.push("Công thức nền tham chiếu không còn tồn tại");
+      else if (preparedProduct.productType !== "prepared_component") errors.push(`${preparedProduct.name}: SKU không còn là Công thức nền`);
+      else if (!preparedVersion.outputQuantity || !preparedVersion.outputUnit || convertToBase(item.quantity, item.unit, preparedVersion.outputUnit) === undefined) errors.push(`${preparedProduct.name}: thiếu sản lượng đầu ra hoặc sai nhóm đơn vị`);
+      else if (preparedRecipeItemCost(item, ingredients, products, versions, new Set(recipe ? [recipe.id] : [])) === undefined) errors.push(`${preparedProduct.name}: chưa tính được giá vốn`);
+      continue;
+    }
     if (item.customName) {
       if (!item.customCost || item.customCost <= 0) errors.push(`${item.customName}: mục Khác chưa có giá vốn để tính`);
       continue;
@@ -397,7 +448,7 @@ export function normalizeMasterDataState(value: unknown): MasterDataState {
   const stored = value as Partial<MasterDataState> & { recipes?: Array<ProductRecipeItem & { productId?: string }> };
   const now = new Date().toISOString();
   const normalizeStatus = (status: unknown): MasterStatus => MASTER_STATUSES.includes(status as MasterStatus) ? status as MasterStatus : "draft";
-  const products = Array.isArray(stored.products) ? stored.products.map((product) => ({ ...product, variant: typeof product.variant === "string" ? product.variant : "", sellingPriceOverridden: Boolean(product.sellingPriceOverridden), status: "active" as MasterStatus })) : [];
+  const products = Array.isArray(stored.products) ? stored.products.map((product) => ({ ...product, variant: typeof product.variant === "string" ? product.variant : "", sellingPriceOverridden: Boolean(product.sellingPriceOverridden), productType: product.productType === "prepared_component" || product.productType === "packaging" ? product.productType : normalizedText(product.category || "") === "bao bi" ? "packaging" as const : "sellable" as const, status: "active" as MasterStatus })) : [];
   const ingredients = Array.isArray(stored.ingredients) ? stored.ingredients.map((ingredient) => ({ ...ingredient, conversionUnit: typeof ingredient.conversionUnit === "string" && unitDefinition(ingredient.conversionUnit) ? ingredient.conversionUnit : undefined, aliases: Array.isArray(ingredient.aliases) ? ingredient.aliases : [], standardWastePercent: Number(ingredient.standardWastePercent) || 0, stockQuantityBase: Number(ingredient.stockQuantityBase) || 0, stockLotCount: Number(ingredient.stockLotCount) || 0, status: normalizeStatus(ingredient.status) })) : [];
   let recipeVersions = Array.isArray(stored.recipeVersions) ? stored.recipeVersions : [];
   if (!recipeVersions.length && Array.isArray(stored.recipes)) {
@@ -414,7 +465,7 @@ export function normalizeMasterDataState(value: unknown): MasterDataState {
   for (const version of [...recipeVersions].sort((left, right) => right.version - left.version)) {
     if (!latestRecipeIdByProduct.has(version.productId) && version.status !== "archived") latestRecipeIdByProduct.set(version.productId, version.id);
   }
-  recipeVersions = recipeVersions.map((version) => ({ ...version, status: latestRecipeIdByProduct.get(version.productId) === version.id ? "active" as const : "archived" as const }));
+  recipeVersions = recipeVersions.map((version) => ({ ...version, outputQuantity: Number(version.outputQuantity) || undefined, outputUnit: typeof version.outputUnit === "string" ? version.outputUnit : undefined, status: latestRecipeIdByProduct.get(version.productId) === version.id ? "active" as const : "archived" as const }));
   return {
     version: 5,
     stores: Array.isArray(stored.stores) && stored.stores.length ? stored.stores : [DEFAULT_STORE],

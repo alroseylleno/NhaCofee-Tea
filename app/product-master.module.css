@@ -318,6 +318,15 @@
 .formulaSubgroupBody { padding: 0 12px 12px; }
 .inlineMoneyField { display: grid; gap: 6px; color: var(--muted); font: 800 8px Arial, sans-serif; }
 .inlineMoneyField input { width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: #fffdf8; font: 700 12px Arial, sans-serif; }
+.productTypeFields { display: grid; gap: 9px; }
+.productTypeFields > label { display: grid; gap: 6px; color: var(--muted); font: 800 8px Arial, sans-serif; }
+.productTypeFields select, .preparedOutput input, .preparedOutput select { width: 100%; min-width: 0; padding: 9px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: #fffdf8; font: 10px Arial, sans-serif; }
+.preparedOutput { display: grid; gap: 7px; margin-top: 11px; padding: 10px; border: 1px solid #cbdccf; border-radius: 10px; background: #f2f7f1; }
+.preparedOutput > b { color: #315d48; font: 800 9px Arial, sans-serif; }
+.preparedOutput > small { color: #506a58; font: 8px/1.4 Arial, sans-serif; }
+.preparedOutput > div { display: grid; grid-template-columns: minmax(0, 1fr) 100px; gap: 7px; }
+.preparedOutput label { display: grid; gap: 5px; color: var(--muted); font: 800 8px Arial, sans-serif; }
+.preparedOutput > strong { color: #315d48; font: 800 11px Georgia, serif; }
 .recipeSubsection { padding: 12px; border: 1px solid var(--line); border-radius: 13px; background: #fffdfa; }
 .recipeSubsectionHeading { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; margin-bottom: 11px; }
 .recipeSubsectionHeading span, .recipeSubsectionHeading b { display: block; }
@@ -342,6 +351,11 @@
 .packagingTemplate label { display: grid; gap: 5px; color: #315d48; font: 800 8px Arial, sans-serif; }
 .packagingTemplate select { min-width: 0; width: 100%; padding: 9px 7px; border: 1px solid #b9cfbe; border-radius: 8px; color: var(--ink); background: #fff; font: 10px Arial, sans-serif; }
 .packagingTemplate small { color: #506a58; font: 8px/1.4 Arial, sans-serif; }
+.preparedForm { border-color: #c9d7c4; background: #f7faf5; }
+.preparedForm .recipeSelectors small { color: #506a58; font: 8px/1.4 Arial, sans-serif; }
+.preparedBreakdown { margin: -2px 8px 7px; padding: 7px 9px; border: 1px dashed #cbdccf; border-radius: 8px; color: #506a58; background: #f8fbf6; font: 8px Arial, sans-serif; }
+.preparedBreakdown summary { cursor: pointer; color: #315d48; font-weight: 800; }
+.preparedBreakdown span { display: block; margin-top: 5px; }
 .recipeItemBlock { display: grid; gap: 5px; }
 .recipeRow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
 .recipeRow.recipeOut { border-color: #e5bbae; background: #fff8f5; }
@@ -360,6 +374,14 @@
 .inlineReplacement > button { padding: 9px; border: 0; border-radius: 8px; color: #fff; background: var(--red); font: 800 9px Arial, sans-serif; }
 .inlineReplacement p { margin: 0; color: var(--red); font: 9px/1.45 Arial, sans-serif; }
 .recipeForm { display: grid; gap: 9px; margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 11px; background: #fff; }
+.addRecipeDetails { margin-top: 10px; border: 1px solid var(--line); border-radius: 10px; background: #fffdfa; }
+.addRecipeDetails > summary { display: flex; justify-content: space-between; align-items: center; padding: 10px 11px; cursor: pointer; color: var(--pine); font: 800 9px Arial, sans-serif; }
+.addRecipeDetails > summary::-webkit-details-marker { display: none; }
+.addRecipeDetails > summary i { display: grid; width: 18px; height: 18px; place-items: center; border-radius: 50%; color: #fff; background: var(--pine); font-style: normal; }
+.addRecipeDetails > summary i::before { content: "+"; font: 800 14px/1 Arial, sans-serif; }
+.addRecipeDetails[open] > summary { border-bottom: 1px solid var(--line); background: #f1f6ef; }
+.addRecipeDetails[open] > summary i::before { content: "−"; }
+.addRecipeDetails > .recipeForm { margin: 0; border: 0; border-radius: 0 0 10px 10px; }
 .recipeForm label { display: grid; gap: 5px; color: var(--muted); font: 800 8px Arial, sans-serif; }
 .recipeForm label small { color: #7d7564; font: 8px/1.35 Arial, sans-serif; }
 .recipePickerField { display: grid; gap: 5px; color: var(--muted); font: 800 8px Arial, sans-serif; }
