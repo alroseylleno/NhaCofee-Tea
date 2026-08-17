@@ -52,6 +52,16 @@ const MASTER_UAT_DELETED_SKUS_KEY = "nha-ops-master-data-uat-deleted-skus-v1";
 const MASTER_LEGACY_UAT_STORAGE_KEYS = ["nha-ops-master-data-uat-v4", "nha-ops-master-data-uat-v3", "nha-ops-master-data-uat-v2", "nha-ops-master-data-uat-v1"];
 const FINANCE_UAT_STORAGE_KEY = "nha-ops-finance-uat-v2";
 
+function cloudErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object") {
+    const detail = error as { message?: unknown; details?: unknown; hint?: unknown; code?: unknown };
+    const parts = [detail.message, detail.details, detail.hint].filter((value): value is string => typeof value === "string" && Boolean(value));
+    if (parts.length) return `${fallback}: ${parts.join(" · ")}${typeof detail.code === "string" ? ` [${detail.code}]` : ""}`;
+  }
+  return fallback;
+}
+
 function money(value: number, preserveSmallPackagingFraction = false) {
   // Only the individual packaging line needs fractional VND visibility.
   const hasSmallPackagingFraction = preserveSmallPackagingFraction && Math.abs(value) > 0 && Math.abs(value) < 1 && Math.abs(value - Math.round(value)) > 0.000001;
@@ -235,7 +245,7 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
         setFinanceSnapshot({ products: cloud.products, imports: cloud.imports });
         setLoaded(true);
       }).catch((error: unknown) => {
-        if (!cancelled) { window.alert(error instanceof Error ? error.message : "Không thể tải Sản phẩm từ Supabase."); setLoaded(true); }
+        if (!cancelled) { window.alert(cloudErrorMessage(error, "Không thể tải Sản phẩm từ Supabase.")); setLoaded(true); }
       });
       return () => { cancelled = true; };
     }
@@ -426,7 +436,7 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
       loadCloudMasterData(inventoryLots).then((cloud) => {
         setState(cloud.state);
         setFinanceSnapshot({ products: cloud.products, imports: cloud.imports });
-      }).catch((error: unknown) => window.alert(error instanceof Error ? error.message : "Không thể đồng bộ Product Master.")).finally(() => setLoaded(true));
+      }).catch((error: unknown) => window.alert(cloudErrorMessage(error, "Không thể đồng bộ Product Master."))).finally(() => setLoaded(true));
       return;
     }
     setFinanceSnapshot(readFinanceLocalState());

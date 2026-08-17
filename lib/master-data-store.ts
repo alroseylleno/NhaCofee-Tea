@@ -35,9 +35,15 @@ function toRecipeItem(row: Record<string, unknown>): ProductRecipeItem {
 function financeSource(row: FinanceProductRecord): ImportedProductSource { return { sku: row.sku, name: row.name, category: row.category, variant: row.variant, unit: row.unit, sellingPrice: row.sellingPrice, quantity: row.quantity, totalAmount: row.totalAmount }; }
 
 async function loadFinanceSource() {
-  const finance = await loadFinanceImports();
-  const importMeta = finance.imports.filter((entry) => entry.dataType === "products").map((entry) => ({ ...entry, dataType: "products" as const }));
-  return { products: finance.products.map(financeSource), imports: importMeta };
+  try {
+    const finance = await loadFinanceImports();
+    const importMeta = finance.imports.filter((entry) => entry.dataType === "products").map((entry) => ({ ...entry, dataType: "products" as const }));
+    return { products: finance.products.map(financeSource), imports: importMeta };
+  } catch (error) {
+    // Finance data enriches the catalog but must never block manual recipes.
+    console.warn("Product Master loaded without Finance source data", error);
+    return { products: [], imports: [] };
+  }
 }
 
 export async function loadCloudMasterData(inventoryLots: InventorySourceLot[]): Promise<CloudLoad> {
@@ -61,7 +67,7 @@ export async function loadCloudMasterData(inventoryLots: InventorySourceLot[]): 
     if (result.error) throw result.error;
   }
   const { error: reconcileError } = await client.rpc("reconcile_product_master_from_finance", { p_store_id: storeId });
-  if (reconcileError) throw reconcileError;
+  if (reconcileError) console.warn("Product Master catalog reconciliation skipped", reconcileError);
   const [freshIngredients, freshProducts, versionsResult, eventsResult] = await Promise.all([
     client.from("ingredient_master").select("*").eq("store_id", storeId),
     client.from("product_master").select("*").eq("store_id", storeId),
