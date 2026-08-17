@@ -71,7 +71,9 @@ export async function loadCloudMasterData(inventoryLots: InventorySourceLot[]): 
   const [freshIngredients, freshProducts, versionsResult, eventsResult] = await Promise.all([
     client.from("ingredient_master").select("*").eq("store_id", storeId),
     client.from("product_master").select("*").eq("store_id", storeId),
-    client.from("product_recipe_versions").select("*, product_recipe_items(*)"),
+    // A prepared component also references a recipe version. Specify the
+    // owning recipe-version relationship so PostgREST does not see an ambiguity.
+    client.from("product_recipe_versions").select("*, product_recipe_items!product_recipe_items_recipe_version_id_fkey(*)"),
     client.from("product_audit_events").select("*").order("created_at", { ascending: false }).limit(250),
   ]);
   if (freshIngredients.error || freshProducts.error || versionsResult.error || eventsResult.error) throw freshIngredients.error || freshProducts.error || versionsResult.error || eventsResult.error;
