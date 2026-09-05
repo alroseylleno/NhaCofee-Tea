@@ -224,6 +224,14 @@ function ingredientCode(index: number) {
   return `NVL-${String(index + 1).padStart(4, "0")}`;
 }
 
+// Reads the running number back out of a code so a new one can be allocated
+// above every code already in use. Codes that do not follow the NVL-0000 shape
+// score 0 but still block their exact string from being handed out again.
+function ingredientCodeSequence(code: string) {
+  const match = /^NVL-(\d+)$/.exec(code.trim());
+  return match ? Number(match[1]) : 0;
+}
+
 function specificationBase(specification: string, purchaseUnit: string, conversion?: InventorySourceLot["conversion"]) {
   if (conversion?.amount && unitDefinition(conversion.unit)) {
     const definition = unitDefinition(conversion.unit)!;
@@ -262,6 +270,9 @@ export function ingredientDraftsFromInventory(lots: InventorySourceLot[], storeI
     return {
       id: `ingredient-${slug(preferredLot.name) || index + 1}-${index + 1}`,
       storeId,
+      // Placeholder only. mergeInventoryDrafts either keeps the code the saved
+      // row already has, or allocates a fresh non-colliding one; this value
+      // never reaches Supabase.
       code: ingredientCode(index),
       name: preferredLot.name,
       aliases: [],
@@ -482,6 +493,24 @@ export function mergeInventoryDrafts(current: IngredientMaster[], lots: Inventor
   const incoming = ingredientDraftsFromInventory(lots);
   const currentByKey = new Map(current.map((ingredient) => [ingredient.sourceKey, ingredient]));
   const incomingKeys = new Set(incoming.map((ingredient) => ingredient.sourceKey));
+  // A new code must never be derived from array position. Deleting a master row
+  // shortens the array, so a positional code lands back on a number an older row
+  // still owns and the insert dies on the (store_id, code) unique index - which
+  // the client upsert cannot absorb, because it conflicts on
+  // (store_id, source_key). Allocate above the highest code in use instead and
+  // skip anything already taken, including codes handed out earlier in this pass.
+  const usedCodes = new Set(current.map((ingredient) => ingredient.code).filter(Boolean));
+  let lastSequence = current.reduce((highest, ingredient) => Math.max(highest, ingredientCodeSequence(ingredient.code)), 0);
+  const allocateCode = () => {
+    let candidate = ingredientCode(lastSequence);
+    while (usedCodes.has(candidate)) {
+      lastSequence += 1;
+      candidate = ingredientCode(lastSequence);
+    }
+    usedCodes.add(candidate);
+    lastSequence += 1;
+    return candidate;
+  };
   // Keep referenced master rows for recipe history, but remove stale lots from live choices.
   const merged = current.map((ingredient) => incomingKeys.has(ingredient.sourceKey) ? ingredient : {
     ...ingredient,
@@ -495,7 +524,7 @@ export function mergeInventoryDrafts(current: IngredientMaster[], lots: Inventor
   for (const draft of incoming) {
     const existing = currentByKey.get(draft.sourceKey);
     if (!existing) {
-      merged.push({ ...draft, code: ingredientCode(merged.length) });
+      merged.push({ ...draft, code: allocateCode() });
       continue;
     }
     const index = merged.findIndex((ingredient) => ingredient.id === existing.id);
