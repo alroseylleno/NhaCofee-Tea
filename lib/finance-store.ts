@@ -1,6 +1,6 @@
 import { supabase } from "@/lib/supabase";
 
-export type FinanceImportType = "revenue" | "products" | "service" | "orders";
+export type FinanceImportType = "revenue" | "products" | "service" | "orders" | "prices";
 
 export type FinanceImportMeta = {
   dataType: FinanceImportType;
@@ -78,6 +78,15 @@ export type FinanceServiceRecord = {
   revenue: number;
 };
 
+/// One line of an order, from SAPO's "Doanh thu theo danh sách mặt hàng" export.
+/// `amount` is the line total already, not a unit price.
+export type FinanceOrderItem = { name: string; quantity: number; amount: number; option?: string; category?: string };
+
+/// Counter (in-store) and per-channel prices for one menu item, from SAPO's
+/// "Danh mục mặt hàng" export. This is what turns "giá quầy" from a guess into
+/// a lookup.
+export type FinanceCounterPrice = { name: string; storePrice: number; grabPrice?: number; shopeePrice?: number; greenPrice?: number };
+
 export type FinancePlatformOrderRecord = {
   id: string;
   orderCode: string;
@@ -98,6 +107,42 @@ export type FinancePlatformOrderRecord = {
   status?: string;
   sourceFileName?: string;
   importedAt?: string;
+  /// Present only when the invoice export included item detail.
+  items?: FinanceOrderItem[];
+};
+
+// One line of the discount stack on a sàn order. SAPO only reports a single
+// lump "Tổng giảm giá", so the layers behind it (sàn-funded promo, merchant
+// voucher, ads-driven discount) are captured here during đối soát.
+export type FinanceReconciliationDiscount = { label: string; amount: number };
+
+// Per-order settlement detail lifted from Grab's daily PDF report. Amounts are
+// positive magnitudes; payout is what Grab actually pays for the order before
+// the day-level marketing charge.
+export type FinanceGrabSettlement = {
+  reportDate: string;
+  fileName?: string;
+  deliveryTime?: string;
+  /// Grab's own short order code (GF-059). SAPO's export carries no Grab code at
+  /// all, so this is the only way to trace a row back to the Grab merchant app.
+  grabOrderCode?: string;
+  orderValue: number;
+  merchantPromo: number;
+  grabCommission: number;
+  vatTax: number;
+  incomeTax: number;
+  shippingSupport: number;
+  payout: number;
+  /// Day marketing spend divided evenly across that day's orders.
+  marketingAllocated: number;
+  /// That allocation split by campaign, so an order can name the ads that ate
+  /// into it. Grab bills advertising per day, never per order, so these are
+  /// shares of the day's campaign lines — not amounts Grab attributed.
+  marketingCampaigns?: { label: string; amount: number }[];
+  /// "exact" when the payment totals agreed, "ship-adjusted" when SAPO had folded
+  /// shipping support into its discount, "amount-only" when just the pre-discount
+  /// value lined up — the last one is a weaker claim worth eyeballing.
+  matchQuality?: "exact" | "ship-adjusted" | "amount-only";
 };
 
 export type FinanceGrabReconciliationRecord = {
@@ -107,8 +152,61 @@ export type FinanceGrabReconciliationRecord = {
   orderDate: string;
   reportedAmount: number;
   receivedAmount: number;
+  discounts: FinanceReconciliationDiscount[];
+  settlement?: FinanceGrabSettlement;
+  /// Counter price of the same basket for the "so với giá quầy" comparison.
+  /// Defaulted from the Grab price × 0,7278 rule; editable.
+  counterPrice?: number;
   note?: string;
 };
+
+export function normalizeGrabSettlement(value: unknown): FinanceGrabSettlement | undefined {
+  const raw = typeof value === "string" ? safeJsonValue(value) : value;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  const reportDate = String(record.reportDate ?? "").trim();
+  if (!reportDate) return undefined;
+  return {
+    reportDate,
+    fileName: record.fileName ? String(record.fileName) : undefined,
+    deliveryTime: record.deliveryTime ? String(record.deliveryTime) : undefined,
+    grabOrderCode: record.grabOrderCode ? String(record.grabOrderCode) : undefined,
+    orderValue: numberValue(record.orderValue),
+    merchantPromo: numberValue(record.merchantPromo),
+    grabCommission: numberValue(record.grabCommission),
+    vatTax: numberValue(record.vatTax),
+    incomeTax: numberValue(record.incomeTax),
+    shippingSupport: numberValue(record.shippingSupport),
+    payout: numberValue(record.payout),
+    marketingAllocated: numberValue(record.marketingAllocated),
+    matchQuality: record.matchQuality === "ship-adjusted" || record.matchQuality === "amount-only" || record.matchQuality === "exact" ? record.matchQuality : undefined,
+    marketingCampaigns: Array.isArray(record.marketingCampaigns)
+      ? (record.marketingCampaigns as unknown[]).map((entry) => {
+          const line = entry as { label?: unknown; amount?: unknown };
+          return { label: String(line?.label ?? "").trim(), amount: numberValue(line?.amount) };
+        }).filter((entry) => entry.label.length > 0)
+      : undefined,
+  };
+}
+
+function safeJsonValue(value: string) {
+  try { return JSON.parse(value); } catch { return undefined; }
+}
+
+export function normalizeReconciliationDiscounts(value: unknown): FinanceReconciliationDiscount[] {
+  const raw = typeof value === "string" ? safeJsonArray(value) : value;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entry) => {
+      const record = entry as { label?: unknown; amount?: unknown };
+      return { label: String(record?.label ?? "").trim(), amount: numberValue(record?.amount) };
+    })
+    .filter((entry) => entry.label.length > 0 || entry.amount !== 0);
+}
+
+function safeJsonArray(value: string) {
+  try { return JSON.parse(value); } catch { return []; }
+}
 
 export type FinanceExpenseRecord = {
   id: string;
@@ -178,6 +276,9 @@ function grabReconciliationFromRow(row: Record<string, unknown>): FinanceGrabRec
     orderDate: String(row.order_date),
     reportedAmount: numberValue(row.reported_amount),
     receivedAmount: numberValue(row.received_amount),
+    discounts: normalizeReconciliationDiscounts(row.discounts),
+    settlement: normalizeGrabSettlement(row.settlement),
+    counterPrice: row.counter_price == null ? undefined : numberValue(row.counter_price),
     note: row.note ? String(row.note) : undefined,
   };
 }
@@ -360,6 +461,9 @@ function grabReconciliationRows(records: FinanceGrabReconciliationRecord[]) {
     order_date: record.orderDate,
     reported_amount: record.reportedAmount,
     received_amount: record.receivedAmount,
+    discounts: record.discounts || [],
+    settlement: record.settlement || null,
+    counter_price: record.counterPrice ?? null,
     note: record.note || null,
     updated_at: new Date().toISOString(),
   }));

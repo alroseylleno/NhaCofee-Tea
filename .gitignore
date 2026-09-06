@@ -3,3 +3,5 @@ node_modules/
 .next-dev/
 .env*
 .DS_Store
+.grab-state/
+tsconfig.tsbuildinfo

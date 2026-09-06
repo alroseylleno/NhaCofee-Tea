@@ -1,13 +1,18 @@
 "use client";
 
 import Image from "next/image";
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   deleteFinanceGrabReconciliation,
   loadFinanceImports,
   replaceFinanceImportBundle,
   upsertFinanceExpenses,
+  normalizeGrabSettlement,
+  normalizeReconciliationDiscounts,
   upsertFinanceGrabReconciliations,
+  type FinanceGrabSettlement,
+  type FinanceCounterPrice,
+  type FinanceOrderItem,
   type FinanceExpenseRecord,
   type FinanceGrabReconciliationRecord,
   type FinanceImportMeta,
@@ -16,6 +21,7 @@ import {
   type FinanceRevenueRecord,
   type FinanceServiceRecord,
 } from "@/lib/finance-store";
+import { extractGrabPdfText, parseGrabReportText, type ParsedGrabReport } from "@/lib/grab-report";
 import { isSupabaseConfigured } from "@/lib/supabase";
 import styles from "./finance.module.css";
 
@@ -68,6 +74,8 @@ type FinanceState = {
   revenueTargetAmount: number;
   closedPeriods: string[];
   grabReconciliations: GrabReconciliationRecord[];
+  grabDailyReports: GrabDailyReportRecord[];
+  counterPrices: FinanceCounterPrice[];
 };
 
 type GrabReconciliationRecord = FinanceGrabReconciliationRecord;
@@ -91,6 +99,39 @@ type ExpenseForm = {
   inServiceOn: string;
 };
 
+/// Giá Grab = giá quầy / 0,7278 (fee rule chốt 12/07/2026), so the counter
+/// price of a basket is estimated back from the Grab list price. Editable.
+const COUNTER_PRICE_RATE = 0.7278;
+
+/// Bumped by hand on each UI change to this panel. If the tag on screen does not
+/// match the one the terminal reports, the browser is running a cached bundle
+/// and no amount of code reading will explain the behaviour.
+const RECONCILIATION_BUILD = "R19";
+
+/// One imported Grab daily PDF: match outcome plus the day-level marketing
+/// spend that has no per-order breakdown on Grab's side.
+/// How confidently a PDF row was tied to a SAPO order. "amount-only" means only
+/// the pre-discount value lined up, so the pairing deserves a second look.
+type GrabMatchQuality = "exact" | "ship-adjusted" | "amount-only";
+
+type GrabDailyReportRecord = {
+  id: string;
+  reportDate: string;
+  fileName: string;
+  importedAt: string;
+  orderCount: number;
+  matchedCount: number;
+  totalOrderValue: number;
+  totalExpectedSapo: number;
+  totalPayout: number;
+  totalMarketing: number;
+  marketingLines: { description: string; fee: number; tax: number; total: number }[];
+  unmatched: { code: string; time: string; orderValue: number; payout: number; expectedSapo: number }[];
+};
+
+// Discount amounts stay as raw input strings while the sheet is open so a
+// half-typed number never collapses to 0 under the user's cursor.
+type ReconciliationDiscountForm = { label: string; amount: string };
 type GrabReconciliationForm = {
   id?: string;
   platformOrderId: string;
@@ -98,19 +139,25 @@ type GrabReconciliationForm = {
   orderDate: string;
   reportedAmount: string;
   receivedAmount: string;
+  discounts: ReconciliationDiscountForm[];
+  counterPrice: string;
   note: string;
 };
 
 type PeriodBounds = { start: string; end: string; label: string; key: string };
 type PnlDetail = { label: string; amount: number; date?: string };
 type PnlGroup = { label: string; details: PnlDetail[]; value: number };
-type PnlRow = { label: string; value: number; tone: "income" | "deduction" | "cost" | "total" | "grand"; details: PnlDetail[]; groups?: PnlGroup[]; itemCount?: number };
+type PnlRow = { label: string; value: number; tone: "income" | "deduction" | "cost" | "total" | "grand"; details: PnlDetail[]; groups?: PnlGroup[]; itemCount?: number;
+  /// Statement line code ("A", "B"…) and, on computed lines, the formula that
+  /// produced the number ("C = A − B") — so the report reads like a real BCTC.
+  code?: string; formula?: string };
 type ImportMetaInput = Omit<FinanceImportMeta, "dataType" | "importedAt">;
 type ParsedRevenueImport = { type: "revenue"; meta: ImportMetaInput; importMeta: FinanceImportMeta; records: FinanceRevenueRecord[]; latestDate: string };
 type ParsedProductImport = { type: "products"; meta: ImportMetaInput; importMeta: FinanceImportMeta; records: FinanceProductRecord[] };
 type ParsedServiceImport = { type: "service"; meta: ImportMetaInput; importMeta: FinanceImportMeta; records: FinanceServiceRecord[] };
 type ParsedOrderImport = { type: "orders"; meta: ImportMetaInput; importMeta: FinanceImportMeta; records: PlatformOrderRecord[]; latestDate: string; periodStart: string; periodEnd: string };
-type ParsedFinanceImport = ParsedRevenueImport | ParsedProductImport | ParsedServiceImport | ParsedOrderImport;
+type ParsedPriceImport = { type: "prices"; meta: ImportMetaInput; importMeta: FinanceImportMeta; records: FinanceCounterPrice[] };
+type ParsedFinanceImport = ParsedRevenueImport | ParsedProductImport | ParsedServiceImport | ParsedOrderImport | ParsedPriceImport;
 
 const FINANCE_STORAGE_KEY = "nha-ops-finance-v2";
 const FINANCE_PROD_LEGACY_STORAGE_KEY = "nha-ops-finance-v1";
@@ -163,6 +210,38 @@ function normalizedHeader(value: unknown) { return String(value ?? "").trim().to
 function platformSignal(value: unknown) { return normalizedHeader(value).replace(/[._-]+/g, " "); }
 function isKnownPlatformSignal(value: unknown) {
   return /grab\s*food|grabfood|shopee\s*food|shopeefood|green\s*food|greenfood|(^|\s)xanh(\s|$)|website|be\s*food|gofood/.test(platformSignal(value));
+}
+// Sàn = marketplaces that collect the customer's money and settle it back later,
+// minus commission. They are the only channels that need đối soát. Website is an
+// owned channel: no platform fee, no settlement, cash lands directly. Keeping it
+// out of the sàn aggregates stops its large self-delivered baskets from inflating
+// sàn AOV and take-rate.
+function isMarketplaceSignal(value: unknown) {
+  return /grab\s*food|grabfood|shopee\s*food|shopeefood|green\s*food|greenfood|(^|\s)xanh(\s|$)|be\s*food|gofood/.test(platformSignal(value));
+}
+function isMarketplacePlatformOrder(order: PlatformOrderRecord) {
+  return isMarketplaceSignal(`${order.channelName} ${order.paymentMethod || ""} ${order.serviceType || ""} ${order.deliveryPartner || ""}`);
+}
+// SAPO spells the same sàn differently across exports ("Grabfood", "Grab Food",
+// "Green Food"), so collapse every alias onto one key before reporting fees.
+const MARKETPLACE_LABELS: Record<string, string> = { grab: "GrabFood", shopee: "ShopeeFood", greensm: "GreenSM / Xanh", befood: "beFood", gofood: "GoFood", other: "Sàn khác" };
+// The three sàn Long tracks always get a row, even with no order in the period,
+// so a missing sàn reads as "no orders" instead of silently vanishing.
+const TRACKED_MARKETPLACES = ["grab", "shopee", "greensm"];
+/// Grab appends the billing date to every campaign line ("Automatic Keywords -
+/// 2026-08-26"), so strip it to aggregate one campaign across days.
+function campaignLabel(description: string) {
+  return description.replace(/\s*-\s*\d{4}-\d{2}-\d{2}\s*$/, "").trim() || "Khác";
+}
+
+function marketplaceKey(value: unknown) {
+  const signal = platformSignal(value);
+  if (/grab/.test(signal)) return "grab";
+  if (/shopee/.test(signal)) return "shopee";
+  if (/green|xanh/.test(signal)) return "greensm";
+  if (/be\s*food/.test(signal)) return "befood";
+  if (/gofood/.test(signal)) return "gofood";
+  return "other";
 }
 function numericCell(value: unknown) { if (typeof value === "number") return Number.isFinite(value) ? value : 0; const parsed = Number(String(value ?? "").replace(/,/g, "").replace(/[^\d.-]/g, "")); return Number.isFinite(parsed) ? parsed : 0; }
 function excelDateCell(value: unknown) {
@@ -268,6 +347,8 @@ function financeTemplateType(rows: unknown[][]) {
     if (headers.includes("ngay") && headers.includes("sl don hang") && headers.includes("doanh thu thuc")) return "revenue" as const;
     if (headers.includes("ten danh muc") && headers.includes("ma mat hang") && headers.includes("ten mat hang") && (headers.includes("tong tien") || headers.includes("tien hang"))) return "products" as const;
     if ((headers.includes("loai don hang") || headers.includes("ten") || headers.includes("phuong thuc thanh toan")) && headers.includes("sl don hang") && headers.includes("so don huy") && (headers.includes("tien thu duoc") || headers.includes("doanh thu gom thue") || headers.includes("doanh thu"))) return "service" as const;
+    // The price book: one row per menu item with counter and per-channel prices.
+    if (headers.includes("gia ban tai nha hang") && (headers.includes("gia ban grabfood") || headers.includes("gia ban shopeefood"))) return "prices" as const;
     const hasOrderCode = firstColumn(headers, ["ma don hang", "ma don", "ma hoa don", "so hoa don", "order code", "order id"]) >= 0;
     const hasDate = firstColumn(headers, ["ngay", "ngay tao", "ngay dat hang", "thoi gian tao", "thoi gian dat hang", "thoi gian tao don"]) >= 0;
     const hasAmount = firstColumn(headers, ["doanh thu thuc", "tien thu duoc", "tong tien", "thanh tien", "khach phai tra", "gia tri don hang", "tong tien thanh toan (1 + 2 + 3 - 4 + 5)"]) >= 0;
@@ -432,6 +513,30 @@ function parseServiceRows(file: File, rows: unknown[][]): ParsedServiceImport {
   return { type: "service", meta, importMeta: { dataType: "service", ...meta, importedAt }, records };
 }
 
+function parseCounterPriceRows(file: File, rows: unknown[][]): ParsedPriceImport {
+  const headerRowIndex = rows.findIndex((row) => row.map(normalizedHeader).includes("gia ban tai nha hang"));
+  if (headerRowIndex < 0) throw new Error(`${file.name}: không tìm thấy bảng giá mặt hàng.`);
+  const headers = rows[headerRowIndex].map(normalizedHeader);
+  const records: FinanceCounterPrice[] = [];
+  for (const row of rows.slice(headerRowIndex + 1)) {
+    if (normalizedHeader(row[0]) === "tong") break;
+    const name = firstText(row, headers, ["ten mat hang (*)", "ten mat hang", "ten mat hang, combo"]);
+    const storePrice = firstNumber(row, headers, ["gia ban tai nha hang"]);
+    if (!name || storePrice <= 0) continue;
+    records.push({
+      name,
+      storePrice,
+      grabPrice: firstNumber(row, headers, ["gia ban grabfood"]) || undefined,
+      shopeePrice: firstNumber(row, headers, ["gia ban shopeefood"]) || undefined,
+      greenPrice: firstNumber(row, headers, ["gia ban green food"]) || undefined,
+    });
+  }
+  if (!records.length) throw new Error(`${file.name}: không đọc được dòng giá nào.`);
+  const importedAt = new Date().toISOString();
+  const meta = { fileName: file.name, periodStart: todayISO(), periodEnd: todayISO(), rowCount: records.length };
+  return { type: "prices", meta, importMeta: { dataType: "prices", ...meta, importedAt }, records };
+}
+
 function parsePlatformOrderRows(file: File, rows: unknown[][]): ParsedOrderImport {
   const headerRowIndex = rows.findIndex((row) => {
     const headers = row.map(normalizedHeader);
@@ -441,12 +546,41 @@ function parsePlatformOrderRows(file: File, rows: unknown[][]): ParsedOrderImpor
   });
   if (headerRowIndex < 0) throw new Error(`${file.name}: không tìm thấy bảng chi tiết đơn hàng.`);
   const headers = rows[headerRowIndex].map(normalizedHeader);
+  // SAPO's item-level export repeats one row per line and leaves the order
+  // columns blank on continuation rows (merged cells), so order fields must be
+  // carried forward and item lines appended to the order that opened them.
+  const itemNameColumn = firstColumn(headers, ["ten mat hang, combo", "ten mat hang"]);
+  const itemQtyColumn = firstColumn(headers, ["so luong"]);
+  const itemAmountColumn = firstColumn(headers, ["tien hang"]);
+  const itemOptionColumn = firstColumn(headers, ["ten lua chon"]);
+  const itemCategoryColumn = firstColumn(headers, ["danh muc"]);
+  const hasItemDetail = itemNameColumn >= 0 && itemQtyColumn >= 0;
   const periodText = rows.slice(0, headerRowIndex).flat().map((value) => String(value ?? "").trim()).find((value) => value.startsWith("Từ ngày"));
   const importedAt = new Date().toISOString();
   const records: PlatformOrderRecord[] = [];
   for (const [index, row] of rows.slice(headerRowIndex + 1).entries()) {
     if (normalizedHeader(row[0]) === "tong") break;
     const orderCode = firstText(row, headers, ["ma don hang", "ma don", "ma hoa don", "so hoa don", "order code", "order id"]);
+    // SAPO repeats the invoice code on every item row of the same order, and
+    // leaves it blank only in some exports. Either way, a row that belongs to the
+    // order already open must extend it instead of opening a duplicate order —
+    // otherwise a 5-item order becomes 5 orders and every total is inflated.
+    const previous = records[records.length - 1];
+    const continuesPrevious = hasItemDetail && previous && (!orderCode || orderCode === previous.orderCode);
+    if (continuesPrevious) {
+      const itemName = String(row[itemNameColumn] ?? "").trim();
+      const target = previous;
+      if (itemName && target) {
+        (target.items ||= []).push({
+          name: itemName,
+          quantity: numericCell(row[itemQtyColumn]) || 1,
+          amount: itemAmountColumn >= 0 ? numericCell(row[itemAmountColumn]) : 0,
+          option: itemOptionColumn >= 0 ? String(row[itemOptionColumn] ?? "").trim() || undefined : undefined,
+          category: itemCategoryColumn >= 0 ? String(row[itemCategoryColumn] ?? "").trim() || undefined : undefined,
+        });
+      }
+      continue;
+    }
     const orderCreatedAt = excelDateTimeCell(row[firstColumn(headers, ["thoi gian tao don", "thoi gian tao", "ngay tao", "ngay dat hang", "thoi gian dat hang", "ngay"])]);
     const orderDate = orderCreatedAt?.slice(0, 10) || firstDate(row, headers, ["ngay", "ngay tao", "ngay dat hang", "thoi gian tao", "thoi gian dat hang", "thoi gian tao don"]);
     if (!orderCode || !orderDate) continue;
@@ -483,6 +617,13 @@ function parsePlatformOrderRows(file: File, rows: unknown[][]): ParsedOrderImpor
       status: status || undefined,
       sourceFileName: file.name,
       importedAt,
+      items: hasItemDetail && String(row[itemNameColumn] ?? "").trim() ? [{
+        name: String(row[itemNameColumn]).trim(),
+        quantity: numericCell(row[itemQtyColumn]) || 1,
+        amount: itemAmountColumn >= 0 ? numericCell(row[itemAmountColumn]) : 0,
+        option: itemOptionColumn >= 0 ? String(row[itemOptionColumn] ?? "").trim() || undefined : undefined,
+        category: itemCategoryColumn >= 0 ? String(row[itemCategoryColumn] ?? "").trim() || undefined : undefined,
+      }] : undefined,
     });
   }
   if (!records.length) throw new Error(`${file.name}: có chi tiết đơn hàng nhưng không tìm thấy đơn nền tảng hợp lệ.`);
@@ -521,11 +662,11 @@ function expenseFormDefaults(category: ExpenseCategory = "fixed"): ExpenseForm {
 }
 
 function grabReconciliationFormDefaults(): GrabReconciliationForm {
-  return { platformOrderId: "", orderCode: "", orderDate: todayISO(), reportedAmount: "", receivedAmount: "", note: "" };
+  return { platformOrderId: "", orderCode: "", orderDate: todayISO(), reportedAmount: "", receivedAmount: "", discounts: [], counterPrice: "", note: "" };
 }
 
 function emptyFinanceState(): FinanceState {
-  return { expenses: [], revenues: [], products: [], services: [], platformOrders: [], imports: [], importHistory: [], productSnapshots: [], serviceSnapshots: [], growthTargetPercent: 10, revenueTargetAmount: 0, closedPeriods: [], grabReconciliations: [] };
+  return { expenses: [], revenues: [], products: [], services: [], platformOrders: [], imports: [], importHistory: [], productSnapshots: [], serviceSnapshots: [], growthTargetPercent: 10, revenueTargetAmount: 0, closedPeriods: [], grabReconciliations: [], grabDailyReports: [], counterPrices: [] };
 }
 
 function normalizeFinanceState(value: unknown, uatMode: boolean): FinanceState {
@@ -559,6 +700,20 @@ function normalizeFinanceState(value: unknown, uatMode: boolean): FinanceState {
     status: entry.status ? String(entry.status) : undefined,
     sourceFileName: entry.sourceFileName ? String(entry.sourceFileName) : undefined,
     importedAt: entry.importedAt ? String(entry.importedAt) : undefined,
+    // Line items must survive the round-trip: dropping them here silently broke
+    // basket display and real counter prices after every reload.
+    items: Array.isArray(entry.items)
+      ? entry.items.map((item) => {
+          const line = item as Partial<FinanceOrderItem>;
+          return {
+            name: String(line?.name ?? "").trim(),
+            quantity: Math.max(0, Number(line?.quantity) || 0) || 1,
+            amount: Math.max(0, Number(line?.amount) || 0),
+            option: line?.option ? String(line.option) : undefined,
+            category: line?.category ? String(line.category) : undefined,
+          };
+        }).filter((item) => item.name.length > 0)
+      : undefined,
   })) : [];
   const imports = Array.isArray(stored.imports) ? stored.imports : [];
   const importHistory = Array.isArray(stored.importHistory) ? stored.importHistory : imports;
@@ -573,15 +728,24 @@ function normalizeFinanceState(value: unknown, uatMode: boolean): FinanceState {
     orderDate: String(entry.orderDate || legacyEntry.date || todayISO()),
     reportedAmount: Math.max(0, Number(entry.reportedAmount) || 0),
     receivedAmount: Math.max(0, Number(entry.receivedAmount) || 0),
+    // Records saved before discount layers existed rehydrate with an empty stack.
+    discounts: normalizeReconciliationDiscounts(entry.discounts),
+    settlement: normalizeGrabSettlement(entry.settlement),
+    counterPrice: Number.isFinite(Number(entry.counterPrice)) && entry.counterPrice != null ? Number(entry.counterPrice) : undefined,
     note: entry.note ? String(entry.note) : undefined,
   }}) : [];
+  const grabDailyReports = Array.isArray(stored.grabDailyReports) ? stored.grabDailyReports : [];
+  // Older builds could persist duplicated platform orders; drop them on load so
+  // a corrupted store heals itself instead of inflating every count forever.
+  const dedupedPlatformOrders = [...new Map(platformOrders.map((entry) => [entry.id, entry])).values()];
+  const counterPrices = Array.isArray(stored.counterPrices) ? stored.counterPrices : [];
   const isUatSample = (record: ExpenseRecord | FinanceRevenueRecord) => record.id.startsWith("uat-") || record.note?.includes("Dữ liệu mẫu UAT");
   return {
     expenses: uatMode ? expenses : expenses.filter((record) => !isUatSample(record)),
     revenues: uatMode ? revenues : revenues.filter((record) => !isUatSample(record)),
     products,
     services,
-    platformOrders,
+    platformOrders: dedupedPlatformOrders,
     imports,
     importHistory,
     productSnapshots,
@@ -590,6 +754,8 @@ function normalizeFinanceState(value: unknown, uatMode: boolean): FinanceState {
     revenueTargetAmount: Number.isFinite(Number(stored.revenueTargetAmount)) ? Math.max(0, Number(stored.revenueTargetAmount)) : 0,
     closedPeriods: Array.isArray(stored.closedPeriods) ? stored.closedPeriods : [],
     grabReconciliations,
+    grabDailyReports,
+    counterPrices,
   };
 }
 
@@ -660,6 +826,8 @@ function seedFinanceState(): FinanceState {
     revenueTargetAmount: 0,
     closedPeriods: [],
     grabReconciliations: [],
+    grabDailyReports: [],
+    counterPrices: [],
   };
 }
 
@@ -720,6 +888,12 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const [expenseImportNotice, setExpenseImportNotice] = useState<string | undefined>();
   const [importingFinance, setImportingFinance] = useState(false);
   const [savingGrabReconciliation, setSavingGrabReconciliation] = useState(false);
+  const [importingGrabReport, setImportingGrabReport] = useState(false);
+  const [reconciliationFilter, setReconciliationFilter] = useState<"all" | "pending" | "done">("all");
+  // The automatic folder scan runs once per session, the first time the Nền tảng
+  // tab is opened, so switching tabs does not re-read the folder on every click.
+  const autoScannedLocalReports = useRef(false);
+  const [grabReportNotice, setGrabReportNotice] = useState<string>();
   const [showGrabReconciliationModal, setShowGrabReconciliationModal] = useState(false);
   const [financeImportNotice, setFinanceImportNotice] = useState<string | undefined>();
   const [financeSyncError, setFinanceSyncError] = useState<string | undefined>();
@@ -765,7 +939,24 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     loadState();
     return () => { cancelled = true; };
   }, [storageKey, uatMode]);
-  useEffect(() => { if (loaded) window.localStorage.setItem(storageKey, JSON.stringify(state)); }, [state, loaded, storageKey]);
+  useEffect(() => {
+    if (!loaded) return;
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(state));
+    } catch (error) {
+      // A quota error thrown from inside an effect tears down the render tree,
+      // which looks like "the UI stopped responding to clicks". Surface it
+      // instead: the data is still in memory for this session.
+      console.error("Không lưu được state vào localStorage", error);
+      setFinanceSyncError("Bộ nhớ trình duyệt đã đầy — dữ liệu phiên này chưa được lưu. Xoá bớt kỳ cũ hoặc dùng Production.");
+    }
+  }, [state, loaded, storageKey]);
+  useEffect(() => {
+    if (!loaded || !uatMode || revenueSubTab !== "platform" || autoScannedLocalReports.current) return;
+    autoScannedLocalReports.current = true;
+    void scanLocalGrabReports({ silent: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, uatMode, revenueSubTab]);
 
   const bounds = useMemo(() => periodBounds(periodMode, selectedMonth, selectedQuarter, selectedYear), [periodMode, selectedMonth, selectedQuarter, selectedYear]);
   const selectableMonths = useMemo(() => {
@@ -793,6 +984,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const productsImport = state.imports.find((entry) => entry.dataType === "products");
   const serviceImport = state.imports.find((entry) => entry.dataType === "service");
   const ordersImport = state.imports.find((entry) => entry.dataType === "orders");
+  const pricesImport = state.imports.find((entry) => entry.dataType === "prices");
   const importOverlapsBounds = (entry: FinanceImportMeta | undefined) => Boolean(entry && entry.periodStart <= bounds.end && entry.periodEnd >= bounds.start);
   // Product/service imports are period aggregates; retain them whenever their period overlaps the selected view.
   const periodProducts = importOverlapsBounds(productsImport) ? state.products : [];
@@ -800,12 +992,18 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   // Revenue is stored by day, so every finance view can use the same selected period.
   const revenueDataset = periodRevenues;
   const periodPlatformOrders = useMemo(() => state.platformOrders.filter((entry) => inRange(entry.orderDate, bounds)), [state.platformOrders, bounds]);
-  const grabOrderOptions = useMemo(() => periodPlatformOrders.filter((entry) => normalizedHeader(`${entry.channelName} ${entry.paymentMethod || ""} ${entry.deliveryPartner || ""}`).includes("grab") && !/huy|cancel/.test(normalizedHeader(entry.status))).sort((a, b) => b.orderDate.localeCompare(a.orderDate) || a.orderCode.localeCompare(b.orderCode, "vi")), [periodPlatformOrders]);
+  // Sàn orders drive every platform KPI and the đối soát list; other external
+  // channels (Website) stay imported but are reported on their own.
+  const marketplaceOrders = useMemo(() => periodPlatformOrders.filter(isMarketplacePlatformOrder), [periodPlatformOrders]);
+  const otherChannelOrders = useMemo(() => periodPlatformOrders.filter((entry) => !isMarketplacePlatformOrder(entry)), [periodPlatformOrders]);
+  // Named grab* for the storage contract (finance_grab_reconciliations), but the
+  // scope is every sàn: Shopee and GreenSM settle late and need đối soát too.
+  const grabOrderOptions = useMemo(() => periodPlatformOrders.filter((entry) => isMarketplacePlatformOrder(entry) && !/huy|cancel/.test(normalizedHeader(entry.status))).sort((a, b) => b.orderDate.localeCompare(a.orderDate) || a.orderCode.localeCompare(b.orderCode, "vi")), [periodPlatformOrders]);
   const grabReconciliationRows = useMemo(() => state.grabReconciliations.filter((entry) => inRange(entry.orderDate, bounds)).sort((a, b) => b.orderDate.localeCompare(a.orderDate) || a.orderCode.localeCompare(b.orderCode, "vi")), [state.grabReconciliations, bounds]);
   const reconciledGrabOrderCodes = new Set(grabReconciliationRows.map((entry) => entry.platformOrderId || `${entry.orderDate}:${entry.orderCode.toLocaleLowerCase("vi")}`));
   const unreconciledGrabOrders = grabOrderOptions.filter((order) => !reconciledGrabOrderCodes.has(order.id) && !reconciledGrabOrderCodes.has(`${order.orderDate}:${order.orderCode.toLocaleLowerCase("vi")}`));
   const selectedGrabOrder = grabForm.platformOrderId ? state.platformOrders.find((order) => order.id === grabForm.platformOrderId) : undefined;
-  const platformOrderList = useMemo(() => [...periodPlatformOrders].sort((a, b) => b.orderDate.localeCompare(a.orderDate) || a.orderCode.localeCompare(b.orderCode, "vi")), [periodPlatformOrders]);
+  const platformOrderList = useMemo(() => [...marketplaceOrders].sort((a, b) => b.orderDate.localeCompare(a.orderDate) || a.orderCode.localeCompare(b.orderCode, "vi")), [marketplaceOrders]);
 
   function selectRevenueSubTab(nextTab: RevenueSubTab) {
     if (nextTab === "platform" && !periodPlatformOrders.length && state.platformOrders.length) {
@@ -818,7 +1016,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   }
 
   function isGrabPlatformOrder(order: PlatformOrderRecord) {
-    return /grab\s*food|grabfood/.test(platformSignal(`${order.channelName} ${order.paymentMethod || ""} ${order.deliveryPartner || ""}`));
+    return isMarketplacePlatformOrder(order);
   }
 
   function reconciliationForPlatformOrder(order: PlatformOrderRecord) {
@@ -828,7 +1026,10 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const grabReceivedTotal = grabReconciliationRows.reduce((sum, entry) => sum + entry.receivedAmount, 0);
   const grabDifference = grabReceivedTotal - grabReportedTotal;
   const grabCoverageRate = grabOrderOptions.length ? Math.min(100, grabReconciliationRows.length / grabOrderOptions.length * 100) : 0;
-  const grabUnreconciledOrders = Math.max(0, grabOrderOptions.length - grabReconciliationRows.length);
+  // Set difference, not `options.length - rows.length`: a reconciliation can
+  // exist for an order outside the current period, which made the old
+  // subtraction under-report how much work was actually left.
+  const grabUnreconciledOrders = unreconciledGrabOrders.length;
   const inventoryEvents = useMemo(() => inventorySessions.flatMap((session) => {
     const lot = inventoryLots.find((entry) => entry.id === session.sourceReceiptId);
     if (!lot) return [];
@@ -877,7 +1078,56 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const fixedCost = manualOccurrences.filter((entry) => entry.expense.category === "fixed").reduce((sum, entry) => sum + entry.amount, 0);
   const operatingCost = manualOccurrences.filter((entry) => entry.expense.category === "operating").reduce((sum, entry) => sum + entry.amount, 0);
   const salesManualCost = manualOccurrences.filter((entry) => entry.expense.category === "sales").reduce((sum, entry) => sum + entry.amount, 0);
-  const salesCost = salesManualCost + platformFees;
+  /// The single source of truth for sàn costs in the P&L. Per day, prefer the
+  /// reconciled Grab settlement (real money) and fall back to SAPO's day-level
+  /// fee column; marketing exists only on the Grab side, SAPO never sees it.
+  /// Marketing is taken at DAY level from grabDailyReports — never as the sum
+  /// of per-order marketingAllocated, whose divisor includes unmatched orders.
+  const platformCostModel = useMemo(() => {
+    const marketingByDate = new Map<string, number>();
+    for (const report of state.grabDailyReports) {
+      if (inRange(report.reportDate, bounds)) marketingByDate.set(report.reportDate, report.totalMarketing);
+    }
+    const settledByDate = new Map<string, { commission: number; tax: number; shipSupport: number }>();
+    for (const entry of state.grabReconciliations) {
+      const settlement = entry.settlement;
+      if (!settlement || !inRange(entry.orderDate, bounds)) continue;
+      const current = settledByDate.get(entry.orderDate) || { commission: 0, tax: 0, shipSupport: 0 };
+      current.commission += settlement.grabCommission;
+      current.tax += settlement.vatTax + settlement.incomeTax;
+      current.shipSupport += settlement.shippingSupport;
+      settledByDate.set(entry.orderDate, current);
+    }
+    const dates = new Set<string>([...marketingByDate.keys(), ...settledByDate.keys(), ...revenueDataset.map((entry) => entry.date)]);
+    const days = [...dates].sort().map((date) => {
+      const settled = settledByDate.get(date);
+      const marketing = marketingByDate.get(date) || 0;
+      if (settled) {
+        return { date, source: "doi-soat" as const, commission: settled.commission, tax: settled.tax, shipSupport: settled.shipSupport, marketing };
+      }
+      const sapoDay = revenueDataset.find((entry) => entry.date === date);
+      const sapoFee = sapoDay?.platformFees || 0;
+      if (sapoFee > 0 || marketing > 0) {
+        // SAPO's fee column bundles commission and withheld tax; it cannot be
+        // split, so it lands whole on the commission line, labelled an estimate.
+        return { date, source: "sapo" as const, commission: sapoFee, tax: 0, shipSupport: 0, marketing };
+      }
+      return { date, source: "none" as const, commission: 0, tax: 0, shipSupport: 0, marketing: 0 };
+    }).filter((day) => day.source !== "none");
+    const total = (key: "commission" | "tax" | "shipSupport" | "marketing") => days.reduce((sum, day) => sum + day[key], 0);
+    return {
+      days,
+      commission: total("commission"),
+      tax: total("tax"),
+      shipSupport: total("shipSupport"),
+      marketing: total("marketing"),
+      reconciledDays: days.filter((day) => day.source === "doi-soat").length,
+    };
+  }, [state.grabDailyReports, state.grabReconciliations, revenueDataset, bounds]);
+  const platformCostTotal = platformCostModel.commission + platformCostModel.tax + platformCostModel.shipSupport + platformCostModel.marketing;
+  // platformCostModel REPLACES the old flat `platformFees` here — adding both
+  // would double-count every reconciled day's commission.
+  const salesCost = salesManualCost + platformCostTotal;
   const grossProfit = netRevenue - inventoryCogs - inventoryWaste;
   const ebitda = grossProfit - fixedCost - operatingCost - salesCost;
   const operatingProfit = ebitda - depreciation;
@@ -933,22 +1183,9 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const maxCategoryRevenue = Math.max(...categoryPerformance.map((entry) => entry.revenue), 1);
   const revenueProductGap = datasetRevenue - productNetAmount;
   const offlineServiceNames = new Set(["an tai ban", "mang di"]);
-  const offlineServices = periodServices.filter((entry) => offlineServiceNames.has(normalizedHeader(entry.serviceName)));
   const deliveryServices = periodServices.filter((entry) => !offlineServiceNames.has(normalizedHeader(entry.serviceName)));
   const grabService = periodServices.find((entry) => normalizedHeader(entry.serviceName).includes("grab"));
-  const serviceOrders = periodServices.reduce((sum, entry) => sum + entry.totalOrders, 0);
-  const serviceCancelledOrders = periodServices.reduce((sum, entry) => sum + entry.cancelledOrders, 0);
-  const serviceRevenue = periodServices.reduce((sum, entry) => sum + entry.revenue, 0);
-  const offlineOrders = offlineServices.reduce((sum, entry) => sum + entry.totalOrders, 0);
-  const offlineRevenue = offlineServices.reduce((sum, entry) => sum + entry.revenue, 0);
-  const deliveryOrders = deliveryServices.reduce((sum, entry) => sum + entry.totalOrders, 0);
   const deliveryRevenue = deliveryServices.reduce((sum, entry) => sum + entry.revenue, 0);
-  const offlineOrderShare = serviceOrders ? offlineOrders / serviceOrders * 100 : 0;
-  const deliveryOrderShare = serviceOrders ? deliveryOrders / serviceOrders * 100 : 0;
-  const offlineRevenueShare = serviceRevenue ? offlineRevenue / serviceRevenue * 100 : 0;
-  const deliveryRevenueShare = serviceRevenue ? deliveryRevenue / serviceRevenue * 100 : 0;
-  const maxServiceRevenue = Math.max(...periodServices.map((entry) => entry.revenue), 1);
-  const serviceRevenueGap = serviceRevenue - datasetRevenue;
   const revenueAdjustments = [
     { label: "Tiền hủy", value: reportedCancelledAmount },
     { label: "Tiền trả lại", value: reportedReturnedAmount },
@@ -966,18 +1203,24 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     { label: "Thuế sàn thu hộ", value: reportedPlatformTax },
     { label: "Phí dịch vụ", value: reportedServiceFees },
     { label: "Phí giao hàng", value: reportedDeliveryFees },
-  ].filter((entry) => entry.value > 0);
+  ].filter((entry) => entry.value > 0).map((entry) => ({
+    ...entry,
+    // Two denominators, because they answer different questions: how much of the
+    // fee bill is this line, and how much of revenue it eats.
+    shareOfFees: reportedPartnerFees ? entry.value / reportedPartnerFees * 100 : 0,
+    shareOfRevenue: platformTakeBase ? entry.value / platformTakeBase * 100 : 0,
+  }));
   const maxPlatformFeeComponent = Math.max(...platformFeeComponents.map((entry) => entry.value), 1);
-  const successfulPlatformOrders = periodPlatformOrders.filter((entry) => !/huy|cancel/.test(normalizedHeader(entry.status)));
+  const successfulPlatformOrders = marketplaceOrders.filter((entry) => !/huy|cancel/.test(normalizedHeader(entry.status)));
   const platformOrderRevenue = successfulPlatformOrders.reduce((sum, entry) => sum + entry.reportedAmount, 0);
   const platformGoodsAmount = successfulPlatformOrders.reduce((sum, entry) => sum + entry.goodsAmount, 0);
   const platformDiscountAmount = successfulPlatformOrders.reduce((sum, entry) => sum + entry.discountAmount, 0);
-  const platformCancelledOrders = periodPlatformOrders.length - successfulPlatformOrders.length;
+  const platformCancelledOrders = marketplaceOrders.length - successfulPlatformOrders.length;
   const platformAverageOrder = successfulPlatformOrders.length ? platformOrderRevenue / successfulPlatformOrders.length : 0;
   const platformDiscountRate = platformGoodsAmount ? platformDiscountAmount / platformGoodsAmount * 100 : 0;
   const channelPerformance = useMemo(() => {
     const grouped = new Map<string, { orders: number; successfulOrders: number; cancelledOrders: number; revenue: number; discount: number }>();
-    for (const order of periodPlatformOrders) {
+    for (const order of marketplaceOrders) {
       const label = order.channelName.trim() || "Không rõ kênh";
       const current = grouped.get(label) || { orders: 0, successfulOrders: 0, cancelledOrders: 0, revenue: 0, discount: 0 };
       const cancelled = /huy|cancel/.test(normalizedHeader(order.status));
@@ -989,7 +1232,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       grouped.set(label, current);
     }
     return [...grouped.entries()].map(([name, values]) => ({ name, ...values, averageOrder: values.successfulOrders ? values.revenue / values.successfulOrders : 0 })).sort((left, right) => right.revenue - left.revenue);
-  }, [periodPlatformOrders]);
+  }, [marketplaceOrders]);
   const maxPlatformChannelRevenue = Math.max(...channelPerformance.map((entry) => entry.revenue), 1);
   const platformDailyTrend = useMemo(() => {
     const grouped = new Map<string, { orders: number; revenue: number }>();
@@ -1002,8 +1245,223 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     return [...grouped.entries()].map(([date, values]) => ({ date, ...values })).sort((left, right) => left.date.localeCompare(right.date));
   }, [successfulPlatformOrders]);
   const maxPlatformDailyRevenue = Math.max(...platformDailyTrend.map((entry) => entry.revenue), 1);
+  // Phí sàn is never in the SAPO invoice export (its Phí dịch vụ / Phí GH columns
+  // are 0 for platform orders), so the only truthful source is đối soát itself:
+  // fee = what SAPO recorded minus what actually landed. Orders not yet đối soát
+  // are projected at the rate the reconciled ones revealed, and labelled as such.
+  /// Every sàn order in the period paired with its reconciliation, so the panel
+  /// can show done and pending side by side. Pending rows carry the reason they
+  /// cannot be settled yet — the usual cause is simply a missing Grab PDF.
+  const reconciliationRowsView = useMemo(() => {
+    const reportDates = new Set(state.grabDailyReports.map((report) => report.reportDate));
+    const byOrderId = new Map<string, GrabReconciliationRecord>();
+    const byCodeDate = new Map<string, GrabReconciliationRecord>();
+    for (const entry of grabReconciliationRows) {
+      if (entry.platformOrderId) byOrderId.set(entry.platformOrderId, entry);
+      byCodeDate.set(`${entry.orderDate}:${entry.orderCode.toLocaleLowerCase("vi")}`, entry);
+    }
+    const rows = grabOrderOptions.map((order) => {
+      const reconciliation = byOrderId.get(order.id) || byCodeDate.get(`${order.orderDate}:${order.orderCode.toLocaleLowerCase("vi")}`);
+      const channel = marketplaceKey(`${order.channelName} ${order.paymentMethod || ""} ${order.deliveryPartner || ""}`);
+      const reason = reconciliation
+        ? undefined
+        : channel !== "grab"
+          ? "Sàn này chưa có báo cáo đối soát"
+          : reportDates.has(order.orderDate)
+            ? "Có báo cáo ngày này nhưng không khớp được số tiền"
+            : `Chưa có báo cáo Grab ngày ${dateLabel(order.orderDate)}`;
+      return { order, reconciliation, reason };
+    });
+    // A reconciliation whose SAPO order fell outside the period (cancelled, or
+    // re-imported under a different id) would otherwise vanish from every view,
+    // making "Đã đối soát" under-report silently.
+    const shown = new Set(rows.map((row) => row.reconciliation?.id).filter(Boolean));
+    const orphans = grabReconciliationRows.filter((entry) => !shown.has(entry.id)).map((entry) => ({
+      order: state.platformOrders.find((order) => order.id === entry.platformOrderId) || {
+        id: entry.id, orderCode: entry.orderCode, orderDate: entry.orderDate, channelName: "Grab",
+        reportedAmount: entry.reportedAmount, goodsAmount: entry.settlement?.orderValue || 0, discountAmount: 0,
+        serviceFee: 0, deliveryFee: 0, tipAmount: 0, refundAmount: 0,
+      } as PlatformOrderRecord,
+      reconciliation: entry,
+      reason: undefined as string | undefined,
+    }));
+    // Belt and braces: re-assert the period on the row's own order date and drop
+    // duplicate orders. The orphan branch resolves its order from the unfiltered
+    // list, so without this a record from another month can ride in.
+    const unique = new Map<string, typeof rows[number]>();
+    for (const row of [...rows, ...orphans]) {
+      if (!inRange(row.order.orderDate, bounds)) continue;
+      const key = row.order.id || `${row.order.orderDate}:${row.order.orderCode}`;
+      if (!unique.has(key)) unique.set(key, row);
+    }
+    return [...unique.values()].sort((left, right) => right.order.orderDate.localeCompare(left.order.orderDate) || left.order.orderCode.localeCompare(right.order.orderCode, "vi"));
+  }, [grabOrderOptions, grabReconciliationRows, state.grabDailyReports, state.platformOrders, bounds]);
+  /// Months that actually contain sàn orders. The global period picker defaults
+  /// to the current month, which is routinely empty because the SAPO export lags
+  /// behind — without this the panel just looks broken.
+  const marketplaceMonths = useMemo(() => {
+    const grouped = new Map<string, number>();
+    for (const order of state.platformOrders) {
+      if (!isMarketplacePlatformOrder(order) || /huy|cancel/.test(normalizedHeader(order.status))) continue;
+      const month = order.orderDate.slice(0, 7);
+      grouped.set(month, (grouped.get(month) || 0) + 1);
+    }
+    return [...grouped.entries()].map(([month, count]) => ({ month, count })).sort((left, right) => right.month.localeCompare(left.month));
+  }, [state.platformOrders]);
+
+  /// Per-order averages across the reconciled orders of the period. These are
+  /// the numbers Long negotiates with: what each sàn order actually costs in
+  /// fee, ads and discount, not the period totals.
+  const reconciledEntries = useMemo(() => reconciliationRowsView.map((row) => row.reconciliation).filter((entry): entry is GrabReconciliationRecord => Boolean(entry)), [reconciliationRowsView]);
+  const settledEntries = reconciledEntries.filter((entry) => entry.settlement);
+  const avgListPrice = settledEntries.length ? settledEntries.reduce((sum, entry) => sum + (entry.settlement!.orderValue || 0), 0) / settledEntries.length : 0;
+  const avgPlatformFee = settledEntries.length ? settledEntries.reduce((sum, entry) => sum + entry.settlement!.grabCommission + entry.settlement!.vatTax + entry.settlement!.incomeTax + entry.settlement!.shippingSupport, 0) / settledEntries.length : 0;
+  const avgMarketing = settledEntries.length ? settledEntries.reduce((sum, entry) => sum + (entry.settlement!.marketingAllocated || 0), 0) / settledEntries.length : 0;
+  const avgDiscount = settledEntries.length ? settledEntries.reduce((sum, entry) => sum + (entry.settlement!.merchantPromo || 0), 0) / settledEntries.length : 0;
+  /// What the sàn itself says the order was worth ("Trị giá đơn hàng" on Grab's
+  /// report), before merchant promo. Only sàn that publish a report contribute —
+  /// Shopee and GreenSM send nothing, so they are named as missing rather than
+  /// silently counted as zero.
+  const platformRecordedRevenue = settledEntries.reduce((sum, entry) => sum + (entry.settlement!.orderValue || 0), 0);
+  const platformRecordedChannels = useMemo(() => {
+    const covered = new Set<string>();
+    for (const entry of settledEntries) {
+      const order = state.platformOrders.find((row) => row.id === entry.platformOrderId);
+      covered.add(MARKETPLACE_LABELS[marketplaceKey(`${order?.channelName || ""} ${order?.deliveryPartner || ""}`)] || "Grab");
+    }
+    // Any sàn that sold in the period but contributed no settlement is missing a
+    // report; naming it keeps the tile from reading as a complete total.
+    const selling = new Set(grabOrderOptions.map((order) => MARKETPLACE_LABELS[marketplaceKey(`${order.channelName} ${order.paymentMethod || ""} ${order.deliveryPartner || ""}`)] || "Sàn khác"));
+    const missing = [...selling].filter((name) => !covered.has(name));
+    return { covered: [...covered], missing };
+  }, [settledEntries, state.platformOrders, grabOrderOptions]);
+  const receivedRevenue = reconciledEntries.reduce((sum, entry) => sum + entry.receivedAmount, 0);
+  const reportedRevenue = reconciledEntries.reduce((sum, entry) => sum + entry.reportedAmount, 0);
+  const gapRateAverage = reportedRevenue ? (reportedRevenue - receivedRevenue) / reportedRevenue * 100 : 0;
+
+  /// SAPO-vs-received split per ISO week, as shares of what SAPO recorded, so a
+  /// week where Grab kept more is visible at a glance.
+  const reconciliationWeekly = useMemo(() => {
+    const mondayOf = (iso: string) => {
+      const date = new Date(`${iso}T00:00:00Z`);
+      // getUTCDay: 0 = Sunday, so Sunday must step back six days, not forward one.
+      date.setUTCDate(date.getUTCDate() - ((date.getUTCDay() + 6) % 7));
+      return date.toISOString().slice(0, 10);
+    };
+    const grouped = new Map<string, { reported: number; received: number; orders: number }>();
+    for (const entry of reconciledEntries) {
+      const week = mondayOf(entry.orderDate);
+      const current = grouped.get(week) || { reported: 0, received: 0, orders: 0 };
+      current.reported += entry.reportedAmount;
+      current.received += entry.receivedAmount;
+      current.orders += 1;
+      grouped.set(week, current);
+    }
+    return [...grouped.entries()].map(([week, values]) => ({
+      week,
+      ...values,
+      receivedRate: values.reported ? values.received / values.reported * 100 : 0,
+      gapRate: values.reported ? (values.reported - values.received) / values.reported * 100 : 0,
+    })).sort((left, right) => left.week.localeCompare(right.week));
+  }, [reconciledEntries]);
+
+  const reconciliationDoneCount = reconciliationRowsView.filter((row) => row.reconciliation).length;
+  const reconciliationPendingCount = reconciliationRowsView.length - reconciliationDoneCount;
+  const visibleReconciliationRows = reconciliationRowsView.filter((row) => reconciliationFilter === "all" || (reconciliationFilter === "done") === Boolean(row.reconciliation));
+
+  const marketplaceFeeByChannel = useMemo(() => {
+    const reconciliationByKey = new Map<string, GrabReconciliationRecord>();
+    for (const entry of grabReconciliationRows) {
+      if (entry.platformOrderId) reconciliationByKey.set(entry.platformOrderId, entry);
+      reconciliationByKey.set(`${entry.orderDate}:${entry.orderCode.toLocaleLowerCase("vi")}`, entry);
+    }
+    const grouped = new Map<string, { orders: number; reportedAmount: number; goodsAmount: number; discountAmount: number; reconciledOrders: number; reconciledReported: number; receivedAmount: number }>();
+    for (const key of TRACKED_MARKETPLACES) grouped.set(key, { orders: 0, reportedAmount: 0, goodsAmount: 0, discountAmount: 0, reconciledOrders: 0, reconciledReported: 0, receivedAmount: 0 });
+    for (const order of marketplaceOrders) {
+      if (/huy|cancel/.test(normalizedHeader(order.status))) continue;
+      const key = marketplaceKey(`${order.channelName} ${order.paymentMethod || ""} ${order.deliveryPartner || ""}`);
+      const current = grouped.get(key) || { orders: 0, reportedAmount: 0, goodsAmount: 0, discountAmount: 0, reconciledOrders: 0, reconciledReported: 0, receivedAmount: 0 };
+      current.orders += 1;
+      current.reportedAmount += order.reportedAmount;
+      current.goodsAmount += order.goodsAmount;
+      current.discountAmount += order.discountAmount;
+      const reconciliation = reconciliationByKey.get(order.id) || reconciliationByKey.get(`${order.orderDate}:${order.orderCode.toLocaleLowerCase("vi")}`);
+      if (reconciliation) {
+        current.reconciledOrders += 1;
+        current.reconciledReported += reconciliation.reportedAmount;
+        current.receivedAmount += reconciliation.receivedAmount;
+      }
+      grouped.set(key, current);
+    }
+    return [...grouped.entries()].map(([key, values]) => {
+      const measuredFee = Math.max(0, values.reconciledReported - values.receivedAmount);
+      const feeRate = values.reconciledReported ? measuredFee / values.reconciledReported * 100 : 0;
+      return {
+        key,
+        name: MARKETPLACE_LABELS[key] || key,
+        ...values,
+        measuredFee,
+        feeRate,
+        coverage: values.orders ? values.reconciledOrders / values.orders * 100 : 0,
+        // Projection over the whole period, only meaningful once a rate exists.
+        projectedFee: values.reconciledReported ? values.reportedAmount * feeRate / 100 : 0,
+        netAfterFee: values.reconciledReported ? values.reportedAmount * (1 - feeRate / 100) : 0,
+        discountRate: values.goodsAmount ? values.discountAmount / values.goodsAmount * 100 : 0,
+        averageOrder: values.orders ? values.reportedAmount / values.orders : 0,
+      };
+    }).sort((left, right) => right.reportedAmount - left.reportedAmount || TRACKED_MARKETPLACES.indexOf(left.key) - TRACKED_MARKETPLACES.indexOf(right.key));
+  }, [marketplaceOrders, grabReconciliationRows]);
+  const maxMarketplaceRevenue = Math.max(...marketplaceFeeByChannel.map((entry) => entry.reportedAmount), 1);
+  const marketplaceMeasuredFee = marketplaceFeeByChannel.reduce((sum, entry) => sum + entry.measuredFee, 0);
+  const marketplaceReconciledReported = marketplaceFeeByChannel.reduce((sum, entry) => sum + entry.reconciledReported, 0);
+  const marketplaceBlendedFeeRate = marketplaceReconciledReported ? marketplaceMeasuredFee / marketplaceReconciledReported * 100 : 0;
+  const successfulOtherChannelOrders = otherChannelOrders.filter((entry) => !/huy|cancel/.test(normalizedHeader(entry.status)));
+  const otherChannelRevenue = successfulOtherChannelOrders.reduce((sum, entry) => sum + entry.reportedAmount, 0);
+  const otherChannelAverageOrder = successfulOtherChannelOrders.length ? otherChannelRevenue / successfulOtherChannelOrders.length : 0;
+  const otherChannelPerformance = useMemo(() => {
+    const grouped = new Map<string, { orders: number; successfulOrders: number; revenue: number }>();
+    for (const order of otherChannelOrders) {
+      const label = order.channelName.trim() || "Không rõ kênh";
+      const current = grouped.get(label) || { orders: 0, successfulOrders: 0, revenue: 0 };
+      const cancelled = /huy|cancel/.test(normalizedHeader(order.status));
+      current.orders += 1;
+      current.successfulOrders += cancelled ? 0 : 1;
+      current.revenue += cancelled ? 0 : order.reportedAmount;
+      grouped.set(label, current);
+    }
+    return [...grouped.entries()].map(([name, values]) => ({ name, ...values, averageOrder: values.successfulOrders ? values.revenue / values.successfulOrders : 0 })).sort((left, right) => right.revenue - left.revenue);
+  }, [otherChannelOrders]);
   const grabSapoOrderTotal = grabOrderOptions.reduce((sum, entry) => sum + entry.reportedAmount, 0);
   const grabRetentionRate = grabReportedTotal ? grabReceivedTotal / grabReportedTotal * 100 : 0;
+  // Daily SAPO-vs-received series from reconciled orders (dashboard "chênh lệch").
+  const reconciliationDaily = useMemo(() => {
+    const grouped = new Map<string, { sapo: number; received: number; orders: number; marketing: number }>();
+    for (const entry of grabReconciliationRows) {
+      const current = grouped.get(entry.orderDate) || { sapo: 0, received: 0, orders: 0, marketing: 0 };
+      current.sapo += entry.reportedAmount;
+      current.received += entry.receivedAmount;
+      current.orders += 1;
+      current.marketing += entry.settlement?.marketingAllocated || 0;
+      grouped.set(entry.orderDate, current);
+    }
+    return [...grouped.entries()].map(([date, values]) => ({ date, ...values, diff: values.received - values.sapo })).sort((left, right) => right.date.localeCompare(left.date));
+  }, [grabReconciliationRows]);
+  const periodGrabReports = useMemo(() => state.grabDailyReports.filter((report) => inRange(report.reportDate, bounds)).sort((left, right) => right.reportDate.localeCompare(left.reportDate)), [state.grabDailyReports, bounds]);
+  const grabMarketingTotal = periodGrabReports.reduce((sum, report) => sum + report.totalMarketing, 0);
+  const grabReportOrderCount = periodGrabReports.reduce((sum, report) => sum + report.orderCount, 0);
+  const grabReportSapoBase = periodGrabReports.reduce((sum, report) => sum + report.totalExpectedSapo, 0);
+  const grabMarketingPerOrder = grabReportOrderCount ? grabMarketingTotal / grabReportOrderCount : 0;
+  const grabMarketingRate = grabReportSapoBase ? grabMarketingTotal / grabReportSapoBase * 100 : 0;
+  // Ad-spend mix by campaign type; the per-day date suffix is stripped so the
+  // same campaign aggregates across days.
+  const grabMarketingByType = useMemo(() => {
+    const grouped = new Map<string, number>();
+    for (const report of periodGrabReports) for (const line of report.marketingLines) {
+      const label = campaignLabel(line.description);
+      grouped.set(label, (grouped.get(label) || 0) + line.total);
+    }
+    return [...grouped.entries()].map(([label, total]) => ({ label, total })).sort((left, right) => right.total - left.total);
+  }, [periodGrabReports]);
 
   const expenseCategorySections = (Object.keys(categoryLabels) as ExpenseCategory[]).map((category) => {
     const manualEntries = category === "investment"
@@ -1209,14 +1667,23 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         }
         const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: true, defval: null });
         const templateType = financeTemplateType(rows);
-        if (!templateType) throw new Error(`${file.name}: chưa nhận diện được template. Hệ thống hiện hỗ trợ Doanh thu tổng quan, Danh mục mặt hàng, Hình thức phục vụ và Danh sách hóa đơn.`);
+        if (!templateType) throw new Error(`${file.name}: chưa nhận diện được template. Hệ thống hiện hỗ trợ Doanh thu tổng quan, Danh mục mặt hàng (bảng giá), Hình thức phục vụ và Danh sách hóa đơn.`);
         if (!uatMode && templateType === "orders") throw new Error("Danh sách hóa đơn nền tảng và đối soát GRAB hiện chỉ có ở UAT.");
-        parsed.push(templateType === "revenue" ? parseRevenueRows(file, rows) : templateType === "products" ? parseProductRows(file, rows) : templateType === "service" ? parseServiceRows(file, rows) : parsePlatformOrderRows(file, rows));
+        // Every recognised type needs its own branch here: the chain falls through
+        // to the order parser, so a missing branch shows up as "không tìm thấy
+        // bảng chi tiết đơn hàng" on a file that was detected perfectly well.
+        parsed.push(
+          templateType === "revenue" ? parseRevenueRows(file, rows)
+          : templateType === "products" ? parseProductRows(file, rows)
+          : templateType === "service" ? parseServiceRows(file, rows)
+          : templateType === "prices" ? parseCounterPriceRows(file, rows)
+          : parsePlatformOrderRows(file, rows));
       }
       const revenueImports = parsed.filter((entry): entry is ParsedRevenueImport => entry.type === "revenue");
       const productImports = parsed.filter((entry): entry is ParsedProductImport => entry.type === "products");
       const serviceImports = parsed.filter((entry): entry is ParsedServiceImport => entry.type === "service");
       const orderImports = parsed.filter((entry): entry is ParsedOrderImport => entry.type === "orders");
+      const priceImports = parsed.filter((entry): entry is ParsedPriceImport => entry.type === "prices");
       const pickImport = <T extends { meta: FinanceImportMeta | ImportMetaInput }>(entries: T[]) => [...entries].sort((left, right) => right.meta.periodEnd.localeCompare(left.meta.periodEnd) || right.meta.rowCount - left.meta.rowCount)[0];
       const duplicateTypes = [revenueImports.length > 1 ? "Doanh thu" : "", productImports.length > 1 ? "Mặt hàng" : "", serviceImports.length > 1 ? "Phương thức/Hình thức" : "", orderImports.length > 1 ? "Danh sách hóa đơn" : ""].filter(Boolean);
       const replacing = [revenueImports.length && state.revenues.length ? "Doanh thu" : "", productImports.length && state.products.length ? "Mặt hàng" : "", serviceImports.length && state.services.length ? "Hình thức phục vụ" : "", orderImports.length && state.platformOrders.length ? "Danh sách hóa đơn nền tảng" : ""].filter(Boolean);
@@ -1225,6 +1692,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       const products = pickImport(productImports);
       const service = pickImport(serviceImports);
       const orders = pickImport(orderImports);
+      const prices = pickImport(priceImports);
       let verifiedCloudState: Awaited<ReturnType<typeof loadFinanceImports>> | undefined;
       if (!uatMode) {
         if (!isSupabaseConfigured) throw new Error("Production chưa cấu hình Supabase. Import đã dừng để tránh chỉ lưu dữ liệu trên trình duyệt.");
@@ -1243,15 +1711,21 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         if (products) imports = [...imports.filter((entry) => entry.dataType !== "products"), products.importMeta];
         if (service) imports = [...imports.filter((entry) => entry.dataType !== "service"), service.importMeta];
         if (orders) imports = [...imports.filter((entry) => entry.dataType !== "orders"), orders.importMeta];
+        if (prices) imports = [...imports.filter((entry) => entry.dataType !== "prices"), prices.importMeta];
         const overlap = (left: FinanceImportMeta, right: FinanceImportMeta) => left.periodStart <= right.periodEnd && left.periodEnd >= right.periodStart;
         const existingProductSnapshots = current.productSnapshots.length || !current.products.length || !current.imports.find((entry) => entry.dataType === "products") ? current.productSnapshots : [...current.productSnapshots, { meta: current.imports.find((entry) => entry.dataType === "products")!, records: current.products }];
         const existingServiceSnapshots = current.serviceSnapshots.length || !current.services.length || !current.imports.find((entry) => entry.dataType === "service") ? current.serviceSnapshots : [...current.serviceSnapshots, { meta: current.imports.find((entry) => entry.dataType === "service")!, records: current.services }];
         const revenues = revenue ? [...current.revenues.filter((entry) => entry.date < revenue.meta.periodStart || entry.date > revenue.meta.periodEnd), ...revenue.records].sort((a, b) => b.date.localeCompare(a.date)) : current.revenues;
         const productSnapshots = products ? [...existingProductSnapshots.filter((snapshot) => !overlap(snapshot.meta, products.importMeta)), { meta: products.importMeta, records: products.records }] : existingProductSnapshots;
         const serviceSnapshots = service ? [...existingServiceSnapshots.filter((snapshot) => !overlap(snapshot.meta, service.importMeta)), { meta: service.importMeta, records: service.records }] : existingServiceSnapshots;
-        const platformOrders = orders ? [...orders.records, ...current.platformOrders.filter((entry) => entry.orderDate < orders.periodStart || entry.orderDate > orders.periodEnd)] : current.platformOrders;
+        // Dedupe by id: re-importing an overlapping export used to stack copies of
+        // the same order, which multiplied every count and every table row.
+        const platformOrders = orders
+          ? [...new Map([...orders.records, ...current.platformOrders.filter((entry) => entry.orderDate < orders.periodStart || entry.orderDate > orders.periodEnd)].map((entry) => [entry.id, entry])).values()]
+          : current.platformOrders;
         const importedBatches = [revenue?.importMeta, products?.importMeta, service?.importMeta, orders?.importMeta].filter((entry): entry is FinanceImportMeta => Boolean(entry));
-        const nextState = { ...current, revenues, products: products?.records || current.products, services: service?.records || current.services, platformOrders, imports, importHistory: [...current.importHistory, ...importedBatches], productSnapshots, serviceSnapshots };
+        const counterPrices = prices ? prices.records : current.counterPrices;
+        const nextState = { ...current, counterPrices, revenues, products: products?.records || current.products, services: service?.records || current.services, platformOrders, imports, importHistory: [...current.importHistory, ...importedBatches], productSnapshots, serviceSnapshots };
         // Persist the complete UAT bundle atomically. This prevents a refresh or
         // a pending state effect from restoring the pre-import empty order list.
         if (uatMode) window.localStorage.setItem(storageKey, JSON.stringify(nextState));
@@ -1267,7 +1741,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       // so the imported channel dashboards and order list are immediately visible.
       setRevenueSubTab(uatMode && orders ? "platform" : revenue || service ? "overview" : "products");
       setFinanceSyncError(undefined);
-      setFinanceImportNotice(`Đã tự nhận diện và map ${parsed.map((entry) => entry.type === "revenue" ? `Doanh thu (${entry.meta.rowCount} ngày)` : entry.type === "products" ? `Mặt hàng (${entry.meta.rowCount} SKU)` : entry.type === "service" ? `Phương thức/Hình thức (${entry.meta.rowCount} nhóm)` : `Danh sách hóa đơn nền tảng (${entry.records.length} đơn, ${entry.records.filter((record) => normalizedHeader(record.channelName).includes("grab")).length} Grab)`).join(" + ")}${duplicateTypes.length ? `; ưu tiên file có kỳ mới hơn trong nhóm trùng: ${duplicateTypes.join(", ")}` : ""}.`);
+      setFinanceImportNotice(`Đã tự nhận diện và map ${parsed.map((entry) => entry.type === "revenue" ? `Doanh thu (${entry.meta.rowCount} ngày)` : entry.type === "products" ? `Mặt hàng (${entry.meta.rowCount} SKU)` : entry.type === "service" ? `Phương thức/Hình thức (${entry.meta.rowCount} nhóm)` : entry.type === "prices" ? `Bảng giá mặt hàng (${entry.records.length} món)` : `Danh sách hóa đơn nền tảng (${entry.records.length} đơn, ${entry.records.filter((record) => "channelName" in record && normalizedHeader(record.channelName).includes("grab")).length} Grab)`).join(" + ")}${duplicateTypes.length ? `; ưu tiên file có kỳ mới hơn trong nhóm trùng: ${duplicateTypes.join(", ")}` : ""}.`);
     } catch (error) {
       const objectMessage = error && typeof error === "object" && "message" in error ? String(error.message || "") : "";
       const message = error instanceof Error ? error.message : objectMessage || "Không thể phân tích các file Excel.";
@@ -1286,9 +1760,116 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       orderDate: entry.orderDate,
       reportedAmount: amountInput(String(entry.reportedAmount)),
       receivedAmount: amountInput(String(entry.receivedAmount)),
+      discounts: seedDiscountForms(entry, state.platformOrders.find((order) => order.id === entry.platformOrderId)),
+      counterPrice: seedCounterPrice(entry, state.platformOrders.find((order) => order.id === entry.platformOrderId)),
       note: entry.note || "",
     });
     setShowGrabReconciliationModal(true);
+  }
+
+  // Round to whole thousands like the menu does; this is an estimate for the
+  // "so với giá quầy" comparison, editable in the modal.
+  /// The money journey of one sàn order, shared by the reconciled table and the
+  /// detail sheet so both can never disagree. Every rate is expressed against
+  /// the sàn list price, which is the number Long negotiates and compares.
+  function reconciliationJourney(entry: GrabReconciliationRecord, overrides?: { receivedAmount?: number; counterPrice?: number; discountTotal?: number }) {
+    const settlement = entry.settlement;
+    const order = entry.platformOrderId ? state.platformOrders.find((row) => row.id === entry.platformOrderId) : undefined;
+    const listPrice = settlement?.orderValue || order?.goodsAmount || 0;
+    const received = overrides?.receivedAmount ?? entry.receivedAmount;
+    const counterPrice = overrides?.counterPrice ?? entry.counterPrice;
+    const discount = overrides?.discountTotal ?? (settlement?.merchantPromo ?? entry.discounts.reduce((sum, layer) => sum + layer.amount, 0));
+    const commission = settlement?.grabCommission || 0;
+    const tax = settlement ? settlement.vatTax + settlement.incomeTax : 0;
+    const shipping = settlement?.shippingSupport || 0;
+    const marketing = settlement?.marketingAllocated || 0;
+    // Grab pays the order out before the day-level ad bill; marketing lands on
+    // top of that, which is why it sits after the payout in the journey.
+    const grabPayout = settlement ? settlement.payout : received;
+    const netAfterMarketing = grabPayout - marketing;
+    const rate = (value: number) => (listPrice ? value / listPrice * 100 : 0);
+    const sapoGap = entry.reportedAmount - grabPayout;
+    return {
+      settlement,
+      listPrice,
+      discount,
+      commission,
+      tax,
+      shipping,
+      marketing,
+      grabPayout,
+      netAfterMarketing,
+      received,
+      counterPrice,
+      discountRate: rate(discount),
+      commissionRate: rate(commission),
+      taxRate: rate(tax),
+      shippingRate: rate(shipping),
+      marketingRate: rate(marketing),
+      marketingCampaigns: settlement?.marketingCampaigns || [],
+      // Marketing is billed against money Grab already paid out, so its weight
+      // against the payout is the number that actually stings.
+      marketingOfPayoutRate: grabPayout ? marketing / grabPayout * 100 : 0,
+      discountLayers: entry.discounts,
+      payoutRate: rate(grabPayout),
+      netRate: rate(netAfterMarketing),
+      // Positive means the sàn price sits above the counter price.
+      listVersusCounter: counterPrice ? (listPrice - counterPrice) / counterPrice * 100 : undefined,
+      sapoGap,
+      sapoGapRate: grabPayout ? sapoGap / grabPayout * 100 : 0,
+      versusCounter: counterPrice == null ? undefined : received - counterPrice,
+      versusCounterRate: counterPrice ? (received - counterPrice) / counterPrice * 100 : 0,
+      netVersusCounter: counterPrice == null ? undefined : netAfterMarketing - counterPrice,
+      netVersusCounterRate: counterPrice ? (netAfterMarketing - counterPrice) / counterPrice * 100 : 0,
+    };
+  }
+
+  /// Menu name → counter price. Names are matched accent- and case-insensitively
+  /// because the invoice export and the price book capitalise differently.
+  const counterPriceBook = useMemo(() => {
+    const book = new Map<string, FinanceCounterPrice>();
+    for (const entry of state.counterPrices) {
+      const key = normalizedHeader(entry.name);
+      if (!book.has(key)) book.set(key, entry);
+    }
+    return book;
+  }, [state.counterPrices]);
+
+  /// The real counter value of an order: every line item priced at its in-store
+  /// price. Returns `covered: false` when any item is missing from the price
+  /// book, so a partial total is never presented as the whole basket.
+  function counterPriceFromItems(order: PlatformOrderRecord | undefined) {
+    if (!order?.items?.length || !counterPriceBook.size) return undefined;
+    let total = 0;
+    const missing: string[] = [];
+    for (const item of order.items) {
+      const priced = counterPriceBook.get(normalizedHeader(item.name));
+      if (!priced) { missing.push(item.name); continue; }
+      total += priced.storePrice * (item.quantity || 1);
+    }
+    return { total, missing, covered: missing.length === 0 };
+  }
+
+  function counterPriceEstimate(grabListPrice: number) {
+    return grabListPrice > 0 ? Math.round(grabListPrice * COUNTER_PRICE_RATE / 1000) * 1000 : 0;
+  }
+  function seedCounterPrice(existing: GrabReconciliationRecord | undefined, order: PlatformOrderRecord | undefined) {
+    if (existing?.counterPrice != null) return amountInput(String(existing.counterPrice));
+    // Priced from the actual basket when the item detail is available; the old
+    // blanket ratio was wrong by 5-7k an order and could not name a single item.
+    const fromItems = counterPriceFromItems(order);
+    if (fromItems?.covered) return amountInput(String(fromItems.total));
+    const grabListPrice = existing?.settlement?.orderValue || order?.goodsAmount || 0;
+    const estimate = counterPriceEstimate(grabListPrice);
+    return estimate ? amountInput(String(estimate)) : "";
+  }
+
+  // A saved đối soát keeps its own layers; a fresh one starts from SAPO's single
+  // "Tổng giảm giá" so the statement still balances before Long splits it up.
+  function seedDiscountForms(existing: GrabReconciliationRecord | undefined, order: PlatformOrderRecord | undefined): ReconciliationDiscountForm[] {
+    if (existing?.discounts?.length) return existing.discounts.map((entry) => ({ label: entry.label, amount: amountInput(String(entry.amount)) }));
+    if (order && order.discountAmount > 0) return [{ label: "Giảm giá SAPO ghi nhận", amount: amountInput(String(order.discountAmount)) }];
+    return [];
   }
 
   function selectGrabOrder(orderId: string) {
@@ -1302,8 +1883,20 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       orderDate: order.orderDate,
       reportedAmount: amountInput(String(order.reportedAmount)),
       receivedAmount: existing ? amountInput(String(existing.receivedAmount)) : "",
+      discounts: seedDiscountForms(existing, order),
+      counterPrice: seedCounterPrice(existing, order),
       note: existing?.note || "",
     });
+  }
+
+  function updateDiscountLayer(index: number, patch: Partial<ReconciliationDiscountForm>) {
+    setGrabForm((current) => ({ ...current, discounts: current.discounts.map((entry, position) => position === index ? { ...entry, ...patch } : entry) }));
+  }
+  function addDiscountLayer() {
+    setGrabForm((current) => ({ ...current, discounts: [...current.discounts, { label: "", amount: "" }] }));
+  }
+  function removeDiscountLayer(index: number) {
+    setGrabForm((current) => ({ ...current, discounts: current.discounts.filter((_, position) => position !== index) }));
   }
 
   function openPlatformReconciliation(order: PlatformOrderRecord) {
@@ -1335,7 +1928,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     const reportedAmount = parseAmount(grabForm.reportedAmount);
     const receivedAmount = parseAmount(grabForm.receivedAmount);
     if (!grabForm.platformOrderId || !orderCode || !grabForm.orderDate || receivedAmount < 0 || reportedAmount < 0) {
-      window.alert("Vui lòng chọn đơn Grab từ file SAPO và nhập số tiền thực nhận hợp lệ.");
+      window.alert("Vui lòng chọn đơn sàn từ file SAPO và nhập số tiền thực nhận hợp lệ.");
       return;
     }
     const existingSameOrder = state.grabReconciliations.find((entry) => entry.orderCode.toLocaleLowerCase("vi") === orderCode.toLocaleLowerCase("vi") && entry.orderDate === grabForm.orderDate);
@@ -1346,6 +1939,12 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       orderDate: grabForm.orderDate,
       reportedAmount,
       receivedAmount,
+      discounts: grabForm.discounts
+        .map((entry) => ({ label: entry.label.trim(), amount: parseAmount(entry.amount) }))
+        .filter((entry) => entry.label.length > 0 || entry.amount !== 0),
+      // A manual edit must not drop the PDF settlement snapshot behind the form.
+      settlement: (grabForm.id ? state.grabReconciliations.find((entry) => entry.id === grabForm.id) : existingSameOrder)?.settlement,
+      counterPrice: grabForm.counterPrice.trim() ? parseAmount(grabForm.counterPrice) : undefined,
       note: grabForm.note.trim() || undefined,
     };
     setSavingGrabReconciliation(true);
@@ -1377,6 +1976,203 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       const message = error instanceof Error ? error.message : "Không thể xoá đối soát GRAB.";
       setFinanceSyncError(message);
       window.alert(message);
+    }
+  }
+
+  /// Matches one parsed Grab daily PDF against that day's SAPO Grab orders and
+  /// turns every match into a reconciliation record. Key insight from the data:
+  /// SAPO's "Tổng tiền thanh toán" equals Grab's Trị giá − KM người bán, so that
+  /// difference is the primary match key; delivery-vs-created time breaks ties.
+  function buildGrabReportApplication(report: ParsedGrabReport, fileName: string, existingRecords: GrabReconciliationRecord[]) {
+    const dayOrders = state.platformOrders.filter((order) =>
+      order.orderDate === report.reportDate
+      && marketplaceKey(`${order.channelName} ${order.paymentMethod || ""} ${order.deliveryPartner || ""}`) === "grab"
+      && !/huy|cancel/.test(normalizedHeader(order.status)));
+    const marketingShare = report.orders.length ? Math.round(report.totalMarketing / report.orders.length) : 0;
+    const toMinutes = (time: string) => Number(time.slice(0, 2)) * 60 + Number(time.slice(3, 5));
+    const used = new Set<string>();
+    const records: GrabReconciliationRecord[] = [];
+    const unmatched: GrabDailyReportRecord["unmatched"] = [];
+    // SAPO folds merchant-funded shipping support into "Tổng giảm giá" while Grab
+    // reports it as its own column, so the payment totals legitimately disagree
+    // on any order carrying a ship promo. Match in descending strictness and
+    // record which tier won, because a looser tier is a weaker claim.
+    const tiers: { quality: GrabMatchQuality; test: (order: PlatformOrderRecord, pdfOrder: ParsedGrabReport["orders"][number]) => boolean }[] = [
+      { quality: "exact", test: (order, pdfOrder) => Math.abs(order.reportedAmount - (pdfOrder.orderValue - pdfOrder.merchantPromo)) <= 1 },
+      { quality: "exact", test: (order, pdfOrder) => Math.abs(order.goodsAmount - pdfOrder.orderValue) <= 1 && Math.abs(order.discountAmount - pdfOrder.merchantPromo) <= 1 },
+      { quality: "ship-adjusted", test: (order, pdfOrder) => Math.abs(order.goodsAmount - pdfOrder.orderValue) <= 1 && Math.abs(order.discountAmount - (pdfOrder.merchantPromo + pdfOrder.shippingSupport)) <= 1 },
+      { quality: "amount-only", test: (order, pdfOrder) => Math.abs(order.goodsAmount - pdfOrder.orderValue) <= 1 },
+    ];
+    for (const pdfOrder of report.orders) {
+      const expectedSapo = pdfOrder.orderValue - pdfOrder.merchantPromo;
+      let match: PlatformOrderRecord | undefined;
+      let quality: GrabMatchQuality = "exact";
+      for (const tier of tiers) {
+        let candidates = dayOrders.filter((order) => !used.has(order.id) && tier.test(order, pdfOrder));
+        if (candidates.length > 1) {
+          // Delivery happens after order creation; the closest forward gap wins.
+          const deliveryMinute = toMinutes(pdfOrder.time);
+          const gap = (order: PlatformOrderRecord) => {
+            const createdMinute = order.orderCreatedAt ? toMinutes(order.orderCreatedAt.slice(11, 16)) : 0;
+            const distance = deliveryMinute - createdMinute;
+            return distance >= -15 ? Math.abs(distance) : 10_000 + Math.abs(distance);
+          };
+          candidates = [...candidates].sort((left, right) => gap(left) - gap(right));
+        }
+        if (candidates[0]) {
+          match = candidates[0];
+          quality = tier.quality;
+          break;
+        }
+      }
+      if (!match) {
+        unmatched.push({ code: pdfOrder.code, time: pdfOrder.time, orderValue: pdfOrder.orderValue, payout: pdfOrder.payout, expectedSapo });
+        continue;
+      }
+      used.add(match.id);
+      const existing = existingRecords.find((entry) => entry.platformOrderId === match.id || (entry.orderDate === match.orderDate && entry.orderCode.toLocaleLowerCase("vi") === match.orderCode.toLocaleLowerCase("vi")));
+      const settlement: FinanceGrabSettlement = {
+        reportDate: report.reportDate,
+        fileName,
+        deliveryTime: pdfOrder.time,
+        grabOrderCode: pdfOrder.code,
+        orderValue: pdfOrder.orderValue,
+        merchantPromo: pdfOrder.merchantPromo,
+        grabCommission: pdfOrder.grabCommission,
+        vatTax: pdfOrder.vatTax,
+        incomeTax: pdfOrder.incomeTax,
+        shippingSupport: pdfOrder.shippingSupport,
+        payout: pdfOrder.payout,
+        marketingAllocated: marketingShare,
+        matchQuality: quality,
+        marketingCampaigns: report.orders.length
+          ? report.marketing.map((line) => ({ label: campaignLabel(line.description), amount: Math.round(line.total / report.orders.length) }))
+              .filter((line) => line.amount > 0)
+          : [],
+      };
+      records.push({
+        id: existing?.id || `grab-pdf-${report.reportDate}-${pdfOrder.code.toLocaleLowerCase("vi")}`,
+        platformOrderId: match.id,
+        orderCode: match.orderCode,
+        orderDate: match.orderDate,
+        reportedAmount: match.reportedAmount,
+        // A saved amount that no longer equals Grab's payout was edited by hand;
+        // a rescan must not silently throw that correction away.
+        receivedAmount: existing?.settlement && existing.receivedAmount !== existing.settlement.payout ? existing.receivedAmount : pdfOrder.payout,
+        discounts: pdfOrder.merchantPromo > 0 ? [{ label: "Khuyến mãi từ người bán (Grab)", amount: pdfOrder.merchantPromo }] : [],
+        settlement,
+        counterPrice: existing?.counterPrice ?? counterPriceEstimate(pdfOrder.orderValue) ?? undefined,
+        note: existing?.note?.trim() ? existing.note : `Tự động từ báo cáo Grab ${dateLabel(report.reportDate)}`,
+      });
+    }
+    const daily: GrabDailyReportRecord = {
+      id: `grab-daily-${report.reportDate}`,
+      reportDate: report.reportDate,
+      fileName,
+      importedAt: new Date().toISOString(),
+      orderCount: report.orders.length,
+      matchedCount: records.length,
+      totalOrderValue: report.totalOrderValue,
+      totalExpectedSapo: report.orders.reduce((sum, order) => sum + order.orderValue - order.merchantPromo, 0),
+      totalPayout: report.totalPayout,
+      totalMarketing: report.totalMarketing,
+      marketingLines: report.marketing.map((line) => ({ description: line.description, fee: line.fee, tax: line.tax, total: line.total })),
+      unmatched,
+    };
+    return { records, daily };
+  }
+
+  /// Shared tail of both ingest paths (file picker and local folder scan):
+  /// match every report, fold the results into one state update, and report
+  /// per-day outcomes so a silent partial match is impossible to miss.
+  function applyGrabReports(parsed: { report: ParsedGrabReport; fileName: string }[]) {
+    let workingRecords = [...state.grabReconciliations];
+    let workingReports = [...state.grabDailyReports];
+    let matchedTotal = 0;
+    let orderTotal = 0;
+    let emptyDays = 0;
+    const problems: string[] = [];
+    for (const { report, fileName } of parsed) {
+      if (!report.orders.length) {
+        emptyDays++;
+        continue;
+      }
+      const { records, daily } = buildGrabReportApplication(report, fileName, workingRecords);
+      matchedTotal += records.length;
+      orderTotal += report.orders.length;
+      const replacedIds = new Set(records.map((entry) => entry.id));
+      const replacedOrderIds = new Set(records.map((entry) => entry.platformOrderId).filter(Boolean));
+      workingRecords = [...records, ...workingRecords.filter((entry) => !replacedIds.has(entry.id) && !(entry.platformOrderId && replacedOrderIds.has(entry.platformOrderId)))];
+      workingReports = [daily, ...workingReports.filter((entry) => entry.reportDate !== report.reportDate)];
+      // Only days that still have a problem are worth naming; a clean day adds
+      // nothing but noise to the notice.
+      const wobbly = report.orders.filter((order) => !order.balanced).length;
+      if (daily.unmatched.length) problems.push(`${dateLabel(report.reportDate)}: ${daily.unmatched.map((entry) => entry.code).join(", ")}`);
+      if (wobbly) problems.push(`${dateLabel(report.reportDate)}: ${wobbly} dòng lệch số học`);
+    }
+    setState((current) => ({ ...current, grabReconciliations: workingRecords, grabDailyReports: workingReports }));
+    const summary = `Đã quét ${parsed.length} báo cáo · khớp ${matchedTotal}/${orderTotal} đơn${emptyDays ? ` · ${emptyDays} ngày không có đơn` : ""}`;
+    const detail = problems.length ? ` · chưa khớp: ${problems.slice(0, 5).join(" | ")}${problems.length > 5 ? ` và ${problems.length - 5} ngày khác` : ""}` : "";
+    return { summary: summary + detail, matchedTotal };
+  }
+
+  async function importGrabReportPdf(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!files.length) return;
+    setImportingGrabReport(true);
+    setGrabReportNotice(undefined);
+    try {
+      if (!uatMode) throw new Error("Đối soát tự động từ PDF hiện chỉ có ở UAT.");
+      const parsed: { report: ParsedGrabReport; fileName: string }[] = [];
+      for (const file of files) parsed.push({ report: parseGrabReportText(await extractGrabPdfText(await file.arrayBuffer())), fileName: file.name });
+      const { summary } = applyGrabReports(parsed);
+      setGrabReportNotice(summary);
+    } catch (error) {
+      setGrabReportNotice(error instanceof Error ? error.message : "Không đọc được file PDF báo cáo Grab.");
+    } finally {
+      setImportingGrabReport(false);
+    }
+  }
+
+  /// Pulls whatever `npm run grab:fetch` has already downloaded. `silent` is used
+  /// by the automatic scan when the Nền tảng tab opens, so an unavailable local
+  /// route (production build, folder missing) stays quiet instead of alarming.
+  async function scanLocalGrabReports(options?: { silent?: boolean; force?: boolean }) {
+    const silent = options?.silent === true;
+    const force = options?.force === true;
+    if (!uatMode) {
+      if (!silent) setGrabReportNotice("Đọc thư mục local chỉ dùng được ở UAT.");
+      return;
+    }
+    setImportingGrabReport(true);
+    if (!silent) setGrabReportNotice(undefined);
+    try {
+      const response = await fetch("/api/grab-reports", { cache: "no-store" });
+      const payload = await response.json() as { directory?: string; reports?: (ParsedGrabReport & { fileName: string })[]; failures?: { fileName: string; message: string }[]; error?: string };
+      if (!response.ok) throw new Error(payload.error || "Không đọc được thư mục báo cáo Grab.");
+      const reports = payload.reports || [];
+      // Skip days already ingested from the exact same file, so the automatic
+      // scan never rewrites reconciliations Long has since edited by hand.
+      // A report is only "done" when every one of its orders found a SAPO match.
+      // The old check keyed on file name alone, so a scan run before the SAPO
+      // invoice was imported recorded 0 matches and then blocked every retry.
+      const fresh = reports.filter((report) => {
+        if (force) return true;
+        const existing = state.grabDailyReports.find((entry) => entry.reportDate === report.reportDate && entry.fileName === report.fileName);
+        return !existing || existing.matchedCount === 0 || existing.unmatched.length > 0;
+      });
+      if (!fresh.length) {
+        if (!silent) setGrabReportNotice(`Thư mục có ${reports.length} báo cáo, tất cả đã khớp đủ đơn. Dùng "Quét lại tất cả" nếu vừa import file SAPO mới.${payload.failures?.length ? ` ${payload.failures.length} file không đọc được.` : ""}`);
+        return;
+      }
+      const { summary } = applyGrabReports(fresh.map((report) => ({ report, fileName: report.fileName })));
+      const failureNote = payload.failures?.length ? ` · ${payload.failures.length} file không đọc được` : "";
+      setGrabReportNotice(summary + failureNote);
+    } catch (error) {
+      if (!silent) setGrabReportNotice(error instanceof Error ? error.message : "Không đọc được thư mục báo cáo Grab.");
+    } finally {
+      setImportingGrabReport(false);
     }
   }
 
@@ -1413,20 +2209,34 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const inventoryGroups = (kind: "cogs" | "waste") => groupDetailsBy(inventoryEntries(kind), (entry) => entry.lot.category.trim() || "KHÁC", (entry) => ({ label: `${entry.lot.name} · ${entry.lot.receiptCode || "không mã phiếu"}`, date: entry.date, amount: -entry.amount }));
   const revenueDetails = periodRevenues.map((entry) => ({ label: "Bán hàng", date: entry.date, amount: entry.storeRevenue + entry.appRevenue }));
   const discountDetails = periodRevenues.filter((entry) => entry.discounts).map((entry) => ({ label: "Giảm giá / voucher", date: entry.date, amount: -entry.discounts }));
-  const platformDetails = periodRevenues.filter((entry) => entry.platformFees).map((entry) => ({ label: "Phí nền tảng", date: entry.date, amount: -entry.platformFees }));
+  // One detail list per sàn-cost component, day by day, each row naming its
+  // source so an estimated day is never mistaken for reconciled money.
+  const platformCostDetails = (key: "commission" | "tax" | "shipSupport" | "marketing", label: string): PnlDetail[] =>
+    platformCostModel.days.filter((day) => day[key] > 0).map((day) => ({
+      label: `${label} · ${day.source === "doi-soat" ? "đối soát" : "ước tính SAPO"}`,
+      date: day.date,
+      amount: -day[key],
+    }));
+  const platformComponentRows = [
+    { key: "commission" as const, label: "Chiết khấu sàn", value: platformCostModel.commission },
+    { key: "tax" as const, label: "Thuế sàn nộp thay", value: platformCostModel.tax },
+    { key: "shipSupport" as const, label: "Tài trợ phí ship", value: platformCostModel.shipSupport },
+    { key: "marketing" as const, label: "Quảng cáo sàn", value: platformCostModel.marketing },
+  ].filter((component) => component.value > 0);
+  const platformCostGroups: PnlGroup[] = platformComponentRows.map((component) => detailGroup(`${component.label} (${money(component.value)})`, platformCostDetails(component.key, component.label)));
   const pnlRows: PnlRow[] = [
-    { label: "Doanh thu gộp", value: grossRevenue, tone: "income", details: revenueDetails, groups: [detailGroup("Bán hàng", revenueDetails)], itemCount: revenueDetails.length },
-    { label: "Giảm giá / voucher", value: -discounts, tone: "deduction", details: discountDetails, groups: [detailGroup("Giảm giá / voucher", discountDetails)], itemCount: discountDetails.length },
-    { label: "Doanh thu thuần", value: netRevenue, tone: "total", details: [{ label: "Doanh thu gộp", amount: grossRevenue }, { label: "Giảm giá / voucher", amount: -discounts }], groups: [detailGroup("Cấu thành doanh thu thuần", [{ label: "Doanh thu gộp", amount: grossRevenue }, { label: "Giảm giá / voucher", amount: -discounts }])], itemCount: 2 },
-    { label: "NVL đã xuất dùng", value: -inventoryCogs, tone: "cost", details: inventoryDetails("cogs"), groups: inventoryGroups("cogs"), itemCount: inventoryDetails("cogs").length },
-    { label: "Hao hụt NVL", value: -inventoryWaste, tone: "cost", details: inventoryDetails("waste"), groups: inventoryGroups("waste"), itemCount: inventoryDetails("waste").length },
-    { label: "Lợi nhuận gộp", value: grossProfit, tone: "total", details: [{ label: "Doanh thu thuần", amount: netRevenue }, { label: "NVL đã xuất dùng", amount: -inventoryCogs }, { label: "Hao hụt NVL", amount: -inventoryWaste }], groups: [detailGroup("Cấu thành lợi nhuận gộp", [{ label: "Doanh thu thuần", amount: netRevenue }, { label: "NVL đã xuất dùng", amount: -inventoryCogs }, { label: "Hao hụt NVL", amount: -inventoryWaste }])], itemCount: 3 },
-    { label: "Chi phí cố định", value: -fixedCost, tone: "cost", details: occurrenceDetails("fixed"), groups: occurrenceGroups("fixed"), itemCount: occurrenceDetails("fixed").length },
-    { label: "Chi phí vận hành", value: -operatingCost, tone: "cost", details: occurrenceDetails("operating"), groups: occurrenceGroups("operating"), itemCount: occurrenceDetails("operating").length },
-    { label: "Chi phí bán hàng & nền tảng", value: -salesCost, tone: "cost", details: [...occurrenceDetails("sales"), ...platformDetails], groups: [...occurrenceGroups("sales"), ...(platformDetails.length ? [{ label: "Phí nền tảng", details: platformDetails, value: platformDetails.reduce((sum, detail) => sum + detail.amount, 0) }] : [])], itemCount: occurrenceDetails("sales").length + platformDetails.length },
-    { label: "EBITDA", value: ebitda, tone: "total", details: [{ label: "Lợi nhuận gộp", amount: grossProfit }, { label: "Chi phí cố định", amount: -fixedCost }, { label: "Chi phí vận hành", amount: -operatingCost }, { label: "Chi phí bán hàng & nền tảng", amount: -salesCost }], groups: [detailGroup("Cấu thành EBITDA", [{ label: "Lợi nhuận gộp", amount: grossProfit }, { label: "Chi phí cố định", amount: -fixedCost }, { label: "Chi phí vận hành", amount: -operatingCost }, { label: "Chi phí bán hàng & nền tảng", amount: -salesCost }])], itemCount: 4 },
-    { label: "Khấu hao", value: -depreciation, tone: "cost", details: assetExpenses.map((asset) => ({ label: asset.name, date: bounds.end, amount: -depreciationForAsset(asset, bounds) })), groups: groupDetailsBy(assetExpenses, (asset) => asset.subcategory || "Khác", (asset) => ({ label: asset.name, date: bounds.end, amount: -depreciationForAsset(asset, bounds) })), itemCount: assetExpenses.length },
-    { label: "Lợi nhuận hoạt động", value: operatingProfit, tone: "grand", details: [{ label: "EBITDA", amount: ebitda }, { label: "Khấu hao", amount: -depreciation }], groups: [detailGroup("Cấu thành lợi nhuận hoạt động", [{ label: "EBITDA", amount: ebitda }, { label: "Khấu hao", amount: -depreciation }])], itemCount: 2 },
+    { code: "A", label: "Doanh thu gộp", value: grossRevenue, tone: "income", details: revenueDetails, groups: [detailGroup("Bán hàng", revenueDetails)], itemCount: revenueDetails.length },
+    { code: "B", label: "Giảm giá / voucher", value: -discounts, tone: "deduction", details: discountDetails, groups: [detailGroup("Giảm giá / voucher", discountDetails)], itemCount: discountDetails.length },
+    { code: "C", formula: "C = A − B", label: "Doanh thu thuần", value: netRevenue, tone: "total", details: [{ label: "Doanh thu gộp", amount: grossRevenue }, { label: "Giảm giá / voucher", amount: -discounts }], groups: [detailGroup("Cấu thành doanh thu thuần", [{ label: "Doanh thu gộp", amount: grossRevenue }, { label: "Giảm giá / voucher", amount: -discounts }])], itemCount: 2 },
+    { code: "D", label: "NVL đã xuất dùng", value: -inventoryCogs, tone: "cost", details: inventoryDetails("cogs"), groups: inventoryGroups("cogs"), itemCount: inventoryDetails("cogs").length },
+    { code: "E", label: "Hao hụt NVL", value: -inventoryWaste, tone: "cost", details: inventoryDetails("waste"), groups: inventoryGroups("waste"), itemCount: inventoryDetails("waste").length },
+    { code: "F", formula: "F = C − D − E", label: "Lợi nhuận gộp", value: grossProfit, tone: "total", details: [{ label: "Doanh thu thuần", amount: netRevenue }, { label: "NVL đã xuất dùng", amount: -inventoryCogs }, { label: "Hao hụt NVL", amount: -inventoryWaste }], groups: [detailGroup("Cấu thành lợi nhuận gộp", [{ label: "Doanh thu thuần", amount: netRevenue }, { label: "NVL đã xuất dùng", amount: -inventoryCogs }, { label: "Hao hụt NVL", amount: -inventoryWaste }])], itemCount: 3 },
+    { code: "G", label: "Chi phí cố định", value: -fixedCost, tone: "cost", details: occurrenceDetails("fixed"), groups: occurrenceGroups("fixed"), itemCount: occurrenceDetails("fixed").length },
+    { code: "H", label: "Chi phí vận hành", value: -operatingCost, tone: "cost", details: occurrenceDetails("operating"), groups: occurrenceGroups("operating"), itemCount: occurrenceDetails("operating").length },
+    { code: "I", label: "Chi phí bán hàng & nền tảng", value: -salesCost, tone: "cost", details: [...occurrenceDetails("sales"), ...platformComponentRows.map((component) => ({ label: component.label, amount: -component.value }))], groups: [...occurrenceGroups("sales"), ...platformCostGroups], itemCount: occurrenceDetails("sales").length + platformComponentRows.length },
+    { code: "J", formula: "J = F − G − H − I", label: "EBITDA", value: ebitda, tone: "total", details: [{ label: "Lợi nhuận gộp", amount: grossProfit }, { label: "Chi phí cố định", amount: -fixedCost }, { label: "Chi phí vận hành", amount: -operatingCost }, { label: "Chi phí bán hàng & nền tảng", amount: -salesCost }], groups: [detailGroup("Cấu thành EBITDA", [{ label: "Lợi nhuận gộp", amount: grossProfit }, { label: "Chi phí cố định", amount: -fixedCost }, { label: "Chi phí vận hành", amount: -operatingCost }, { label: "Chi phí bán hàng & nền tảng", amount: -salesCost }])], itemCount: 4 },
+    { code: "K", label: "Khấu hao", value: -depreciation, tone: "cost", details: assetExpenses.map((asset) => ({ label: asset.name, date: bounds.end, amount: -depreciationForAsset(asset, bounds) })), groups: groupDetailsBy(assetExpenses, (asset) => asset.subcategory || "Khác", (asset) => ({ label: asset.name, date: bounds.end, amount: -depreciationForAsset(asset, bounds) })), itemCount: assetExpenses.length },
+    { code: "L", formula: "L = J − K", label: "Lợi nhuận hoạt động", value: operatingProfit, tone: "grand", details: [{ label: "EBITDA", amount: ebitda }, { label: "Khấu hao", amount: -depreciation }], groups: [detailGroup("Cấu thành lợi nhuận hoạt động", [{ label: "EBITDA", amount: ebitda }, { label: "Khấu hao", amount: -depreciation }])], itemCount: 2 },
   ];
   const cashInDetails: PnlDetail[] = periodRevenues.map((entry) => ({ label: "Thu bán hàng", date: entry.date, amount: entry.cashReceived || entry.storeRevenue + entry.appRevenue - entry.discounts - entry.platformFees }));
   const purchaseLots = inventoryLots.filter((lot) => !lot.internalReturn && inRange(lot.purchasedOn, bounds));
@@ -1435,9 +2245,9 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const purchaseDetails: PnlDetail[] = purchaseLots.map((lot) => ({ label: `${lot.name} · ${lot.receiptCode || "không mã phiếu"}`, date: lot.purchasedOn, amount: -(lot.quantity * lot.unitCost) }));
   const cashOutDetails = [...purchaseDetails, ...paidExpenseDetails, ...paidAssetDetails];
   const cashRows: PnlRow[] = [
-    { label: "Tiền vào", value: cashIn, tone: "income", details: cashInDetails, groups: [detailGroup("Thu bán hàng", cashInDetails)], itemCount: cashInDetails.length },
-    { label: "Tiền ra", value: -cashOut, tone: "cost", details: cashOutDetails, groups: nonEmptyGroups([detailGroup("Mua NVL", purchaseDetails), detailGroup("Chi phí đã trả", paidExpenseDetails), detailGroup("Mua tài sản", paidAssetDetails)]), itemCount: cashOutDetails.length },
-    { label: "Dòng tiền thuần", value: netCash, tone: "grand", details: [{ label: "Tiền vào", amount: cashIn }, { label: "Tiền ra", amount: -cashOut }], groups: [detailGroup("Cấu thành dòng tiền", [{ label: "Tiền vào", amount: cashIn }, { label: "Tiền ra", amount: -cashOut }])], itemCount: 2 },
+    { code: "A", label: "Tiền vào", value: cashIn, tone: "income", details: cashInDetails, groups: [detailGroup("Thu bán hàng", cashInDetails)], itemCount: cashInDetails.length },
+    { code: "B", label: "Tiền ra", value: -cashOut, tone: "cost", details: cashOutDetails, groups: nonEmptyGroups([detailGroup("Mua NVL", purchaseDetails), detailGroup("Chi phí đã trả", paidExpenseDetails), detailGroup("Mua tài sản", paidAssetDetails)]), itemCount: cashOutDetails.length },
+    { code: "C", formula: "C = A − B", label: "Dòng tiền thuần", value: netCash, tone: "grand", details: [{ label: "Tiền vào", amount: cashIn }, { label: "Tiền ra", amount: -cashOut }], groups: [detailGroup("Cấu thành dòng tiền", [{ label: "Tiền vào", amount: cashIn }, { label: "Tiền ra", amount: -cashOut }])], itemCount: 2 },
   ];
   const openingInventoryEntries = inventoryLots.filter((lot) => (lot.availableFrom || lot.purchasedOn) < bounds.start).map((lot) => {
     const issuedBefore = inventorySessions.filter((session) => session.sourceReceiptId === lot.id && (session.costRecognitionMonth ? `${session.costRecognitionMonth}-01` : session.activatedAt.slice(0, 10)) < bounds.start).length;
@@ -1449,17 +2259,17 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   }).filter((entry) => entry.amount > 0);
   const inventoryReportGroups = (entries: Array<{ lot: FinanceInventoryLot; amount: number }>, sign = 1) => groupDetailsBy(entries, (entry) => entry.lot.category || "KHÁC", (entry) => ({ label: `${entry.lot.name} · ${entry.lot.receiptCode || "không mã phiếu"}`, date: entry.lot.availableFrom || entry.lot.purchasedOn, amount: entry.amount * sign }));
   const inventoryRows: PnlRow[] = [
-    { label: "Tồn đầu kỳ", value: openingInventory, tone: "total", details: [], groups: inventoryReportGroups(openingInventoryEntries), itemCount: openingInventoryEntries.length },
-    { label: "Nhập kho", value: inventoryPurchases, tone: "income", details: purchaseDetails.map((detail) => ({ ...detail, amount: Math.abs(detail.amount) })), groups: inventoryReportGroups(purchaseLots.map((lot) => ({ lot, amount: lot.quantity * lot.unitCost }))), itemCount: purchaseLots.length },
-    { label: "Xuất dùng", value: -inventoryIssued, tone: "cost", details: inventoryDetails("cogs"), groups: inventoryGroups("cogs"), itemCount: inventoryDetails("cogs").length },
-    { label: "Hao hụt", value: -inventoryWaste, tone: "cost", details: inventoryDetails("waste"), groups: inventoryGroups("waste"), itemCount: inventoryDetails("waste").length },
-    { label: "Tồn cuối kỳ", value: closingInventory, tone: "grand", details: [], groups: inventoryReportGroups(closingInventoryEntries), itemCount: closingInventoryEntries.length },
+    { code: "A", label: "Tồn đầu kỳ", value: openingInventory, tone: "total", details: [], groups: inventoryReportGroups(openingInventoryEntries), itemCount: openingInventoryEntries.length },
+    { code: "B", label: "Nhập kho", value: inventoryPurchases, tone: "income", details: purchaseDetails.map((detail) => ({ ...detail, amount: Math.abs(detail.amount) })), groups: inventoryReportGroups(purchaseLots.map((lot) => ({ lot, amount: lot.quantity * lot.unitCost }))), itemCount: purchaseLots.length },
+    { code: "C", label: "Xuất dùng", value: -inventoryIssued, tone: "cost", details: inventoryDetails("cogs"), groups: inventoryGroups("cogs"), itemCount: inventoryDetails("cogs").length },
+    { code: "D", label: "Hao hụt", value: -inventoryWaste, tone: "cost", details: inventoryDetails("waste"), groups: inventoryGroups("waste"), itemCount: inventoryDetails("waste").length },
+    { code: "E", formula: "E = A + B − C − D", label: "Tồn cuối kỳ", value: closingInventory, tone: "grand", details: [], groups: inventoryReportGroups(closingInventoryEntries), itemCount: closingInventoryEntries.length },
   ];
   const assetValueDetails: PnlDetail[] = assetExpenses.map((asset) => ({ label: asset.name, date: asset.inServiceOn || asset.incurredOn, amount: asset.amount }));
   const assetDepreciationDetails: PnlDetail[] = assetExpenses.map((asset) => ({ label: asset.name, date: bounds.end, amount: -depreciationForAsset(asset, bounds) }));
   const assetRows: PnlRow[] = [
-    { label: "Tài sản đang quản lý", value: assetExpenses.reduce((sum, asset) => sum + asset.amount, 0), tone: "total", details: assetValueDetails, groups: groupDetailsBy(assetExpenses, (asset) => asset.subcategory || "Khác", (asset) => ({ label: asset.name, date: asset.inServiceOn || asset.incurredOn, amount: asset.amount })), itemCount: assetExpenses.length },
-    { label: "Khấu hao trong kỳ", value: -depreciation, tone: "cost", details: assetDepreciationDetails, groups: groupDetailsBy(assetExpenses, (asset) => asset.subcategory || "Khác", (asset) => ({ label: asset.name, date: bounds.end, amount: -depreciationForAsset(asset, bounds) })), itemCount: assetExpenses.length },
+    { code: "A", label: "Tài sản đang quản lý", value: assetExpenses.reduce((sum, asset) => sum + asset.amount, 0), tone: "total", details: assetValueDetails, groups: groupDetailsBy(assetExpenses, (asset) => asset.subcategory || "Khác", (asset) => ({ label: asset.name, date: asset.inServiceOn || asset.incurredOn, amount: asset.amount })), itemCount: assetExpenses.length },
+    { code: "B", label: "Khấu hao trong kỳ", value: -depreciation, tone: "cost", details: assetDepreciationDetails, groups: groupDetailsBy(assetExpenses, (asset) => asset.subcategory || "Khác", (asset) => ({ label: asset.name, date: bounds.end, amount: -depreciationForAsset(asset, bounds) })), itemCount: assetExpenses.length },
   ];
   const pnlCostMix = [
     { label: "NVL", value: inventoryCogs + inventoryWaste },
@@ -1540,9 +2350,15 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       </div>
 
       <section className={styles.financeImportHub}>
-        <div className={styles.importHubCopy}><span>IMPORT CENTER</span><h2>{uatMode ? "Bộ 4 file SAPO" : "Bộ 3 file SAPO"}</h2><p>{uatMode ? "Chọn cùng lúc Doanh thu tổng quan, Danh mục mặt hàng, Hình thức phục vụ và Danh sách hóa đơn. Hệ thống tự nhận diện từng file và map vào đúng dashboard." : "Chọn cùng lúc Doanh thu tổng quan, Danh mục mặt hàng và Hình thức phục vụ. Dữ liệu được map vào đúng dashboard."}</p></div>
-        <label className={`${styles.importHubButton} ${importingFinance ? styles.importing : ""}`}><input type="file" accept=".xls,.xlsx" multiple disabled={importingFinance} onChange={importFinanceExcel} /><span>{importingFinance ? "Đang phân tích & đồng bộ…" : `⇧ Chọn ${uatMode ? "4" : "3"} file Excel cùng lúc`}</span><small>{uatMode ? "Doanh thu · Mặt hàng · Phương thức/Hình thức · Hóa đơn" : "Doanh thu · Mặt hàng · Phương thức/Hình thức"}</small></label>
-        <div className={styles.importHubTypes}><span><i>DT</i>Doanh thu tổng quan</span><span><i>MH</i>Danh mục mặt hàng</span><span><i>PV</i>Hình thức phục vụ</span>{uatMode && <span><i>ĐH</i>Danh sách hóa đơn</span>}<b>{[revenueImport, productsImport, serviceImport, ...(uatMode ? [ordersImport] : [])].filter(Boolean).length}/{uatMode ? 4 : 3} loại đã có dữ liệu</b></div>
+        <div className={styles.importHubCopy}><span>IMPORT CENTER</span><h2>{uatMode ? "Bộ 3 file SAPO" : "Bộ 2 file SAPO"}</h2><p>{uatMode ? "Chọn cùng lúc Doanh thu tổng quan, Danh mục mặt hàng và Danh sách hoá đơn. Rê chuột lên từng ô bên dưới để xem đường xuất file trong Sapo." : "Chọn cùng lúc Doanh thu tổng quan và Danh mục mặt hàng. Rê chuột lên từng ô để xem đường xuất file trong Sapo."}</p></div>
+        <label className={`${styles.importHubButton} ${importingFinance ? styles.importing : ""}`}><input type="file" accept=".xls,.xlsx" multiple disabled={importingFinance} onChange={importFinanceExcel} /><span>{importingFinance ? "Đang phân tích & đồng bộ…" : `⇧ Chọn ${uatMode ? "3" : "2"} file Excel cùng lúc`}</span><small>{uatMode ? "Doanh thu · Mặt hàng · Hoá đơn" : "Doanh thu · Mặt hàng"}</small></label>
+        <div className={styles.importHubTypes}>
+          {/* Each badge carries the exact click path inside Sapo that produces it. */}
+          <span className={revenueImport ? styles.typeReady : ""} data-hint="Download SAPO"><i>DT</i>Doanh thu tổng quan</span>
+          <span className={pricesImport || productsImport ? styles.typeReady : ""} data-hint="Mặt hàng → Danh sách mặt hàng → Xuất Excel → Email"><i>MH</i>Danh mục mặt hàng</span>
+          {uatMode && <span className={ordersImport ? styles.typeReady : ""} data-hint="Hoá đơn → Hoá đơn bán hàng → Xuất Excel theo danh sách mặt hàng → Tất cả hoá đơn → Email"><i>ĐH</i>Danh sách hoá đơn</span>}
+          <b>{[revenueImport, pricesImport || productsImport, ...(uatMode ? [ordersImport] : [])].filter(Boolean).length}/{uatMode ? 3 : 2} loại đã có dữ liệu</b>
+        </div>
         {financeImportNotice && <div className={styles.importHubSuccess}><b>Import hoàn tất</b><span>{financeImportNotice}</span></div>}
       </section>
 
@@ -1584,25 +2400,27 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
 
       {uatMode && revenueSubTab === "platform" && <>
         <div className={styles.revenueHeader}>
-          <div><span>NỀN TẢNG & ĐỐI SOÁT</span><h2>{bounds.label}</h2><p>Danh sách lấy toàn bộ đơn Grab, Xanh/Green Food và Shopee từ SAPO; đối soát Grab chỉ cần chọn mã đơn và nhập tiền thực nhận.</p></div>
+          <div><span>SÀN & ĐỐI SOÁT</span><h2>{bounds.label}</h2><p>Chỉ tính đơn sàn — Grab, ShopeeFood và Xanh/Green Food. Website và các kênh tự bán được tách riêng ở mục Kênh khác vì không chịu phí sàn và không phải đối soát. Đối soát Grab chỉ cần chọn mã đơn và nhập tiền thực nhận.</p></div>
         </div>
         <div className={styles.revenueKpis}>
-          <article className={styles.primaryRevenueKpi}><span>DOANH THU NỀN TẢNG · SAPO</span><strong>{money(platformOrderRevenue)}</strong><small>{successfulPlatformOrders.length.toLocaleString("vi-VN")} đơn thành công · {channelPerformance.length.toLocaleString("vi-VN")} kênh</small></article>
+          <article className={styles.primaryRevenueKpi}><span>DOANH THU SÀN GHI NHẬN</span><strong>{settledEntries.length ? money(platformRecordedRevenue) : "-"}</strong><small>{settledEntries.length ? `${platformRecordedChannels.covered.join(", ")} · ${settledEntries.length.toLocaleString("vi-VN")} đơn${platformRecordedChannels.missing.length ? ` · chưa có báo cáo ${platformRecordedChannels.missing.join(", ")}` : ""}` : "chờ báo cáo từ sàn"}</small></article>
+          <article className={styles.primaryRevenueKpi}><span>DOANH THU SÀN · SAPO</span><strong>{money(platformOrderRevenue)}</strong><small>{successfulPlatformOrders.length.toLocaleString("vi-VN")} đơn sàn thành công · {channelPerformance.length.toLocaleString("vi-VN")} sàn</small></article>
+          <article className={styles.primaryRevenueKpi}><span>DOANH THU SÀN · THỰC NHẬN</span><strong>{money(receivedRevenue)}</strong><small>{reconciledEntries.length ? `${percent(reportedRevenue ? receivedRevenue / reportedRevenue * 100 : 0)} số SAPO · ${reconciledEntries.length.toLocaleString("vi-VN")} đơn đã đối soát` : "chưa đối soát đơn nào"}</small></article>
           <article><span>Trung bình/đơn</span><strong>{money(platformAverageOrder)}</strong><small>theo Danh sách hóa đơn</small></article>
-          <article><span>Giảm giá nền tảng</span><strong>{money(platformDiscountAmount)}</strong><small>{percent(platformDiscountRate)} tiền hàng</small></article>
-          <article><span>Đơn hủy</span><strong>{platformCancelledOrders.toLocaleString("vi-VN")}</strong><small>{periodPlatformOrders.length ? percent(platformCancelledOrders / periodPlatformOrders.length * 100) : "0%"} tổng đơn nền tảng</small></article>
-          <article><span>Coverage Grab</span><strong>{grabOrderOptions.length ? percent(grabCoverageRate) : "-"}</strong><small>{grabUnreconciledOrders ? `còn ${grabUnreconciledOrders.toLocaleString("vi-VN")} đơn` : grabOrderOptions.length ? "đã đối soát đủ" : "chưa có hóa đơn Grab"}</small></article>
-          <article className={grabDifference < 0 ? styles.warningKpi : ""}><span>Lệch thực nhận Grab</span><strong>{money(grabDifference)}</strong><small>{grabReconciliationRows.length ? `${percent(grabRetentionRate)} số SAPO đã đối soát` : "chưa nhập thực nhận"}</small></article>
+          <article><span>Giảm giá sàn</span><strong>{money(platformDiscountAmount)}</strong><small>{percent(platformDiscountRate)} tiền hàng</small></article>
+          <article><span>Phí sàn trung bình</span><strong>{settledEntries.length ? money(avgPlatformFee) : "-"}</strong><small>{settledEntries.length ? `${percent(avgListPrice ? avgPlatformFee / avgListPrice * 100 : 0)} giá bán · mỗi đơn` : "chờ báo cáo Grab"}</small></article>
+          <article><span>Quảng cáo trung bình</span><strong>{settledEntries.length ? money(avgMarketing) : "-"}</strong><small>{settledEntries.length ? `${percent(avgListPrice ? avgMarketing / avgListPrice * 100 : 0)} giá bán · mỗi đơn` : "chờ báo cáo Grab"}</small></article>
+          <article><span>Giảm giá trung bình</span><strong>{settledEntries.length ? money(avgDiscount) : "-"}</strong><small>{settledEntries.length ? `${percent(avgListPrice ? avgDiscount / avgListPrice * 100 : 0)} giá bán · mỗi đơn` : "chờ báo cáo Grab"}</small></article>
         </div>
         <div className={styles.revenueInsightGrid}>
           <article className={styles.revenuePanel}>
-            <div className={styles.revenuePanelTitle}><div><span>DOANH THU THEO NỀN TẢNG</span><strong>{channelPerformance.length ? `${channelPerformance.length} kênh bán` : "Chờ Danh sách hóa đơn"}</strong></div><small>Theo Nguồn đơn</small></div>
-            {channelPerformance.length ? <div className={styles.categoryBars}>{channelPerformance.map((entry) => <div key={entry.name}><div><span><b>{entry.name}</b><small>{entry.successfulOrders.toLocaleString("vi-VN")} đơn · TB {money(entry.averageOrder)}{entry.cancelledOrders ? ` · ${entry.cancelledOrders} hủy` : ""}</small></span><strong>{money(entry.revenue)}</strong></div><div><i style={{ width: `${entry.revenue / maxPlatformChannelRevenue * 100}%` }} /></div></div>)}</div> : <div className={styles.panelEmpty}>Import file Danh sách hóa đơn trong bộ 4 file SAPO để xem cơ cấu GrabFood, Website, ShopeeFood và các kênh khác.</div>}
+            <div className={styles.revenuePanelTitle}><div><span>DOANH THU THEO SÀN</span><strong>{channelPerformance.length ? `${channelPerformance.length} sàn đang bán` : "Chờ Danh sách hóa đơn"}</strong></div><small>Theo Nguồn đơn</small></div>
+            {channelPerformance.length ? <div className={styles.categoryBars}>{channelPerformance.map((entry) => <div key={entry.name}><div><span><b>{entry.name}</b><small>{entry.successfulOrders.toLocaleString("vi-VN")} đơn · TB {money(entry.averageOrder)}{entry.cancelledOrders ? ` · ${entry.cancelledOrders} hủy` : ""}</small></span><strong>{money(entry.revenue)}</strong></div><div><i style={{ width: `${entry.revenue / maxPlatformChannelRevenue * 100}%` }} /></div></div>)}</div> : <div className={styles.panelEmpty}>Import file Danh sách hóa đơn trong bộ 4 file SAPO để xem cơ cấu GrabFood, ShopeeFood và Xanh/Green Food.</div>}
           </article>
           <article className={`${styles.revenuePanel} ${styles.platformTrendPanel}`}>
-            <div className={styles.revenuePanelTitle}><div><span>NHỊP DOANH THU NỀN TẢNG</span><strong>{platformDailyTrend.length ? `${platformDailyTrend.length} ngày có đơn` : "Chờ Danh sách hóa đơn"}</strong></div><small>{money(platformOrderRevenue)}</small></div>
+            <div className={styles.revenuePanelTitle}><div><span>NHỊP DOANH THU SÀN</span><strong>{platformDailyTrend.length ? `${platformDailyTrend.length} ngày có đơn` : "Chờ Danh sách hóa đơn"}</strong></div><small>{money(platformOrderRevenue)}</small></div>
             {platformDailyTrend.length ? <div className={styles.miniBars}>{platformDailyTrend.map((entry) => <div className={styles.barColumn} key={entry.date} title={`${dateLabel(entry.date)} · ${entry.orders} đơn · ${money(entry.revenue)}`}><div className={styles.barTrack}><i style={{ height: `${Math.max(3, entry.revenue / maxPlatformDailyRevenue * 100)}%` }} /></div><span>{Number(entry.date.slice(8, 10))}</span></div>)}</div> : <div className={styles.panelEmpty}>Chưa có dữ liệu hóa đơn nền tảng trong kỳ đang chọn.</div>}
-            <p className={styles.metricDisclaimer}>Mỗi cột là một ngày có đơn. Di chuột để xem số đơn và doanh thu SAPO của ngày đó.</p>
+            <p className={styles.metricDisclaimer}>Mỗi cột là một ngày có đơn sàn. Di chuột để xem số đơn và doanh thu SAPO của ngày đó.</p>
           </article>
         </div>
         <div className={styles.revenueInsightGrid}>
@@ -1612,41 +2430,247 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
               <div className={styles.platformTakeRing} style={{ background: `conic-gradient(#e87d5c 0 ${Math.min(100, platformTakeRate)}%, #e8ede5 ${Math.min(100, platformTakeRate)}% 100%)` }}><i><strong>{percent(platformTakeRate)}</strong><small>bị giữ lại</small></i></div>
               <div className={styles.platformTakeStats}><div><span>{deliveryRevenue ? "DT giao hàng/nền tảng" : "DT thực làm mẫu số"}</span><b>{money(platformTakeBase)}</b></div><div><span>Doanh thu sau nhóm phí</span><b>{money(revenueAfterPlatformFees)}</b></div>{grabService && <div><span>Riêng Grab Food</span><b>{money(grabService.revenue)}</b></div>}<div><span>Ngày phát sinh phí</span><b>{revenueDataset.length ? `${platformFeeDays}/${revenueDataset.length}` : "-"}</b></div><div><span>Phí đối tác / tiền hàng</span><b>{percent(partnerCommissionRate)}</b></div></div>
             </div>
-            <div className={styles.platformFeeList}>{platformFeeComponents.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><div><i style={{ width: `${entry.value / maxPlatformFeeComponent * 100}%` }} /></div></div>)}</div>
+            <div className={styles.platformFeeList}>{platformFeeComponents.map((entry) => <div key={entry.label}><div><span>{entry.label}<small>{percent(entry.shareOfFees)} tổng phí · {percent(entry.shareOfRevenue)} doanh thu</small></span><b>{money(entry.value)}</b></div><div><i style={{ width: `${entry.value / maxPlatformFeeComponent * 100}%` }} /></div></div>)}</div>
             <p className={styles.metricDisclaimer}>{deliveryRevenue ? "Tỷ lệ phí dùng doanh thu của các hình thức giao hàng/nền tảng làm mẫu số." : "Chưa có file Hình thức phục vụ nên tạm dùng toàn bộ doanh thu thực làm mẫu số."} Các cột phí trong báo cáo Sapo đang gộp nhiều đối tác, vì vậy không quy toàn bộ phí cho riêng Grab.</p>
           </article>
-          <article className={`${styles.revenuePanel} ${styles.channelMixCard}`}>
-            <div className={styles.revenuePanelTitle}><div><span>PHÂN BỔ HÌNH THỨC PHỤC VỤ</span><strong>{serviceOrders ? `${serviceOrders.toLocaleString("vi-VN")} đơn` : "Chờ file phục vụ"}</strong></div><small>{serviceCancelledOrders ? `${serviceCancelledOrders.toLocaleString("vi-VN")} đơn hủy` : "Theo doanh thu & đơn"}</small></div>
-            {periodServices.length ? <>
-              <div className={styles.serviceSegmentBar} aria-label={`Offline ${percent(offlineOrderShare)}, giao hàng và nền tảng ${percent(deliveryOrderShare)}`}><i style={{ width: `${offlineOrderShare}%` }} /><b style={{ width: `${deliveryOrderShare}%` }} /></div>
-              <div className={styles.serviceLegend}><span><i />Offline <b>{percent(offlineOrderShare)}</b></span><span><i />Giao hàng / nền tảng <b>{percent(deliveryOrderShare)}</b></span></div>
-              <div className={styles.serviceSummary}>
-                <div><span>OFFLINE</span><b>{offlineOrders.toLocaleString("vi-VN")} đơn</b><strong>{money(offlineRevenue)}</strong><small>{percent(offlineRevenueShare)} doanh thu</small></div>
-                <div><span>GIAO HÀNG / NỀN TẢNG</span><b>{deliveryOrders.toLocaleString("vi-VN")} đơn</b><strong>{money(deliveryRevenue)}</strong><small>{percent(deliveryRevenueShare)} doanh thu</small></div>
+          <article className={`${styles.revenuePanel} ${styles.marketplaceFeeCard}`}>
+            <div className={styles.revenuePanelTitle}><div><span>PHÍ SÀN THEO NỀN TẢNG</span><strong>{marketplaceReconciledReported ? `${percent(marketplaceBlendedFeeRate)} bình quân` : "Chưa có đối soát"}</strong></div><small>{money(marketplaceMeasuredFee)} phí đo được</small></div>
+            <div className={styles.marketplaceFeeList}>{marketplaceFeeByChannel.map((entry) => <div className={styles.marketplaceFeeRow} key={entry.key}>
+              <div className={styles.marketplaceFeeHead}><span><b>{entry.name}</b><small>{entry.orders.toLocaleString("vi-VN")} đơn · TB {money(entry.averageOrder)}</small></span><strong>{money(entry.reportedAmount)}<small>SAPO ghi nhận</small></strong></div>
+              <div className={styles.marketplaceFeeTrack}><i style={{ width: `${entry.reportedAmount / maxMarketplaceRevenue * 100}%` }} /></div>
+              {entry.orders === 0
+                ? <p className={styles.marketplaceFeeNote}>Không có đơn nào trong kỳ.</p>
+                : entry.reconciledOrders === 0
+                  ? <p className={styles.marketplaceFeeNote}>Chưa đối soát đơn nào — chưa đo được phí sàn thật. Bấm <b>Đối soát</b> ở danh sách bên dưới và nhập tiền thực nhận.</p>
+                  : <>
+                      <div className={styles.marketplaceFeeStats}>
+                        <div><span>Phí sàn thật</span><b>{percent(entry.feeRate)}</b></div>
+                        <div><span>Đã đo trên</span><b>{entry.reconciledOrders}/{entry.orders} đơn</b></div>
+                        <div><span>Phí đã đo</span><b>{money(entry.measuredFee)}</b></div>
+                        <div><span>Giảm giá</span><b>{percent(entry.discountRate)}</b></div>
+                      </div>
+                      <p className={styles.marketplaceFeeNote}>{entry.coverage >= 99.5
+                        ? <>Đã đối soát đủ kỳ. Thực nhận <b>{money(entry.reportedAmount - entry.measuredFee)}</b>.</>
+                        : <>Suy ra cả kỳ theo tỷ lệ này: phí khoảng <b>{money(entry.projectedFee)}</b>, còn lại khoảng <b>{money(entry.netAfterFee)}</b> — <i>ước tính</i> vì mới đối soát {percent(entry.coverage)} số đơn.</>}</p>
+                    </>}
+            </div>)}</div>
+            <p className={styles.metricDisclaimer}>Phí sàn không có trong file hóa đơn SAPO — cột Phí dịch vụ và Phí GH của đơn sàn đều bằng 0. Con số ở đây đo bằng chính đối soát: SAPO ghi nhận trừ tiền thực nhận. Đối soát càng nhiều đơn thì tỷ lệ càng đúng.</p>
+          </article>
+        </div>
+        <div className={styles.revenueInsightGrid}>
+          <article className={styles.revenuePanel}>
+            <div className={styles.revenuePanelTitle}><div><span>CHÊNH LỆCH SAPO ↔ THỰC NHẬN GRAB</span><strong>{reconciledEntries.length ? percent(gapRateAverage) : "Chờ đối soát"}</strong></div><small>tỉ lệ lệch trung bình</small></div>
+            {reconciliationWeekly.length ? <>
+              <div className={styles.marketplaceFeeStats}>
+                <div><span>Tỉ lệ lệch TB</span><b>{percent(gapRateAverage)}</b></div>
+                <div><span>SAPO ghi nhận</span><b>{money(reportedRevenue)}</b></div>
+                <div><span>Thực nhận</span><b>{money(receivedRevenue)}</b></div>
+                <div><span>Chênh lệch</span><b className={styles.negativeCell}>−{money(reportedRevenue - receivedRevenue)}</b></div>
               </div>
-              <div className={styles.serviceModeList}>{periodServices.map((entry) => {
-                const orderShare = serviceOrders ? entry.totalOrders / serviceOrders * 100 : 0;
-                const isGrab = normalizedHeader(entry.serviceName).includes("grab");
-                return <div className={isGrab ? styles.grabHighlight : ""} key={entry.id}><div><span><b>{entry.serviceName}</b><small>{entry.totalOrders.toLocaleString("vi-VN")} đơn · {percent(orderShare)} tổng đơn{entry.cancelledOrders ? ` · ${entry.cancelledOrders.toLocaleString("vi-VN")} hủy` : ""}</small></span><strong>{money(entry.revenue)}</strong></div><div className={styles.serviceModeTrack}><i style={{ width: `${entry.revenue / maxServiceRevenue * 100}%` }} /></div></div>;
-              })}</div>
-              <div className={`${styles.serviceReconciliation} ${revenueDataset.length && Math.abs(serviceRevenueGap) < 1 ? styles.reconciled : ""}`}><span>Đối soát với Doanh thu tổng quan</span><b>{!revenueDataset.length ? "Chờ file doanh thu" : Math.abs(serviceRevenueGap) < 1 ? "Khớp 100%" : `Lệch ${money(Math.abs(serviceRevenueGap))}`}</b></div>
-            </> : <div className={styles.panelEmpty}>Import file Hình thức phục vụ tại Import Center để xem phân bổ thật giữa tại bàn, mang đi, Grab Food và các kênh giao hàng.</div>}
+              <div className={styles.weekStack}>{reconciliationWeekly.map((week) => <div key={week.week}>
+                <div className={styles.weekStackHead}><span>Tuần {dateLabel(week.week).slice(0, 5)}</span><b>{percent(week.gapRate)} lệch</b></div>
+                <div className={styles.weekStackBar} title={`SAPO ${money(week.reported)} · thực nhận ${money(week.received)} · ${week.orders} đơn`}>
+                  <i className={styles.segKept} style={{ width: `${Math.max(0, Math.min(100, week.receivedRate))}%` }}><em>{percent(week.receivedRate)}</em></i>
+                  <i className={styles.segGap} style={{ width: `${Math.max(0, Math.min(100, week.gapRate))}%` }} />
+                </div>
+              </div>)}</div>
+              <div className={styles.weekLegend}><span><i className={styles.segKept} />Thực nhận</span><span><i className={styles.segGap} />Sàn giữ lại</span></div>
+            </> : <div className={styles.panelEmpty}>Chưa có đơn nào được đối soát trong kỳ. Upload báo cáo Grab PDF để thấy tỉ lệ lệch theo tuần.</div>}
+            <p className={styles.metricDisclaimer}>Mỗi cột là một tuần, chia theo tỉ lệ trên số SAPO ghi nhận: phần xanh là tiền thực nhận về, phần đỏ là toàn bộ phí và thuế sàn giữ lại. Chưa gồm chi phí quảng cáo vì Grab trừ khoản đó theo ngày.</p>
+          </article>
+          <article className={styles.revenuePanel}>
+            <div className={styles.revenuePanelTitle}><div><span>CHI PHÍ MARKETING GRAB</span><strong>{periodGrabReports.length ? money(grabMarketingTotal) : "Chờ báo cáo PDF"}</strong></div><small>{periodGrabReports.length.toLocaleString("vi-VN")} ngày có báo cáo</small></div>
+            {periodGrabReports.length ? <>
+              <div className={styles.marketplaceFeeStats}>
+                <div><span>% doanh thu sàn</span><b>{percent(grabMarketingRate)}</b></div>
+                <div><span>Trung bình mỗi ngày</span><b>{money(grabMarketingTotal / periodGrabReports.length)}</b></div>
+                <div><span>Số chiến dịch</span><b>{grabMarketingByType.length}</b></div>
+                <div><span>Ngày tốn nhất</span><b>{money(Math.max(...periodGrabReports.map((report) => report.totalMarketing), 0))}</b></div>
+              </div>
+              <div className={styles.revenuePanelTitle}><div><span>THEO CHIẾN DỊCH</span></div><small>{percent(grabMarketingTotal ? (grabMarketingByType[0]?.total || 0) / grabMarketingTotal * 100 : 0)} dồn vào chiến dịch lớn nhất</small></div>
+              <div className={styles.categoryBars}>{grabMarketingByType.map((entry) => <div key={entry.label}><div><span><b>{entry.label}</b><small>{percent(grabMarketingTotal ? entry.total / grabMarketingTotal * 100 : 0)} tổng chi marketing</small></span><strong>{money(entry.total)}</strong></div><div><i style={{ width: `${entry.total / Math.max(...grabMarketingByType.map((row) => row.total), 1) * 100}%` }} /></div></div>)}</div>
+              <div className={styles.revenuePanelTitle}><div><span>THEO NGÀY</span></div><small>{money(grabMarketingTotal)} toàn kỳ</small></div>
+              <div className={styles.miniBars}>{periodGrabReports.slice().reverse().map((report) => <div className={styles.barColumn} key={report.id} title={`${dateLabel(report.reportDate)} · ${money(report.totalMarketing)} · ${percent(report.totalExpectedSapo ? report.totalMarketing / report.totalExpectedSapo * 100 : 0)} doanh thu`}><div className={styles.barTrack}><i style={{ height: `${Math.max(3, report.totalMarketing / Math.max(...periodGrabReports.map((row) => row.totalMarketing), 1) * 100)}%` }} /></div><span>{Number(report.reportDate.slice(8, 10))}</span></div>)}</div>
+            </> : <div className={styles.panelEmpty}>Chưa có báo cáo Grab PDF nào trong kỳ. Upload ở panel Đối soát đơn sàn bên dưới.</div>}
+            <p className={styles.metricDisclaimer}>Grab tính phí quảng cáo theo ngày cho cả cửa hàng, không gắn với đơn nào — nên bảng này chỉ nhìn ở mức chiến dịch và ngày. Phần chia về từng đơn nằm trong chi tiết đơn.</p>
           </article>
         </div>
         <article className={`${styles.revenuePanel} ${styles.grabReconciliationPanel}`}>
-          <div className={styles.revenuePanelTitle}><div><span>DANH SÁCH ĐƠN NỀN TẢNG</span><strong>Grab · Xanh/Green Food · Shopee</strong></div><small>{platformOrderList.length} đơn trong kỳ</small></div>
-          <div className={styles.grabReconciliationSummary}><div><span>SAPO toàn bộ đơn nền tảng</span><b>{money(platformOrderRevenue)}</b></div><div><span>SAPO đơn Grab đã đối soát</span><b>{money(grabReportedTotal)}</b></div><div><span>Thực nhận Grab đã nhập</span><b>{money(grabReceivedTotal)}</b></div><div className={grabDifference < 0 ? styles.negativeSummary : ""}><span>Chênh lệch Grab</span><b>{money(grabDifference)}</b></div></div>
-          <div className={styles.platformOrderList}>{platformOrderList.length ? platformOrderList.map((order) => {
-            const reconciliation = reconciliationForPlatformOrder(order);
-            const isGrab = isGrabPlatformOrder(order);
-            return <div className={styles.platformOrderRow} key={order.id}>
-              <div className={styles.platformOrderMain}><span className={styles.platformOrderChannel}>{order.channelName}</span><b>{order.orderCode}</b><small>{dateLabel(order.orderDate)} · SAPO {money(order.reportedAmount)}</small></div>
-              <div className={styles.platformOrderStatus}>{isGrab ? <span className={reconciliation ? styles.reconciliationDone : styles.reconciliationPending}>{reconciliation ? "Đối soát done" : "Chưa đối soát"}</span> : <span className={styles.reconciliationNotApplicable}>Theo dõi</span>}</div>
-              <div className={styles.platformOrderAction}>{isGrab && <button type="button" onClick={() => openPlatformReconciliation(order)}>{reconciliation ? "Xem / sửa" : "Đối soát"}</button>}</div>
-            </div>;
-          }) : <div className={styles.panelEmpty}>Chưa có danh sách đơn nền tảng trong kỳ này. Hãy import file Danh sách hóa đơn SAPO.</div>}</div>
+          <div className={styles.revenuePanelTitle}><div><span>ĐỐI SOÁT ĐƠN SÀN · {RECONCILIATION_BUILD} · {bounds.label}</span><strong>{reconciliationDoneCount.toLocaleString("vi-VN")}/{reconciliationRowsView.length.toLocaleString("vi-VN")} đơn đã đối soát</strong></div><small>{percent(reconciliationRowsView.length ? reconciliationDoneCount / reconciliationRowsView.length * 100 : 0)} coverage</small></div>
+          <div className={styles.grabIngestRow}>
+            <label className={`${styles.grabPdfUpload} ${importingGrabReport ? styles.importing : ""}`}><input type="file" accept="application/pdf,.pdf" multiple disabled={importingGrabReport} onChange={(event) => void importGrabReportPdf(event)} /><span>{importingGrabReport ? "Đang đọc báo cáo PDF…" : "⇧ Upload báo cáo Grab (PDF)"}</span></label>
+            <button type="button" className={styles.grabFolderScan} disabled={importingGrabReport} onClick={() => void scanLocalGrabReports({ force: true })}><span>{importingGrabReport ? "Đang quét…" : "⟳ Quét thư mục local"}</span></button>
+          </div>
+          {grabReportNotice && <p className={styles.grabReportNotice}>{grabReportNotice}</p>}
+          {marketplaceMonths.length > 0 && <div className={styles.monthChips}>
+            <span>Tháng</span>
+            {marketplaceMonths.map(({ month, count }) => <button type="button" key={month} className={periodMode === "month" && selectedMonth === month ? styles.selected : ""} onClick={() => { setPeriodMode("month"); setSelectedMonth(month); setSelectedYear(Number(month.slice(0, 4))); }}>{`${Number(month.slice(5, 7))}/${month.slice(0, 4)}`}<b>{count}</b></button>)}
+          </div>}
+          {!reconciliationRowsView.length && marketplaceMonths.length > 0 && <p className={styles.grabReportNotice}>Kỳ đang chọn ({bounds.label}) không có đơn sàn nào. Chọn một tháng có dữ liệu ở trên.</p>}
+          <div className={styles.reconciliationFilters}>
+            {([["all", "Tất cả", reconciliationRowsView.length], ["pending", "Chưa đối soát", reconciliationPendingCount], ["done", "Đã đối soát", reconciliationDoneCount]] as const).map(([value, label, count]) => (
+              <button type="button" key={value} className={reconciliationFilter === value ? styles.selected : ""} onClick={() => setReconciliationFilter(value)}>{label}<b>{count.toLocaleString("vi-VN")}</b></button>
+            ))}
+          </div>
+          <div className={styles.filterSummary}>[{RECONCILIATION_BUILD}] kỳ {bounds.start}→{bounds.end} · SAPO {state.platformOrders.length} đơn ({new Set(state.platformOrders.map((entry) => entry.id)).size} id duy nhất) · ngoài kỳ lọt vào: {reconciliationRowsView.filter((row) => !inRange(row.order.orderDate, bounds)).length} · Đang hiện <b>{visibleReconciliationRows.length.toLocaleString("vi-VN")}</b> / {reconciliationRowsView.length.toLocaleString("vi-VN")} đơn · {reconciliationFilter === "all" ? "tất cả" : reconciliationFilter === "done" ? "đã đối soát" : "chưa đối soát"} · {bounds.label}</div>
+          {visibleReconciliationRows.length ? <div className={styles.reconciliationTableWrap}><div className={styles.reconciliationTable}>
+            <div className={styles.reconciliationTableHead}><span>Đơn</span><span>Doanh thu Grab</span><span>Grab ghi nhận sau trừ</span><span>SAPO ghi nhận</span><span>Thực nhận</span><span>So với quầy</span><span /></div>
+            {visibleReconciliationRows.map(({ order, reconciliation, reason }) => {
+              if (!reconciliation) {
+                return <div className={`${styles.reconciliationTableRow} ${styles.pendingRow}`} key={order.id}>
+                  <button type="button" onClick={() => openPlatformReconciliation(order)}><b>{order.orderCode}</b><small>{dateLabel(order.orderDate)} · {order.channelName}</small></button>
+                  <span>{order.goodsAmount ? money(order.goodsAmount) : "—"}</span>
+                  <span className={styles.pendingReason} title={reason}>{reason}</span>
+                  <span>{money(order.reportedAmount)}</span>
+                  <span>—</span>
+                  <span>—</span>
+                  <button type="button" className={styles.pendingAction} aria-label="Đối soát tay" onClick={() => openPlatformReconciliation(order)}>›</button>
+                </div>;
+              }
+              const journey = reconciliationJourney(reconciliation);
+              return <div className={styles.reconciliationTableRow} key={reconciliation.id}>
+                <button type="button" onClick={() => editGrabReconciliation(reconciliation)}><b>{reconciliation.orderCode}</b><small>{reconciliation.settlement?.grabOrderCode ? `${reconciliation.settlement.grabOrderCode} · ` : ""}{dateLabel(reconciliation.orderDate)}{reconciliation.settlement ? (reconciliation.settlement.matchQuality === "amount-only" ? " · ⚠ khớp lỏng" : "") : " · tay"}</small></button>
+                <span>{journey.listPrice ? money(journey.listPrice) : "—"}</span>
+                <span>{journey.settlement ? money(journey.grabPayout) : "—"}</span>
+                <span>{money(reconciliation.reportedAmount)}</span>
+                <strong>{money(reconciliation.receivedAmount)}</strong>
+                <span className={journey.versusCounter === undefined ? "" : journey.versusCounter >= 0 ? styles.positiveCell : styles.negativeCell}>
+                  {journey.versusCounter === undefined ? "—" : <>{journey.versusCounter >= 0 ? "+" : "−"}{money(Math.abs(journey.versusCounter))}<small>{journey.versusCounter >= 0 ? "+" : "−"}{percent(Math.abs(journey.versusCounterRate))}</small></>}
+                </span>
+                <button type="button" aria-label="Xóa đối soát" onClick={() => void deleteGrabReconciliation(reconciliation.id)}>×</button>
+              </div>;
+            })}
+          </div></div> : <div className={styles.panelEmpty}>Không có đơn nào trong bộ lọc này.</div>}
+          <p className={styles.metricDisclaimer}>Bấm mã đơn để xem đường đi của tiền hoặc đối soát tay. Đơn chưa đối soát thường vì <b>chưa có báo cáo Grab của ngày đó</b>, hoặc vì sàn đó (Shopee, GreenSM) chưa có báo cáo đối soát nào. <b>So với quầy</b> đối chiếu tiền thực nhận với giá bán tại quầy của cùng giỏ hàng.</p>
         </article>
-        {showGrabReconciliationModal && <div className={styles.backdrop} role="presentation" onMouseDown={() => !savingGrabReconciliation && setShowGrabReconciliationModal(false)}><form className={`${styles.sheet} ${styles.grabReconciliationSheet}`} onSubmit={(event) => void saveGrabReconciliation(event)} onMouseDown={(event) => event.stopPropagation()}><div className={styles.sheetHandle} /><div className={styles.sheetTitle}><div><span>ĐỐI SOÁT ĐƠN NỀN TẢNG</span><h2>{grabForm.id ? "Cập nhật thực nhận" : "Nhập tiền thực nhận"}</h2></div><button type="button" disabled={savingGrabReconciliation} onClick={() => setShowGrabReconciliationModal(false)}>×</button></div>{selectedGrabOrder ? <><div className={styles.grabOrderPreview}><div><span>Nền tảng</span><b>{selectedGrabOrder.channelName}</b></div><div><span>Mã đơn</span><b>{selectedGrabOrder.orderCode}</b></div><div><span>Ngày đơn</span><b>{dateLabel(selectedGrabOrder.orderDate)}</b></div><div><span>SAPO ghi nhận</span><b>{money(selectedGrabOrder.reportedAmount)}</b></div></div><label className={styles.modalField}>Tiền thực nhận<input autoFocus required inputMode="numeric" value={grabForm.receivedAmount} onChange={(event) => setGrabForm((current) => ({ ...current, receivedAmount: amountInput(event.target.value) }))} placeholder="Nhập số tiền thực nhận" /></label><label className={styles.modalField}>Ghi chú<input value={grabForm.note} onChange={(event) => setGrabForm((current) => ({ ...current, note: event.target.value }))} placeholder="Kỳ thanh toán, lý do lệch..." /></label><div className={styles.grabFormActions}><button type="button" disabled={savingGrabReconciliation} onClick={() => setShowGrabReconciliationModal(false)}>Hủy</button><button type="submit" disabled={savingGrabReconciliation}>{savingGrabReconciliation ? "Đang lưu..." : grabForm.id ? "Lưu thay đổi" : "Lưu đối soát"}</button></div></> : <div className={styles.panelEmpty}>Chọn một đơn nền tảng để bắt đầu đối soát.</div>}</form></div>}
+        {otherChannelOrders.length > 0 && <article className={styles.revenuePanel}>
+          <div className={styles.revenuePanelTitle}><div><span>KÊNH KHÁC · KHÔNG PHẢI SÀN</span><strong>{money(otherChannelRevenue)}</strong></div><small>{successfulOtherChannelOrders.length.toLocaleString("vi-VN")} đơn · TB {money(otherChannelAverageOrder)}</small></div>
+          <div className={styles.categoryBars}>{otherChannelPerformance.map((entry) => <div key={entry.name}><div><span><b>{entry.name}</b><small>{entry.successfulOrders.toLocaleString("vi-VN")} đơn · TB {money(entry.averageOrder)}</small></span><strong>{money(entry.revenue)}</strong></div><div><i style={{ width: `${entry.revenue / Math.max(...otherChannelPerformance.map((row) => row.revenue), 1) * 100}%` }} /></div></div>)}</div>
+          <p className={styles.metricDisclaimer}>Quán tự nhận và tự giao, không mất phí sàn và không cần đối soát, nên các đơn này không tính vào KPI, AOV hay biểu đồ của nhóm Sàn ở trên.</p>
+        </article>}
+        {showGrabReconciliationModal && <div className={styles.backdrop} role="presentation" onMouseDown={() => !savingGrabReconciliation && setShowGrabReconciliationModal(false)}><form className={`${styles.sheet} ${styles.grabReconciliationSheet}`} onSubmit={(event) => void saveGrabReconciliation(event)} onMouseDown={(event) => event.stopPropagation()}><div className={styles.sheetHandle} /><div className={styles.sheetTitle}><div><span>{selectedGrabOrder?.channelName || "ĐƠN SÀN"}{selectedGrabOrder ? ` · ${dateLabel(selectedGrabOrder.orderDate)}` : ""}</span><h2>{selectedGrabOrder?.orderCode || "Đối soát"}</h2></div><button type="button" disabled={savingGrabReconciliation} onClick={() => setShowGrabReconciliationModal(false)}>×</button></div>{selectedGrabOrder ? (() => {
+          const saved = grabForm.id ? state.grabReconciliations.find((entry) => entry.id === grabForm.id) : undefined;
+          const hasReceived = grabForm.receivedAmount.trim().length > 0;
+          const base: GrabReconciliationRecord = saved || {
+            id: "", orderCode: selectedGrabOrder.orderCode, orderDate: selectedGrabOrder.orderDate,
+            reportedAmount: selectedGrabOrder.reportedAmount, receivedAmount: 0, discounts: [],
+            platformOrderId: selectedGrabOrder.id,
+          };
+          const j = reconciliationJourney(base, {
+            receivedAmount: parseAmount(grabForm.receivedAmount),
+            counterPrice: grabForm.counterPrice.trim() ? parseAmount(grabForm.counterPrice) : undefined,
+            discountTotal: grabForm.discounts.reduce((sum, layer) => sum + parseAmount(layer.amount), 0),
+          });
+          // Stage 1 is what Grab settles on the order itself; stage 2 is the
+          // day-level ad bill, which lands after the payout. Mixing them would
+          // make the payout stop matching Grab's own report.
+          const orderSteps = [
+            { label: "Giảm giá", value: j.discount, rate: j.discountRate, tone: styles.segDiscount, lines: j.discountLayers.map((layer) => ({ label: layer.label || "Không rõ chương trình", amount: layer.amount })) },
+            { label: "Chiết khấu Grab", value: j.commission, rate: j.commissionRate, tone: styles.segCommission, lines: [] },
+            { label: "Thuế GTGT + TNCN", value: j.tax, rate: j.taxRate, tone: styles.segTax, lines: [] },
+            { label: "Tài trợ phí ship", value: j.shipping, rate: j.shippingRate, tone: styles.segShip, lines: [] },
+          ].filter((step) => step.value > 0);
+          const payoutRate = j.payoutRate;
+          const keptRate = j.listPrice ? Math.max(0, j.netAfterMarketing) / j.listPrice * 100 : 0;
+          return <>
+            <div className={styles.orderIdentity}>
+              <div><span>Mã đơn Grab</span><b>{j.settlement?.grabOrderCode || "—"}</b><small>{j.settlement ? `giao ${j.settlement.deliveryTime || "—"}` : "chưa có báo cáo Grab"}</small></div>
+              <div><span>Mã hoá đơn SAPO</span><b>{selectedGrabOrder.orderCode}</b><small>tạo {selectedGrabOrder.orderCreatedAt ? selectedGrabOrder.orderCreatedAt.slice(11, 16) : "—"}</small></div>
+              <div><span>Giá Grab</span><b>{money(j.listPrice)}</b><small>giá niêm yết trên sàn</small></div>
+              <div><span>Giá quầy</span><b>{j.counterPrice == null ? "—" : money(j.counterPrice)}</b><small>{j.counterPrice == null ? "chưa có giá" : counterPriceFromItems(selectedGrabOrder)?.covered ? "tính từ món trong đơn" : "nhập tay"}</small></div>
+            </div>
+            {j.settlement?.matchQuality === "amount-only" && <p className={styles.grabReportNotice}>⚠ Đơn này khớp bằng tầng lỏng nhất — chỉ giá trước giảm giá trùng nhau. SAPO không lưu mã đơn Grab nên không có khoá chung để kiểm chứng; đối chiếu tay bằng mã <b>{j.settlement.grabOrderCode}</b> trong app GrabMerchant nếu con số trông lạ.</p>}
+            <div className={styles.journeyTop}>
+              <div><span>Giá bán trên sàn</span><b>{money(j.listPrice)}</b>{j.listVersusCounter !== undefined && <small className={j.listVersusCounter >= 0 ? styles.positiveCell : styles.negativeCell}>{j.listVersusCounter >= 0 ? "cao hơn" : "thấp hơn"} {percent(Math.abs(j.listVersusCounter))} so với quầy</small>}</div>
+              <div className={styles.journeyKept}><span>Còn lại sau tất cả</span><b>{money(j.netAfterMarketing)}</b><small>{percent(keptRate)} giá bán</small></div>
+            </div>
+
+            {(() => {
+              const basket = counterPriceFromItems(selectedGrabOrder);
+              if (!selectedGrabOrder.items?.length) {
+                return <p className={styles.grabReportNotice}>Chưa có chi tiết món cho đơn này. Import file SAPO <b>Doanh thu theo danh sách mặt hàng</b> để biết đơn gồm món gì và tính đúng giá quầy.</p>;
+              }
+              return <>
+                <div className={styles.journeyStage}><b>0</b><span>Món trong đơn · {selectedGrabOrder.items.length} dòng</span></div>
+                <div className={styles.basketList}>
+                  {selectedGrabOrder.items.map((item, index) => {
+                    const priced = counterPriceBook.get(normalizedHeader(item.name));
+                    return <div key={`${item.name}-${index}`}>
+                      <span><b>{item.quantity} × {item.name}</b>{item.option && <small>{item.option}</small>}</span>
+                      <em>{money(item.amount)}</em>
+                      <i className={priced ? "" : styles.negativeCell}>{priced ? money(priced.storePrice * (item.quantity || 1)) : "chưa có giá quầy"}</i>
+                    </div>;
+                  })}
+                  <div className={styles.basketTotal}>
+                    <span><b>Tổng</b></span>
+                    <em>{money(selectedGrabOrder.items.reduce((sum, item) => sum + item.amount, 0))}</em>
+                    <i>{basket ? money(basket.total) : "—"}</i>
+                  </div>
+                </div>
+                <div className={styles.basketLegend}><span>Giá Grab</span><span>Giá quầy{basket && !basket.covered ? ` · thiếu giá ${basket.missing.length} món` : ""}</span></div>
+              </>;
+            })()}
+            <div className={styles.journeyStage}><b>1</b><span>Grab quyết toán trên đơn</span></div>
+            <div className={styles.journeyBar} aria-label={`Grab trả ${percent(payoutRate)} giá bán`}>
+              {orderSteps.map((step) => <i key={step.label} className={step.tone} style={{ width: `${Math.max(0, step.rate)}%` }} title={`${step.label} ${money(step.value)}`} />)}
+              <b style={{ width: `${Math.max(0, payoutRate)}%` }} title={`Grab trả ${money(j.grabPayout)}`} />
+            </div>
+            <div className={styles.journeyList}>
+              {orderSteps.map((step) => <div key={step.label}>
+                <span><i className={step.tone} />{step.label}{step.lines.length > 0 && <em className={styles.stepLines}>{step.lines.map((line) => line.label).join(" · ")}</em>}</span>
+                <b>−{money(step.value)}</b><em>{percent(step.rate)}</em>
+              </div>)}
+              <div className={styles.journeyPayout}><span>Thực nhận Grab trả</span><b>{money(j.grabPayout)}</b><em>{percent(payoutRate)}</em></div>
+            </div>
+
+            {j.marketing > 0 && <>
+              <div className={styles.journeyStage}><b>2</b><span>Quảng cáo — phân bổ ước tính, không phải số Grab gán</span></div>
+              <div className={styles.journeyList}>
+                <div>
+                  <span><i className={styles.segMarketing} />Marketing phân bổ</span>
+                  <b>−{money(j.marketing)}</b><em>{percent(j.marketingOfPayoutRate)}</em>
+                </div>
+                {j.marketingCampaigns.map((campaign) => <div className={styles.campaignRow} key={campaign.label}>
+                  <span>{campaign.label}</span><b>−{money(campaign.amount)}</b><em>{percent(j.grabPayout ? campaign.amount / j.grabPayout * 100 : 0)}</em>
+                </div>)}
+                <div className={styles.journeyPayout}><span>Còn lại sau marketing</span><b>{money(j.netAfterMarketing)}</b><em>{percent(keptRate)}</em></div>
+              </div>
+              <p className={styles.metricDisclaimer}><b>Không đối soát được phần này.</b> Grab tính phí quảng cáo theo ngày cho cả cửa hàng và không gán về đơn nào — kể cả cột <i>Phí tiếp thị thành công</i> trong file giao dịch của Grab cũng để trống. Số ở đây là tổng marketing của ngày chia đều cho số đơn, dùng để ước lượng giá vốn thật, không phải con số Grab công bố cho đơn này.</p>
+            </>}
+
+            <div className={styles.journeyChecks}>
+              <div className={Math.abs(j.sapoGap) < 1 ? styles.checkOk : styles.checkWarn}>
+                <span>SAPO ghi nhận</span><b>{money(base.reportedAmount)}</b>
+                <small>{Math.abs(j.sapoGap) < 1 ? "khớp thực nhận Grab" : `lệch ${j.sapoGap >= 0 ? "+" : "−"}${money(Math.abs(j.sapoGap))} · ${percent(Math.abs(j.sapoGapRate))} so thực nhận Grab`}</small>
+              </div>
+              <div className={j.netVersusCounter === undefined ? "" : j.netVersusCounter >= 0 ? styles.checkOk : styles.checkWarn}>
+                <span>So với giá quầy</span><b>{j.counterPrice == null ? "—" : `${j.netVersusCounter! >= 0 ? "+" : "−"}${money(Math.abs(j.netVersusCounter!))}`}</b>
+                <small>{j.counterPrice == null ? "nhập giá quầy bên dưới" : `${percent(Math.abs(j.netVersusCounterRate))} · quầy ${money(j.counterPrice)}`}</small>
+              </div>
+            </div>
+            <details className={styles.journeyEdit}>
+              <summary>Sửa số liệu</summary>
+              <div className={styles.reconciliationStatement}>
+                <div className={styles.discountStack}>
+                  <span>Lớp giảm giá<small>Sàn tự chạy, voucher quán, giảm nhờ quảng cáo…</small></span>
+                  <div className={styles.discountLayers}>
+                    {grabForm.discounts.map((layer, index) => <div className={styles.discountLayer} key={index}>
+                      <input value={layer.label} onChange={(event) => updateDiscountLayer(index, { label: event.target.value })} placeholder="Tên lớp giảm giá" />
+                      <input inputMode="numeric" value={layer.amount} onChange={(event) => updateDiscountLayer(index, { amount: amountInput(event.target.value) })} placeholder="0" />
+                      <button type="button" aria-label="Xóa lớp giảm giá" onClick={() => removeDiscountLayer(index)}>×</button>
+                    </div>)}
+                    <button type="button" className={styles.addDiscountLayer} onClick={addDiscountLayer}>+ Thêm lớp giảm giá</button>
+                  </div>
+                </div>
+                <label className={styles.statementInput}><span>Tiền thực nhận<small>{j.settlement ? "Thu nhập theo báo cáo Grab — sửa nếu tiền về khác" : "Số tiền sàn chuyển vào tài khoản"}</small></span><input required inputMode="numeric" value={grabForm.receivedAmount} onChange={(event) => setGrabForm((current) => ({ ...current, receivedAmount: amountInput(event.target.value) }))} placeholder="Nhập số tiền thực nhận" /></label>
+                <label className={styles.statementInput}><span>Giá quầy<small>Tính từ giá bán tại quầy của từng món trong đơn</small></span><input inputMode="numeric" value={grabForm.counterPrice} onChange={(event) => setGrabForm((current) => ({ ...current, counterPrice: amountInput(event.target.value) }))} placeholder="Giá bán tại quầy" /></label>
+              </div>
+              <label className={styles.modalField}>Ghi chú<input value={grabForm.note} onChange={(event) => setGrabForm((current) => ({ ...current, note: event.target.value }))} placeholder="Kỳ thanh toán, lý do lệch..." /></label>
+            </details>
+            {!hasReceived && <p className={styles.grabReportNotice}>Chưa có tiền thực nhận — mở “Sửa số liệu” để nhập.</p>}
+            <div className={styles.grabFormActions}><button type="button" disabled={savingGrabReconciliation} onClick={() => setShowGrabReconciliationModal(false)}>Đóng</button><button type="submit" disabled={savingGrabReconciliation}>{savingGrabReconciliation ? "Đang lưu..." : grabForm.id ? "Lưu thay đổi" : "Lưu đối soát"}</button></div>
+          </>;
+        })() : <div className={styles.panelEmpty}>Chọn một đơn sàn để bắt đầu đối soát.</div>}</form></div>}
       </>}
     </section>}
 
@@ -1657,6 +2681,39 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       {reportView === "cash" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article className={styles.visualPrimary}><span>TIỀN VÀO</span><strong>{money(cashIn)}</strong><small>{cashInDetails.length} dòng thu</small></article><article><span>TIỀN RA</span><strong>{money(cashOut)}</strong><small>{cashOutDetails.length} dòng chi</small></article><article className={netCash < 0 ? styles.visualRisk : ""}><span>DÒNG TIỀN THUẦN</span><strong>{money(netCash)}</strong><small>{cashIn ? percent(netCash / cashIn * 100) : "-"} tiền vào</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>TIỀN RA THEO NHÓM</span><h3>Dòng tiền đang đi vào đâu?</h3></div><b>{money(cashOut)}</b></div><div className={styles.visualBars}>{cashComponents.length ? cashComponents.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxCashComponent * 100}%` }} /></i><small>{cashOut ? percent(entry.value / cashOut * 100) : "0%"} tiền ra</small></div>) : <p>Chưa có dòng tiền ra trong kỳ.</p>}</div></article></section>}
       {reportView === "inventory" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article><span>TỒN ĐẦU KỲ</span><strong>{money(openingInventory)}</strong><small>{openingInventoryEntries.length} lô</small></article><article className={styles.visualPrimary}><span>TỒN CUỐI KỲ</span><strong>{money(closingInventory)}</strong><small>{closingInventoryEntries.length} lô còn giá trị</small></article><article><span>ĐÃ XUẤT / HAO HỤT</span><strong>{money(inventoryIssued)}</strong><small>Hao hụt {money(inventoryWaste)}</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>CƠ CẤU TỒN CUỐI KỲ</span><h3>Category giữ nhiều giá trị nhất</h3></div><b>{closingCategoryValues.length} category</b></div><div className={styles.visualBars}>{closingCategoryValues.length ? closingCategoryValues.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxClosingCategory * 100}%` }} /></i><small>{closingInventory ? percent(entry.value / closingInventory * 100) : "0%"} tồn cuối kỳ</small></div>) : <p>Chưa có tồn kho cuối kỳ.</p>}</div></article></section>}
       {reportView === "assets" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article className={styles.visualPrimary}><span>NGUYÊN GIÁ</span><strong>{money(assetOriginalValue)}</strong><small>{assetExpenses.length} tài sản</small></article><article><span>ĐÃ KHẤU HAO</span><strong>{money(assetAccumulatedValue)}</strong><small>{assetOriginalValue ? percent(assetAccumulatedValue / assetOriginalValue * 100) : "0%"} nguyên giá</small></article><article><span>GIÁ TRỊ CÒN LẠI</span><strong>{money(assetRemainingValue)}</strong><small>Khấu hao kỳ {money(depreciation)}</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>CƠ CẤU TÀI SẢN</span><h3>Nguyên giá theo nhóm tài sản</h3></div><b>{assetCategoryValues.length} nhóm</b></div><div className={styles.visualBars}>{assetCategoryValues.length ? assetCategoryValues.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxAssetCategory * 100}%` }} /></i><small>{assetOriginalValue ? percent(entry.value / assetOriginalValue * 100) : "0%"} nguyên giá</small></div>) : <p>Chưa có tài sản trong kỳ.</p>}</div><div className={styles.assetValueTrack}><span>Giá trị còn lại</span><i><b style={{ width: `${assetOriginalValue ? assetRemainingValue / assetOriginalValue * 100 : 0}%` }} /></i><strong>{assetOriginalValue ? percent(assetRemainingValue / assetOriginalValue * 100) : "0%"}</strong></div></article></section>}
+      {reportView === "pnl" && (() => {
+        // The A → A' bridge: what the sàn booked versus what actually lands,
+        // itemised by the same components the P&L charges. A' here is derived
+        // (A minus modelled costs), so on partially reconciled periods it is an
+        // estimate — the coverage line says exactly how much is measured.
+        const sanRecorded = platformOrderRevenue;
+        if (!sanRecorded) return null;
+        const deductions = [
+          { label: "Chiết khấu sàn", value: platformCostModel.commission, tone: styles.segCommission },
+          { label: "Thuế sàn nộp thay", value: platformCostModel.tax, tone: styles.segTax },
+          { label: "Tài trợ phí ship", value: platformCostModel.shipSupport, tone: styles.segShip },
+          { label: "Quảng cáo sàn", value: platformCostModel.marketing, tone: styles.segMarketing },
+        ].filter((entry) => entry.value > 0);
+        const sanNet = sanRecorded - platformCostTotal;
+        const offlineRevenuePart = Math.max(0, netRevenue - sanRecorded);
+        const rate = (value: number) => (sanRecorded ? value / sanRecorded * 100 : 0);
+        return <article className={`${styles.revenuePanel} ${styles.bridgePanel}`}>
+          <div className={styles.revenuePanelTitle}><div><span>TỪ DOANH THU SÀN ĐẾN TIỀN THỰC VỀ</span><strong>{money(sanRecorded)} → {money(sanNet)}</strong></div><small>{percent(rate(sanNet))} số ghi nhận</small></div>
+          <div className={styles.journeyBar} aria-label={`Thực về ${percent(rate(sanNet))}`}>
+            {deductions.map((entry) => <i key={entry.label} className={entry.tone} style={{ width: `${Math.max(0, rate(entry.value))}%` }} title={`${entry.label} ${money(entry.value)}`} />)}
+            <b style={{ width: `${Math.max(0, rate(sanNet))}%` }} title={`Thực về ${money(sanNet)}`} />
+          </div>
+          <div className={styles.journeyList}>
+            <div><span><i className={styles.lineCode}>A</i><b>Doanh thu sàn ghi nhận</b></span><b>{money(sanRecorded)}</b><em>100%</em></div>
+            {deductions.map((entry, index) => <div key={entry.label}><span><i className={`${styles.lineCode} ${entry.tone}`}>{index + 1}</i>{entry.label}</span><b>−{money(entry.value)}</b><em>{percent(rate(entry.value))}</em></div>)}
+            <div className={styles.journeyPayout}><span><i className={styles.lineCode}>A&apos;</i>Thực về từ sàn<em className={styles.lineFormula}>A&apos; = A − ({deductions.map((_, index) => index + 1).join(" + ")})</em></span><b>{money(sanNet)}</b><em>{percent(rate(sanNet))}</em></div>
+            <div><span><i className={styles.lineCode}>B</i><b>Doanh thu offline</b><em className={styles.lineFormula}>B = Doanh thu thuần (C) − A</em></span><b>{money(offlineRevenuePart)}</b><em /></div>
+            <div className={styles.journeyPayout}><span><i className={styles.lineCode}>T</i>Tổng tiền bán hàng thực về<em className={styles.lineFormula}>T = A&apos; + B</em></span><b>{money(offlineRevenuePart + sanNet)}</b><em /></div>
+            <div className={styles.journeyPayout}><span><i className={styles.lineCode}>L</i>Lợi nhuận hoạt động sau tất cả<em className={styles.lineFormula}>L = J − K trong P&amp;L bên dưới</em></span><b className={operatingProfit < 0 ? styles.negativeCell : ""}>{money(operatingProfit)}</b><em>{netRevenue ? percent(operatingProfit / netRevenue * 100) : "—"}</em></div>
+          </div>
+          <p className={styles.metricDisclaimer}>{platformCostModel.reconciledDays}/{platformCostModel.days.length} ngày lấy từ đối soát Grab; những ngày còn lại dùng phí theo SAPO và <b>chưa gồm quảng cáo</b>, nên A&apos; của các ngày đó là ước tính lạc quan. Doanh thu thuần và các mục tiêu không đổi — toàn bộ chênh lệch nằm ở chi phí bán hàng &amp; nền tảng.</p>
+        </article>;
+      })()}
       {reportView === "pnl" && <FinancialAccordion rows={pnlRows} revenueBase={netRevenue} />}
       {reportView === "cash" && <FinancialAccordion rows={cashRows} />}
       {reportView === "inventory" && <FinancialAccordion rows={inventoryRows} />}
@@ -1684,5 +2741,5 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
 }
 
 function FinancialAccordion({ rows, revenueBase }: { rows: PnlRow[]; revenueBase?: number }) {
-  return <div className={styles.financialTable}>{rows.map((row) => <details className={`${styles.financialDetail} ${styles[row.tone]}`} key={row.label}><summary className={styles.financialRow}><span>{row.label} ({row.itemCount ?? row.details.length})</span><strong>{money(row.value)}</strong><small>{revenueBase && row.label !== "Doanh thu gộp" && row.label !== "Giảm giá / voucher" ? `${(Math.abs(row.value) / revenueBase * 100).toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% DT` : ""}</small><i aria-hidden="true">+</i></summary><div className={styles.financialBreakdown}>{row.groups?.length ? row.groups.map((group) => <details className={styles.financialSubgroup} key={group.label}><summary><span>{group.label} ({group.details.length})</span><b>{money(group.value)}</b><i aria-hidden="true">+</i></summary><div>{group.details.length ? group.details.map((detail, index) => <div key={`${detail.label}-${detail.date || index}`}><span>{detail.label}{detail.date ? ` · ${dateLabel(detail.date)}` : ""}</span><b>{money(detail.amount)}</b></div>) : <p>Chưa có dòng chi tiết.</p>}</div></details>) : <p>Chưa có giao dịch chi tiết trong kỳ này.</p>}</div></details>)}</div>;
+  return <div className={styles.financialTable}>{rows.map((row) => <details className={`${styles.financialDetail} ${styles[row.tone]}`} key={row.label}><summary className={styles.financialRow}><span>{row.code && <i className={styles.lineCode}>{row.code}</i>}{row.label}{row.formula ? <em className={styles.lineFormula}>{row.formula}</em> : ` (${row.itemCount ?? row.details.length})`}</span><strong>{money(row.value)}</strong><small>{revenueBase && row.label !== "Doanh thu gộp" && row.label !== "Giảm giá / voucher" ? `${(Math.abs(row.value) / revenueBase * 100).toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% DT` : ""}</small><i aria-hidden="true">+</i></summary><div className={styles.financialBreakdown}>{row.groups?.length ? row.groups.map((group) => <details className={styles.financialSubgroup} key={group.label}><summary><span>{group.label} ({group.details.length})</span><b>{money(group.value)}</b><i aria-hidden="true">+</i></summary><div>{group.details.length ? group.details.map((detail, index) => <div key={`${detail.label}-${detail.date || index}`}><span>{detail.label}{detail.date ? ` · ${dateLabel(detail.date)}` : ""}</span><b>{money(detail.amount)}</b></div>) : <p>Chưa có dòng chi tiết.</p>}</div></details>) : <p>Chưa có giao dịch chi tiết trong kỳ này.</p>}</div></details>)}</div>;
 }
