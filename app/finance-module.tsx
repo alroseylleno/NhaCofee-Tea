@@ -109,7 +109,7 @@ const COUNTER_PRICE_RATE = 0.7278;
 /// Bumped by hand on each UI change to this panel. If the tag on screen does not
 /// match the one the terminal reports, the browser is running a cached bundle
 /// and no amount of code reading will explain the behaviour.
-const RECONCILIATION_BUILD = "R20";
+const RECONCILIATION_BUILD = "R21";
 
 /// How confidently a PDF row was tied to a SAPO order. "amount-only" means only
 /// the pre-discount value lined up, so the pairing deserves a second look.
@@ -878,6 +878,14 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const [savingGrabReconciliation, setSavingGrabReconciliation] = useState(false);
   const [importingGrabReport, setImportingGrabReport] = useState(false);
   const [reconciliationFilter, setReconciliationFilter] = useState<"all" | "pending" | "done">("all");
+  // "Running on Long's machine" is orthogonal to UAT/Production: prod.localhost
+  // serves the PRODUCTION data mode from the local dev server, so the local
+  // folder scan can feed Supabase directly. On Vercel this is always false.
+  const [onLocalMachine, setOnLocalMachine] = useState(false);
+  useEffect(() => {
+    const hostname = window.location.hostname.toLocaleLowerCase();
+    setOnLocalMachine(["localhost", "127.0.0.1", "::1"].includes(hostname) || hostname.endsWith(".localhost"));
+  }, []);
   // The automatic folder scan runs once per session, the first time the Nền tảng
   // tab is opened, so switching tabs does not re-read the folder on every click.
   const autoScannedLocalReports = useRef(false);
@@ -940,6 +948,8 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     }
   }, [state, loaded, storageKey]);
   useEffect(() => {
+    // Deliberately UAT-only: Production ingest must be an explicit click, never
+    // a side effect of opening a tab.
     if (!loaded || !uatMode || revenueSubTab !== "platform" || autoScannedLocalReports.current) return;
     autoScannedLocalReports.current = true;
     void scanLocalGrabReports({ silent: true });
@@ -2051,7 +2061,13 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         receivedAmount: existing?.settlement && existing.receivedAmount !== existing.settlement.payout ? existing.receivedAmount : pdfOrder.payout,
         discounts: pdfOrder.merchantPromo > 0 ? [{ label: "Khuyến mãi từ người bán (Grab)", amount: pdfOrder.merchantPromo }] : [],
         settlement,
-        counterPrice: existing?.counterPrice ?? counterPriceEstimate(pdfOrder.orderValue) ?? undefined,
+        // Real basket price wins now that line items and the price book persist;
+        // the 0.7278 ratio is only the last resort for orders without items.
+        counterPrice: existing?.counterPrice ?? (() => {
+          const basket = counterPriceFromItems(match);
+          if (basket?.covered) return basket.total;
+          return counterPriceEstimate(pdfOrder.orderValue) || undefined;
+        })(),
         note: existing?.note?.trim() ? existing.note : `Tự động từ báo cáo Grab ${dateLabel(report.reportDate)}`,
       });
     }
@@ -2141,8 +2157,8 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   async function scanLocalGrabReports(options?: { silent?: boolean; force?: boolean }) {
     const silent = options?.silent === true;
     const force = options?.force === true;
-    if (!uatMode) {
-      if (!silent) setGrabReportNotice("Đọc thư mục local chỉ dùng được ở UAT.");
+    if (!onLocalMachine) {
+      if (!silent) setGrabReportNotice("Đọc thư mục local chỉ chạy được khi mở app từ máy có thư mục Report (localhost hoặc prod.localhost).");
       return;
     }
     setImportingGrabReport(true);
@@ -2499,7 +2515,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           <div className={styles.revenuePanelTitle}><div><span>ĐỐI SOÁT ĐƠN SÀN · {RECONCILIATION_BUILD} · {bounds.label}</span><strong>{reconciliationDoneCount.toLocaleString("vi-VN")}/{reconciliationRowsView.length.toLocaleString("vi-VN")} đơn đã đối soát</strong></div><small>{percent(reconciliationRowsView.length ? reconciliationDoneCount / reconciliationRowsView.length * 100 : 0)} coverage</small></div>
           <div className={styles.grabIngestRow}>
             <label className={`${styles.grabPdfUpload} ${importingGrabReport ? styles.importing : ""}`}><input type="file" accept="application/pdf,.pdf" multiple disabled={importingGrabReport} onChange={(event) => void importGrabReportPdf(event)} /><span>{importingGrabReport ? "Đang đọc báo cáo PDF…" : "⇧ Upload báo cáo Grab (PDF)"}</span></label>
-            {uatMode && <button type="button" className={styles.grabFolderScan} disabled={importingGrabReport} onClick={() => void scanLocalGrabReports({ force: true })}><span>{importingGrabReport ? "Đang quét…" : "⟳ Quét thư mục local"}</span></button>}
+            {onLocalMachine && <button type="button" className={styles.grabFolderScan} disabled={importingGrabReport} onClick={() => void scanLocalGrabReports({ force: true })}><span>{importingGrabReport ? "Đang quét…" : uatMode ? "⟳ Quét thư mục local" : "⟳ Quét thư mục local → ghi Production"}</span></button>}
           </div>
           {grabReportNotice && <p className={styles.grabReportNotice}>{grabReportNotice}</p>}
           {marketplaceMonths.length > 0 && <div className={styles.monthChips}>
