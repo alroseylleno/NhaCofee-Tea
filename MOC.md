@@ -1,6 +1,6 @@
 # Nha Ops - Code Map
 
-> Last reviewed: 2026-08-17
+> Last reviewed: 2026-09-05
 > Production branch: `main`
 > GitHub: `alroseylleno/NhaCofee-Tea`
 
@@ -24,6 +24,9 @@ This is the mandatory routing map for code changes in `Operations/nha-ops/`. Rea
 - Product Master remains Finance-driven for imported SKU/name/category/default-price data, while manual products and clones are also supported in both environments. Production stores those manual products in Supabase and Finance reconciliation preserves them.
 - Local/UAT Product Master seeds missing recipes by Finance SKU from `Copy of BẢNG TỔNG HỢP CT (1).xlsx`. Size-specific SKUs use the workbook's M/L column; matched Ingredient Master rows are prefilled, while missing/ambiguous NVL or unsupported conversions remain explicit `CT Excel` flags and block theoretical COGS. Existing saved recipes are never overwritten. Production is unchanged.
 - Production migration `20260812000200` corrects the owner-confirmed July overstatement for 9 boxes of Kem béo CARNATION EXTRA in the 48-box receipt `010726-027`. It verifies 16 total lifecycle rows and 13 July rows for that exact receipt, preserves the first 4 legitimate July issues, the two lifecycle rows from other periods and the single active August box, then snapshots and deletes only the latest 9 closed July rows; guarded sealed stock moves from 32 to 41.
+- **Uncommitted WIP as of 2026-09-05 (platform reconciliation).** Working tree carries the sàn/Website split, all-sàn đối soát, the Grab daily-PDF ingest, two new dashboards, the local folder route and the Gmail fetch script. Production `main` is `41d108f` and has none of it; the 2026-09-05 inventory/ingredient-master commits touch no file in this WIP, so it still applies cleanly. Migrations `20260814000100` and `20260815000100` are still untracked and applied to no Supabase project, and commit `bd46caa` still gates the whole `Nền tảng` tab out of Production. Destructive migration `20260905000100` (snack nhỏ 1.700 / COCA 5.200 lot removal) is also untracked and unapplied; committing it alongside the other two would let one push apply all three, so stage it deliberately.
+- Sàn means Grab, Shopee, GreenSM, beFood and GoFood — channels that hold the customer's money and settle later. `Website` is an owned channel with no platform fee and no settlement, so it is reported separately under `Kênh khác` and excluded from every sàn KPI, chart and reconciliation list. `isMarketplaceSignal` draws that line; the older `isKnownPlatformSignal` still includes Website and governs only what gets imported.
+- Platform fee is not derivable from the SAPO invoice export: `Phí dịch vụ (3)` and `Phí GH thu khách (5)` are `0` on every sàn order. The only truthful sources are đối soát (`SAPO ghi nhận − thực nhận`) and Grab's daily PDF. A sàn with no reconciled order must read *chưa đo được*, never an assumed rate.
 
 ## Start Here
 
@@ -36,8 +39,13 @@ This is the mandatory routing map for code changes in `Operations/nha-ops/`. Rea
 | Product Master, ingredient master, recipes, theoretical COGS | `app/product-master.tsx` | `app/product-master.module.css`, `lib/master-data.ts`, `lib/master-data-store.ts` | UAT browser storage; Production Supabase master and versioned-recipe tables |
 | Global mobile shell, login, shared inventory styling | `app/page.tsx` | `app/globals.css`, `public/` | UI-only unless fields/data contracts change |
 | Supabase client/environment variables | `lib/supabase.ts` | `.env.local`, Vercel environment variables | Never expose service-role or database credentials in browser code |
+| Ingredient master code allocation | `lib/master-data.ts` (`mergeInventoryDrafts`) | `lib/master-data-store.ts` | New `NVL-0000` codes are allocated above the highest running number in use, never from array position. Positional codes collide with surviving rows whenever an `ingredient_master` row is deleted, and the client upsert conflicts on `(store_id, source_key)` so it cannot absorb a clash on `(store_id, code)` |
 | Database schema, RLS, RPCs, triggers | `supabase/migrations/` | `.github/workflows/supabase-migrations.yml` | Always add a new timestamped migration; never rewrite an applied migration |
 | Deployment/migration automation | `.github/workflows/supabase-migrations.yml` | `supabase/README.md` | Runs only when migrations/workflow change on `main` |
+| Grab daily PDF parsing (orders + marketing sections) | `lib/grab-report.ts` | `app/finance-module.tsx`, `public/pdf-worker/` | Pure parser; no data impact until the matcher runs |
+| PDF↔SAPO matching, đối soát auto-fill, platform dashboards | `app/finance-module.tsx` | `lib/grab-report.ts`, `app/finance.module.css` | Writes `grabReconciliations` and `grabDailyReports`; UAT localStorage only |
+| Reading the local Grab PDF folder | `app/api/grab-reports/route.ts` | `next.config.ts` (`serverExternalPackages`) | Dev/UAT only; returns 403 in a production build |
+| Downloading Grab reports from Gmail | `scripts/fetch-grab-reports.mjs` | `package.json` (`grab:uat`, `grab:prod`), `.env.local` | Writes PDFs into `Report/Grab Report/`; never touches the database |
 
 ## Runtime Map
 
@@ -117,6 +125,27 @@ Important boundaries:
 - Importing a new dataset replaces that dataset through database RPCs; it must not silently clear unrelated inventory or expense data.
 - Inventory costs use sessions and their recognition month, not merely the browser's current month.
 
+### Grab daily report ingest
+
+Two entry points, one shared tail. `importGrabReportPdf` (file picker, parses in the browser via `pdfjs-dist` with the worker served from `public/pdf-worker/`) and `scanLocalGrabReports` (reads `/api/grab-reports`, which parses server-side with the pdfjs legacy build) both hand off to `applyGrabReports`, so matching and state folding exist in exactly one place.
+
+Matching rule, verified against a real report: **`SAPO Tổng tiền thanh toán = Grab Trị giá đơn hàng − Khuyến mãi từ người bán`**. When several SAPO orders share that amount, the winner is the one whose creation time sits closest before the PDF's delivery time. Unmatched PDF orders are recorded on the daily report row rather than dropped silently.
+
+Grab charges advertising per day, not per order, so `marketingAllocated` spreads the day's marketing total evenly across that day's orders. Any per-order marketing figure in the UI is that allocation, never a Grab-supplied number.
+
+The automatic folder scan runs once per session when the `Nền tảng` tab first opens, and skips any report date already ingested from the same file name — so it can never overwrite a reconciliation edited by hand.
+
+Counter price (`So giá quầy`) defaults to `giá Grab × 0,7278` and is editable. It is an estimate, not a lookup: the SAPO invoice export carries no line items, so a basket cannot be priced against Product Master automatically.
+
+### `scripts/fetch-grab-reports.mjs`
+
+Manual trigger that pulls Grab's daily PDFs out of Gmail over IMAP using an App Password, into `Report/Grab Report/`. Two npm scripts split the destinations deliberately: `grab:uat` writes to disk for the browser to ingest, and `grab:prod` refuses to run until the reconciliation migrations are applied, the `Nền tảng` tab is un-gated for Production, and a dedicated Supabase account exists for the script. Keeping them separate means a routine UAT refresh has no code path to production data.
+
+The mail must satisfy all three of: from `no-reply@grab.com`, subject containing `Báo cáo doanh số`, and a PDF attachment. Only the sender and date range go to IMAP `SEARCH`; the Vietnamese subject is matched in code accent-insensitively, because Gmail needs a UTF-8 charset negotiation for non-ASCII `SEARCH` terms and returns an empty result — not an error — when it goes wrong. The mailbox is resolved by its `\All` special-use flag rather than the literal `[Gmail]/All Mail`, whose name is localised.
+
+Production ingest must not put a Supabase `service_role` key on Vercel: `.github/workflows/supabase-migrations.yml` states that secrets live only in GitHub Actions, and `service_role` bypasses RLS entirely. Use a dedicated authenticated account instead.
+
+
 ### `lib/finance-store.ts`
 
 Maps Supabase rows into manual expenses, revenue, product and service records; upserts `finance_expenses`; and calls replace-import RPCs. If an import fails with missing table/function/schema cache errors, verify migrations before changing UI parsing.
@@ -194,8 +223,9 @@ Do not stage these files in an unrelated Kho NVL hotfix. Production Product Mast
 | Historical test cleanup | destructive one-time cleanup | `20260728000300` |
 | Finance imports | finance import/row tables and replace RPCs | `20260804000100` through `20260804000300` |
 | Manual finance expenses | `finance_expenses` with explicit authenticated table grants and authenticated CRUD RLS | `20260811000100` |
-| GRAB order reconciliation | `finance_grab_reconciliations` with authenticated CRUD RLS | `20260814000100` |
+| Sàn order reconciliation | `finance_grab_reconciliations` with authenticated CRUD RLS, plus `discounts` (layered discount stack), `settlement` (Grab PDF snapshot) and `counter_price` | `20260814000100` |
 | SAPO platform invoice detail | `finance_platform_order_rows`, four-file atomic import RPC, import metadata and authenticated CRUD RLS; used by platform dashboards and the GRAB picker | `20260815000100` |
+| Grab daily report ledger | `finance_grab_daily_reports`, one row per imported PDF with day-level marketing lines and unmatched orders | `20260814000100` |
 | Cost recognition month | `inventory_active_sessions.cost_recognition_month` | `20260805000200` |
 | Inventory conversion | conversion amount/unit fields | `20260807000100` |
 | CFO master-data foundation | stores, masters, recipes and finance facts | `20260805000100`, `20260809000200` - additive tables, versioned recipes and broad authenticated RLS during rollout |
@@ -203,6 +233,8 @@ Do not stage these files in an unrelated Kho NVL hotfix. Production Product Mast
 | Product Management component persistence | `product_recipe_items.component_type`, manual component cost/name fields, Product catalog exclusions and guarded Product delete RPC | `20260813000200` |
 | Product Master packaging conversion sync | persists `ingredient_master.conversion_unit`, recalculates linked receipt unit cost, refreshes active session snapshots and corrects CM-M Giấy chống tràn to `tờ` | `20260816000100` |
 | July CARNATION EXTRA cost correction | exact receipt `010726-027`; verifies 16 total/13 July rows, preserves 4 legitimate July issues, 2 other-period rows and 1 active August box, then snapshots/deletes the latest 9 closed July excess rows; sealed stock 32 -> 41 | `20260812000200` |
+| Snack nhỏ 1.700 / COCA 5.200 total erasure | destructive owner-requested erasure of both lots and every attached record: recipe components, lifecycle rows in all three statuses with their cost recognition, history, receipts and `ingredient_master` rows. Deliberately overrides the Product Master Sync Rule — the owner asked for full erasure, so ingredient rows are deleted outright instead of being kept inactive, and `product_recipe_items` built on them are deleted because `product_recipe_items_source_check` forbids detaching an item from its ingredient. Matches on ASCII `snack`/`coca` plus exact `unit_cost` so mixed NFD/NFC names cannot cause a silent miss. Aborts if either lot is missing, if more than 4 receipts match, or if a settled session or external return lot depends on them. Snapshots into both `private.snack_coca_removal_backups` and `private.inventory_reset_backups` | `20260905000100` |
+| Ingredient master restore for surviving lots | repairs `20260905000100`. `ingredient_master` is keyed by `source_key` = (name, category, brand), not by lot, so deleting the row of an erased lot orphaned `Bánh snack - nhỏ`, which still has lot `010726-041` at 5.000. Production then failed to open Quản lý sản phẩm with `23505` on `ingredient_master_store_id_code_key`, because `mergeInventoryDrafts` codes a new draft by array position (`ingredientCode(merged.length)`) and the client upsert targets `(store_id, source_key)`, which cannot absorb a clash on the separate `(store_id, code)` index. Restores from the snapshot only ingredient rows whose name still matches a live receipt, detached and inactive, so the next load re-links them. `Nước ngọt COCA` is not restored and stays erased | `20260905000200` |
 
 Migration rules:
 
@@ -225,6 +257,8 @@ Migration rules:
 | Delete receipt / return active unit to stock / period settlement | Allowed in local data | Any authenticated account; receipt deletion remains blocked after its first issue, RLS only permits deleting an `active` session to return it to stock, and period settlement runs atomically through Supabase |
 | Excel import | Local update for UAT testing | Supabase persistence for shared data |
 | Deployment | Localhost or `-uat` Vercel project | Vercel project tracking `main` |
+| Platform orders + đối soát | Browser localStorage, seeded with UAT samples | Gated off entirely by commit `bd46caa`; `loadFinanceImports` returns empty arrays and the `Nền tảng` tab is hidden |
+| Grab PDF ingest | File upload and local folder scan both available | Blocked — `/api/grab-reports` returns 403 in a production build and `grab:prod` refuses to run |
 
 Any change touching runtime detection, storage keys, imports or seed data must be tested in both modes. Production must never inherit UAT sample/reset behavior.
 
