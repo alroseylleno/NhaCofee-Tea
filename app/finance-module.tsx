@@ -9,7 +9,10 @@ import {
   upsertFinanceExpenses,
   normalizeGrabSettlement,
   normalizeReconciliationDiscounts,
+  replaceFinanceCounterPrices,
+  upsertFinanceGrabDailyReports,
   upsertFinanceGrabReconciliations,
+  type FinanceGrabDailyReportRecord,
   type FinanceGrabSettlement,
   type FinanceCounterPrice,
   type FinanceOrderItem,
@@ -106,28 +109,13 @@ const COUNTER_PRICE_RATE = 0.7278;
 /// Bumped by hand on each UI change to this panel. If the tag on screen does not
 /// match the one the terminal reports, the browser is running a cached bundle
 /// and no amount of code reading will explain the behaviour.
-const RECONCILIATION_BUILD = "R19";
+const RECONCILIATION_BUILD = "R20";
 
-/// One imported Grab daily PDF: match outcome plus the day-level marketing
-/// spend that has no per-order breakdown on Grab's side.
 /// How confidently a PDF row was tied to a SAPO order. "amount-only" means only
 /// the pre-discount value lined up, so the pairing deserves a second look.
 type GrabMatchQuality = "exact" | "ship-adjusted" | "amount-only";
 
-type GrabDailyReportRecord = {
-  id: string;
-  reportDate: string;
-  fileName: string;
-  importedAt: string;
-  orderCount: number;
-  matchedCount: number;
-  totalOrderValue: number;
-  totalExpectedSapo: number;
-  totalPayout: number;
-  totalMarketing: number;
-  marketingLines: { description: string; fee: number; tax: number; total: number }[];
-  unmatched: { code: string; time: string; orderValue: number; payout: number; expectedSapo: number }[];
-};
+type GrabDailyReportRecord = FinanceGrabDailyReportRecord;
 
 // Discount amounts stay as raw input strings while the sheet is open so a
 // half-typed number never collapses to 0 under the user's cursor.
@@ -926,7 +914,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
             cloud = await loadFinanceImports();
           }
           window.localStorage.setItem(FINANCE_EXPENSE_MIGRATION_KEY, "done");
-          nextState = { ...nextState, expenses: cloud.expenses, revenues: cloud.revenues, products: cloud.products, services: cloud.services, platformOrders: cloud.platformOrders, grabReconciliations: cloud.grabReconciliations, imports: cloud.imports };
+          nextState = { ...nextState, expenses: cloud.expenses, revenues: cloud.revenues, products: cloud.products, services: cloud.services, platformOrders: cloud.platformOrders, grabReconciliations: cloud.grabReconciliations, grabDailyReports: cloud.grabDailyReports, counterPrices: cloud.counterPrices, imports: cloud.imports };
         } catch (error) {
           setFinanceSyncError(error instanceof Error ? error.message : "Không thể tải dữ liệu tài chính từ Supabase.");
         }
@@ -1668,7 +1656,6 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: true, defval: null });
         const templateType = financeTemplateType(rows);
         if (!templateType) throw new Error(`${file.name}: chưa nhận diện được template. Hệ thống hiện hỗ trợ Doanh thu tổng quan, Danh mục mặt hàng (bảng giá), Hình thức phục vụ và Danh sách hóa đơn.`);
-        if (!uatMode && templateType === "orders") throw new Error("Danh sách hóa đơn nền tảng và đối soát GRAB hiện chỉ có ở UAT.");
         // Every recognised type needs its own branch here: the chain falls through
         // to the order parser, so a missing branch shows up as "không tìm thấy
         // bảng chi tiết đơn hàng" on a file that was detected perfectly well.
@@ -1700,7 +1687,10 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           revenue: revenue ? { meta: revenue.meta, records: revenue.records } : undefined,
           products: products ? { meta: products.meta, records: products.records } : undefined,
           service: service ? { meta: service.meta, records: service.records } : undefined,
+          orders: orders ? { meta: orders.meta, records: orders.records } : undefined,
         });
+        // The price book is a full snapshot with its own replace RPC.
+        if (prices) await replaceFinanceCounterPrices(prices.records);
         // Read after write so the success state always reflects the latest committed Supabase snapshot.
         verifiedCloudState = await loadFinanceImports();
       }
@@ -2085,7 +2075,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   /// Shared tail of both ingest paths (file picker and local folder scan):
   /// match every report, fold the results into one state update, and report
   /// per-day outcomes so a silent partial match is impossible to miss.
-  function applyGrabReports(parsed: { report: ParsedGrabReport; fileName: string }[]) {
+  async function applyGrabReports(parsed: { report: ParsedGrabReport; fileName: string }[]) {
     let workingRecords = [...state.grabReconciliations];
     let workingReports = [...state.grabDailyReports];
     let matchedTotal = 0;
@@ -2110,6 +2100,17 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       if (daily.unmatched.length) problems.push(`${dateLabel(report.reportDate)}: ${daily.unmatched.map((entry) => entry.code).join(", ")}`);
       if (wobbly) problems.push(`${dateLabel(report.reportDate)}: ${wobbly} dòng lệch số học`);
     }
+    // Production writes to Supabase FIRST; only a confirmed write may update the
+    // screen, mirroring the repo rule that prod UI never runs ahead of the DB.
+    if (!uatMode) {
+      if (!isSupabaseConfigured) throw new Error("Production chưa cấu hình Supabase.");
+      const changedIds = new Set<string>();
+      for (const { report } of parsed) for (const entry of workingRecords) if (entry.settlement?.reportDate === report.reportDate) changedIds.add(entry.id);
+      const changedRecords = workingRecords.filter((entry) => changedIds.has(entry.id));
+      if (changedRecords.length) await upsertFinanceGrabReconciliations(changedRecords);
+      const changedDates = new Set(parsed.map(({ report }) => report.reportDate));
+      await upsertFinanceGrabDailyReports(workingReports.filter((entry) => changedDates.has(entry.reportDate)));
+    }
     setState((current) => ({ ...current, grabReconciliations: workingRecords, grabDailyReports: workingReports }));
     const summary = `Đã quét ${parsed.length} báo cáo · khớp ${matchedTotal}/${orderTotal} đơn${emptyDays ? ` · ${emptyDays} ngày không có đơn` : ""}`;
     const detail = problems.length ? ` · chưa khớp: ${problems.slice(0, 5).join(" | ")}${problems.length > 5 ? ` và ${problems.length - 5} ngày khác` : ""}` : "";
@@ -2123,10 +2124,9 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     setImportingGrabReport(true);
     setGrabReportNotice(undefined);
     try {
-      if (!uatMode) throw new Error("Đối soát tự động từ PDF hiện chỉ có ở UAT.");
       const parsed: { report: ParsedGrabReport; fileName: string }[] = [];
       for (const file of files) parsed.push({ report: parseGrabReportText(await extractGrabPdfText(await file.arrayBuffer())), fileName: file.name });
-      const { summary } = applyGrabReports(parsed);
+      const { summary } = await applyGrabReports(parsed);
       setGrabReportNotice(summary);
     } catch (error) {
       setGrabReportNotice(error instanceof Error ? error.message : "Không đọc được file PDF báo cáo Grab.");
@@ -2166,7 +2166,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         if (!silent) setGrabReportNotice(`Thư mục có ${reports.length} báo cáo, tất cả đã khớp đủ đơn. Dùng "Quét lại tất cả" nếu vừa import file SAPO mới.${payload.failures?.length ? ` ${payload.failures.length} file không đọc được.` : ""}`);
         return;
       }
-      const { summary } = applyGrabReports(fresh.map((report) => ({ report, fileName: report.fileName })));
+      const { summary } = await applyGrabReports(fresh.map((report) => ({ report, fileName: report.fileName })));
       const failureNote = payload.failures?.length ? ` · ${payload.failures.length} file không đọc được` : "";
       setGrabReportNotice(summary + failureNote);
     } catch (error) {
@@ -2346,18 +2346,18 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       <div className={styles.revenueSubTabs}>
         <button type="button" className={revenueSubTab === "overview" ? styles.selected : ""} onClick={() => selectRevenueSubTab("overview")}><span>Tổng quan</span><small>{revenueImport?.rowCount || 0} ngày</small></button>
         <button type="button" className={revenueSubTab === "products" ? styles.selected : ""} onClick={() => selectRevenueSubTab("products")}><span>Mặt hàng</span><small>{productsImport?.rowCount || 0} SKU</small></button>
-        {uatMode && <button type="button" className={revenueSubTab === "platform" ? styles.selected : ""} onClick={() => selectRevenueSubTab("platform")}><span>Nền tảng</span><small>{periodPlatformOrders.length || state.platformOrders.length} hóa đơn</small></button>}
+        {<button type="button" className={revenueSubTab === "platform" ? styles.selected : ""} onClick={() => selectRevenueSubTab("platform")}><span>Nền tảng</span><small>{periodPlatformOrders.length || state.platformOrders.length} hóa đơn</small></button>}
       </div>
 
       <section className={styles.financeImportHub}>
-        <div className={styles.importHubCopy}><span>IMPORT CENTER</span><h2>{uatMode ? "Bộ 3 file SAPO" : "Bộ 2 file SAPO"}</h2><p>{uatMode ? "Chọn cùng lúc Doanh thu tổng quan, Danh mục mặt hàng và Danh sách hoá đơn. Rê chuột lên từng ô bên dưới để xem đường xuất file trong Sapo." : "Chọn cùng lúc Doanh thu tổng quan và Danh mục mặt hàng. Rê chuột lên từng ô để xem đường xuất file trong Sapo."}</p></div>
-        <label className={`${styles.importHubButton} ${importingFinance ? styles.importing : ""}`}><input type="file" accept=".xls,.xlsx" multiple disabled={importingFinance} onChange={importFinanceExcel} /><span>{importingFinance ? "Đang phân tích & đồng bộ…" : `⇧ Chọn ${uatMode ? "3" : "2"} file Excel cùng lúc`}</span><small>{uatMode ? "Doanh thu · Mặt hàng · Hoá đơn" : "Doanh thu · Mặt hàng"}</small></label>
+        <div className={styles.importHubCopy}><span>IMPORT CENTER</span><h2>Bộ 3 file SAPO</h2><p>Chọn cùng lúc Doanh thu tổng quan, Danh mục mặt hàng và Danh sách hoá đơn. Rê chuột lên từng ô bên dưới để xem đường xuất file trong Sapo.</p></div>
+        <label className={`${styles.importHubButton} ${importingFinance ? styles.importing : ""}`}><input type="file" accept=".xls,.xlsx" multiple disabled={importingFinance} onChange={importFinanceExcel} /><span>{importingFinance ? "Đang phân tích & đồng bộ…" : "⇧ Chọn 3 file Excel cùng lúc"}</span><small>"Doanh thu · Mặt hàng · Hoá đơn"</small></label>
         <div className={styles.importHubTypes}>
           {/* Each badge carries the exact click path inside Sapo that produces it. */}
           <span className={revenueImport ? styles.typeReady : ""} data-hint="Download SAPO"><i>DT</i>Doanh thu tổng quan</span>
           <span className={pricesImport || productsImport ? styles.typeReady : ""} data-hint="Mặt hàng → Danh sách mặt hàng → Xuất Excel → Email"><i>MH</i>Danh mục mặt hàng</span>
-          {uatMode && <span className={ordersImport ? styles.typeReady : ""} data-hint="Hoá đơn → Hoá đơn bán hàng → Xuất Excel theo danh sách mặt hàng → Tất cả hoá đơn → Email"><i>ĐH</i>Danh sách hoá đơn</span>}
-          <b>{[revenueImport, pricesImport || productsImport, ...(uatMode ? [ordersImport] : [])].filter(Boolean).length}/{uatMode ? 3 : 2} loại đã có dữ liệu</b>
+          {<span className={ordersImport ? styles.typeReady : ""} data-hint="Hoá đơn → Hoá đơn bán hàng → Xuất Excel theo danh sách mặt hàng → Tất cả hoá đơn → Email"><i>ĐH</i>Danh sách hoá đơn</span>}
+          <b>{[revenueImport, pricesImport || productsImport, ordersImport].filter(Boolean).length}/3 loại đã có dữ liệu</b>
         </div>
         {financeImportNotice && <div className={styles.importHubSuccess}><b>Import hoàn tất</b><span>{financeImportNotice}</span></div>}
       </section>
@@ -2398,7 +2398,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         </>}
       </>}
 
-      {uatMode && revenueSubTab === "platform" && <>
+      {revenueSubTab === "platform" && <>
         <div className={styles.revenueHeader}>
           <div><span>SÀN & ĐỐI SOÁT</span><h2>{bounds.label}</h2><p>Chỉ tính đơn sàn — Grab, ShopeeFood và Xanh/Green Food. Website và các kênh tự bán được tách riêng ở mục Kênh khác vì không chịu phí sàn và không phải đối soát. Đối soát Grab chỉ cần chọn mã đơn và nhập tiền thực nhận.</p></div>
         </div>
@@ -2499,7 +2499,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           <div className={styles.revenuePanelTitle}><div><span>ĐỐI SOÁT ĐƠN SÀN · {RECONCILIATION_BUILD} · {bounds.label}</span><strong>{reconciliationDoneCount.toLocaleString("vi-VN")}/{reconciliationRowsView.length.toLocaleString("vi-VN")} đơn đã đối soát</strong></div><small>{percent(reconciliationRowsView.length ? reconciliationDoneCount / reconciliationRowsView.length * 100 : 0)} coverage</small></div>
           <div className={styles.grabIngestRow}>
             <label className={`${styles.grabPdfUpload} ${importingGrabReport ? styles.importing : ""}`}><input type="file" accept="application/pdf,.pdf" multiple disabled={importingGrabReport} onChange={(event) => void importGrabReportPdf(event)} /><span>{importingGrabReport ? "Đang đọc báo cáo PDF…" : "⇧ Upload báo cáo Grab (PDF)"}</span></label>
-            <button type="button" className={styles.grabFolderScan} disabled={importingGrabReport} onClick={() => void scanLocalGrabReports({ force: true })}><span>{importingGrabReport ? "Đang quét…" : "⟳ Quét thư mục local"}</span></button>
+            {uatMode && <button type="button" className={styles.grabFolderScan} disabled={importingGrabReport} onClick={() => void scanLocalGrabReports({ force: true })}><span>{importingGrabReport ? "Đang quét…" : "⟳ Quét thư mục local"}</span></button>}
           </div>
           {grabReportNotice && <p className={styles.grabReportNotice}>{grabReportNotice}</p>}
           {marketplaceMonths.length > 0 && <div className={styles.monthChips}>

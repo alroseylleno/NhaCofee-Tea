@@ -145,6 +145,23 @@ export type FinanceGrabSettlement = {
   matchQuality?: "exact" | "ship-adjusted" | "amount-only";
 };
 
+/// One imported Grab daily PDF: the match outcome plus the day-level marketing
+/// spend that Grab never attributes to individual orders.
+export type FinanceGrabDailyReportRecord = {
+  id: string;
+  reportDate: string;
+  fileName: string;
+  importedAt: string;
+  orderCount: number;
+  matchedCount: number;
+  totalOrderValue: number;
+  totalExpectedSapo: number;
+  totalPayout: number;
+  totalMarketing: number;
+  marketingLines: { description: string; fee: number; tax: number; total: number }[];
+  unmatched: { code: string; time: string; orderValue: number; payout: number; expectedSapo: number }[];
+};
+
 export type FinanceGrabReconciliationRecord = {
   id: string;
   platformOrderId?: string;
@@ -234,6 +251,8 @@ export type FinanceCloudState = {
   services: FinanceServiceRecord[];
   platformOrders: FinancePlatformOrderRecord[];
   grabReconciliations: FinanceGrabReconciliationRecord[];
+  grabDailyReports: FinanceGrabDailyReportRecord[];
+  counterPrices: FinanceCounterPrice[];
   imports: FinanceImportMeta[];
 };
 
@@ -283,6 +302,41 @@ function grabReconciliationFromRow(row: Record<string, unknown>): FinanceGrabRec
   };
 }
 
+function grabDailyReportFromRow(row: Record<string, unknown>): FinanceGrabDailyReportRecord {
+  const lines = Array.isArray(row.marketing_lines) ? row.marketing_lines : [];
+  const unmatched = Array.isArray(row.unmatched) ? row.unmatched : [];
+  return {
+    id: String(row.id),
+    reportDate: String(row.report_date),
+    fileName: row.file_name ? String(row.file_name) : "",
+    importedAt: row.imported_at ? String(row.imported_at) : new Date().toISOString(),
+    orderCount: numberValue(row.order_count),
+    matchedCount: numberValue(row.matched_count),
+    totalOrderValue: numberValue(row.total_order_value),
+    totalExpectedSapo: numberValue(row.total_expected_sapo),
+    totalPayout: numberValue(row.total_payout),
+    totalMarketing: numberValue(row.total_marketing),
+    marketingLines: (lines as unknown[]).map((entry) => {
+      const line = entry as { description?: unknown; fee?: unknown; tax?: unknown; total?: unknown };
+      return { description: String(line?.description ?? ""), fee: numberValue(line?.fee), tax: numberValue(line?.tax), total: numberValue(line?.total) };
+    }),
+    unmatched: (unmatched as unknown[]).map((entry) => {
+      const line = entry as { code?: unknown; time?: unknown; orderValue?: unknown; payout?: unknown; expectedSapo?: unknown };
+      return { code: String(line?.code ?? ""), time: String(line?.time ?? ""), orderValue: numberValue(line?.orderValue), payout: numberValue(line?.payout), expectedSapo: numberValue(line?.expectedSapo) };
+    }),
+  };
+}
+
+function counterPriceFromRow(row: Record<string, unknown>): FinanceCounterPrice {
+  return {
+    name: String(row.name),
+    storePrice: numberValue(row.store_price),
+    grabPrice: row.grab_price == null ? undefined : numberValue(row.grab_price),
+    shopeePrice: row.shopee_price == null ? undefined : numberValue(row.shopee_price),
+    greenPrice: row.green_price == null ? undefined : numberValue(row.green_price),
+  };
+}
+
 function platformOrderFromRow(row: Record<string, unknown>): FinancePlatformOrderRecord {
   return {
     id: String(row.id),
@@ -329,13 +383,21 @@ function supabaseFailure(error: unknown, context: string) {
 
 export async function loadFinanceImports(): Promise<FinanceCloudState> {
   const client = requireClient();
-  const [expensesResult, importsResult, revenueResult, productsResult, servicesResult] = await Promise.all([
+  const [expensesResult, importsResult, revenueResult, productsResult, servicesResult, platformOrdersResult, grabResult, dailyReportsResult, counterPricesResult] = await Promise.all([
     client.from("finance_expenses").select("*").order("incurred_on", { ascending: false }),
     client.from("finance_imports").select("*").order("imported_at", { ascending: false }),
     client.from("finance_revenue_rows").select("*").order("report_date", { ascending: false }),
     client.from("finance_product_rows").select("*").order("source_row", { ascending: true }),
     client.from("finance_service_rows").select("*").order("source_row", { ascending: true }),
+    client.from("finance_platform_order_rows").select("*").order("order_date", { ascending: false }),
+    client.from("finance_grab_reconciliations").select("*").order("order_date", { ascending: false }),
+    client.from("finance_grab_daily_reports").select("*").order("report_date", { ascending: false }),
+    client.from("finance_counter_prices").select("*").order("name", { ascending: true }),
   ]);
+  if (platformOrdersResult.error) throw supabaseFailure(platformOrdersResult.error, "Không thể tải chi tiết đơn nền tảng");
+  if (grabResult.error) throw supabaseFailure(grabResult.error, "Không thể tải đối soát sàn");
+  if (dailyReportsResult.error) throw supabaseFailure(dailyReportsResult.error, "Không thể tải báo cáo Grab theo ngày");
+  if (counterPricesResult.error) throw supabaseFailure(counterPricesResult.error, "Không thể tải bảng giá quầy");
   if (expensesResult.error) throw supabaseFailure(expensesResult.error, "Không thể tải chi phí ghi nhận");
   if (importsResult.error) throw supabaseFailure(importsResult.error, "Không thể tải metadata import");
   if (revenueResult.error) throw supabaseFailure(revenueResult.error, "Không thể tải dữ liệu doanh thu");
@@ -428,9 +490,11 @@ export async function loadFinanceImports(): Promise<FinanceCloudState> {
     revenue: numberValue(row.revenue),
   }));
 
-  // Platform-order and GRAB reconciliation are UAT-only while their schema is
-  // still under test. Production must not query experimental tables.
-  return { expenses, revenues, products, services, platformOrders: [], grabReconciliations: [], imports };
+  const platformOrders: FinancePlatformOrderRecord[] = (platformOrdersResult.data || []).map((row) => platformOrderFromRow(row));
+  const grabReconciliations: FinanceGrabReconciliationRecord[] = (grabResult.data || []).map((row) => grabReconciliationFromRow(row));
+  const grabDailyReports: FinanceGrabDailyReportRecord[] = (dailyReportsResult.data || []).map((row) => grabDailyReportFromRow(row));
+  const counterPrices: FinanceCounterPrice[] = (counterPricesResult.data || []).map((row) => counterPriceFromRow(row));
+  return { expenses, revenues, products, services, platformOrders, grabReconciliations, grabDailyReports, counterPrices, imports };
 }
 
 function expenseRows(records: FinanceExpenseRecord[]) {
@@ -506,6 +570,27 @@ export async function loadFinanceCounterPrices(): Promise<FinanceCounterPrice[]>
     shopeePrice: row.shopee_price == null ? undefined : numberValue(row.shopee_price),
     greenPrice: row.green_price == null ? undefined : numberValue(row.green_price),
   }));
+}
+
+export async function upsertFinanceGrabDailyReports(records: FinanceGrabDailyReportRecord[]) {
+  if (!records.length) return;
+  // report_date carries a UNIQUE constraint; conflicting on it (not on id)
+  // means a re-imported day replaces its previous row instead of erroring.
+  const { error } = await requireClient().from("finance_grab_daily_reports").upsert(records.map((record) => ({
+    id: record.id,
+    report_date: record.reportDate,
+    file_name: record.fileName || null,
+    imported_at: record.importedAt,
+    order_count: record.orderCount,
+    matched_count: record.matchedCount,
+    total_order_value: record.totalOrderValue,
+    total_expected_sapo: record.totalExpectedSapo,
+    total_payout: record.totalPayout,
+    total_marketing: record.totalMarketing,
+    marketing_lines: record.marketingLines,
+    unmatched: record.unmatched,
+  })), { onConflict: "report_date" });
+  if (error) throw supabaseFailure(error, "Không thể lưu báo cáo Grab theo ngày");
 }
 
 export async function upsertFinanceGrabReconciliations(records: FinanceGrabReconciliationRecord[]) {
@@ -649,8 +734,9 @@ export async function replaceFinanceImportBundle(bundle: {
   revenue?: { meta: Omit<FinanceImportMeta, "dataType" | "importedAt">; records: FinanceRevenueRecord[] };
   products?: { meta: Omit<FinanceImportMeta, "dataType" | "importedAt">; records: FinanceProductRecord[] };
   service?: { meta: Omit<FinanceImportMeta, "dataType" | "importedAt">; records: FinanceServiceRecord[] };
+  orders?: { meta: Omit<FinanceImportMeta, "dataType" | "importedAt">; records: FinancePlatformOrderRecord[] };
 }) {
-  const { error } = await requireClient().rpc("replace_finance_import_bundle", {
+  const { error } = await requireClient().rpc("replace_finance_import_bundle_v2", {
     p_revenue_file_name: bundle.revenue?.meta.fileName ?? null,
     p_revenue_period_start: bundle.revenue?.meta.periodStart ?? null,
     p_revenue_period_end: bundle.revenue?.meta.periodEnd ?? null,
@@ -663,6 +749,10 @@ export async function replaceFinanceImportBundle(bundle: {
     p_service_period_start: bundle.service?.meta.periodStart ?? null,
     p_service_period_end: bundle.service?.meta.periodEnd ?? null,
     p_service_rows: bundle.service ? serviceRpcRows(bundle.service.records) : null,
+    p_orders_file_name: bundle.orders?.meta.fileName ?? null,
+    p_orders_period_start: bundle.orders?.meta.periodStart ?? null,
+    p_orders_period_end: bundle.orders?.meta.periodEnd ?? null,
+    p_orders_rows: bundle.orders ? platformOrderRows(bundle.orders.records) : null,
   });
   if (error) throw supabaseFailure(error, "Không thể lưu bộ file tài chính");
 }

@@ -72,9 +72,8 @@ function checkTarget(target) {
   if (target === "uat") return;
   if (target === "prod" || target === "production") {
     console.error("Trigger Production chưa bật. Cần xong 3 việc trước:");
-    console.error("  1. Commit + apply 2 migration finance_grab_reconciliations và finance_platform_order_rows lên Supabase.");
-    console.error("  2. Bỏ khoá tab Nền tảng cho Production (commit bd46caa đang chặn).");
-    console.error("  3. Tạo tài khoản Supabase riêng cho script và đặt GRAB_SUPABASE_EMAIL / GRAB_SUPABASE_PASSWORD.");
+    console.error("  Còn thiếu duy nhất: tài khoản Supabase riêng cho script (đặt GRAB_SUPABASE_EMAIL / GRAB_SUPABASE_PASSWORD).");
+    console.error("  Schema và app Production đã sẵn sàng từ 2026-09-07.");
     console.error("\nTrong lúc đó dùng: npm run grab:uat");
     process.exit(1);
   }
