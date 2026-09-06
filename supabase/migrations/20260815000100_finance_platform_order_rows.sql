@@ -20,8 +20,15 @@ create table if not exists public.finance_platform_order_rows (
   delivery_partner text,
   status text,
   source_file_name text,
-  imported_at timestamptz not null default now()
+  imported_at timestamptz not null default now(),
+  -- Line items from SAPO's item-level invoice export: [{"name","quantity",
+  -- "amount","option","category"}]. Basket display and real counter prices
+  -- depend on this surviving the round-trip.
+  items jsonb not null default '[]'::jsonb
 );
+
+alter table public.finance_platform_order_rows
+  add column if not exists items jsonb not null default '[]'::jsonb;
 
 alter table public.finance_platform_order_rows
   add column if not exists order_created_at timestamp without time zone,
@@ -65,7 +72,7 @@ alter table public.finance_imports
 
 alter table public.finance_imports
   add constraint finance_imports_data_type_check
-  check (data_type in ('revenue', 'products', 'service', 'orders'));
+  check (data_type in ('revenue', 'products', 'service', 'orders', 'prices'));
 
 create or replace function public.replace_finance_platform_order_import(
   p_file_name text,
@@ -111,7 +118,8 @@ begin
     delivery_partner,
     status,
     source_file_name,
-    imported_at
+    imported_at,
+    items
   )
   select
     row_data.id,
@@ -132,7 +140,8 @@ begin
     row_data.delivery_partner,
     row_data.status,
     row_data.source_file_name,
-    coalesce(row_data.imported_at, now())
+    coalesce(row_data.imported_at, now()),
+    coalesce(row_data.items, '[]'::jsonb)
   from jsonb_to_recordset(coalesce(p_rows, '[]'::jsonb)) as row_data(
     id text,
     order_code text,
@@ -152,7 +161,8 @@ begin
     delivery_partner text,
     status text,
     source_file_name text,
-    imported_at timestamptz
+    imported_at timestamptz,
+    items jsonb
   );
 
   insert into public.finance_imports (

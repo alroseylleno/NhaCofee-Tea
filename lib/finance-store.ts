@@ -303,6 +303,18 @@ function platformOrderFromRow(row: Record<string, unknown>): FinancePlatformOrde
     deliveryPartner: row.delivery_partner ? String(row.delivery_partner) : undefined,
     status: row.status ? String(row.status) : undefined,
     sourceFileName: row.source_file_name ? String(row.source_file_name) : undefined,
+    items: Array.isArray(row.items)
+      ? (row.items as unknown[]).map((entry) => {
+          const line = entry as Partial<FinanceOrderItem>;
+          return {
+            name: String(line?.name ?? "").trim(),
+            quantity: Math.max(0, numberValue(line?.quantity)) || 1,
+            amount: Math.max(0, numberValue(line?.amount)),
+            option: line?.option ? String(line.option) : undefined,
+            category: line?.category ? String(line.category) : undefined,
+          };
+        }).filter((item) => item.name.length > 0)
+      : undefined,
     importedAt: row.imported_at ? String(row.imported_at) : undefined,
   };
 }
@@ -469,6 +481,33 @@ function grabReconciliationRows(records: FinanceGrabReconciliationRecord[]) {
   }));
 }
 
+/// Full-snapshot replace of the price book, mirroring the SAPO export
+/// semantics: what is not in the latest file no longer exists on the menu.
+export async function replaceFinanceCounterPrices(records: FinanceCounterPrice[]) {
+  const { error } = await requireClient().rpc("replace_finance_counter_prices", {
+    p_rows: records.map((record) => ({
+      name: record.name,
+      store_price: record.storePrice,
+      grab_price: record.grabPrice ?? null,
+      shopee_price: record.shopeePrice ?? null,
+      green_price: record.greenPrice ?? null,
+    })),
+  });
+  if (error) throw supabaseFailure(error, "Không thể lưu bảng giá quầy");
+}
+
+export async function loadFinanceCounterPrices(): Promise<FinanceCounterPrice[]> {
+  const { data, error } = await requireClient().from("finance_counter_prices").select("*").order("name", { ascending: true });
+  if (error) throw supabaseFailure(error, "Không thể tải bảng giá quầy");
+  return (data || []).map((row) => ({
+    name: String(row.name),
+    storePrice: numberValue(row.store_price),
+    grabPrice: row.grab_price == null ? undefined : numberValue(row.grab_price),
+    shopeePrice: row.shopee_price == null ? undefined : numberValue(row.shopee_price),
+    greenPrice: row.green_price == null ? undefined : numberValue(row.green_price),
+  }));
+}
+
 export async function upsertFinanceGrabReconciliations(records: FinanceGrabReconciliationRecord[]) {
   if (!records.length) return [];
   const { data, error } = await requireClient().from("finance_grab_reconciliations").upsert(grabReconciliationRows(records), {
@@ -504,6 +543,7 @@ function platformOrderRows(records: FinancePlatformOrderRecord[]) {
     status: record.status || null,
     source_file_name: record.sourceFileName || null,
     imported_at: record.importedAt || new Date().toISOString(),
+    items: record.items || [],
   }));
 }
 
