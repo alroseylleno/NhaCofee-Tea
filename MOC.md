@@ -1,6 +1,6 @@
 # Nha Ops - Code Map
 
-> Last reviewed: 2026-09-05
+> Last reviewed: 2026-09-07
 > Production branch: `main`
 > GitHub: `alroseylleno/NhaCofee-Tea`
 
@@ -8,9 +8,9 @@ This is the mandatory routing map for code changes in `Operations/nha-ops/`. Rea
 
 ## Current State
 
-- Production `main`: includes the three-module UAT workspace and the Product Management/Finance Reports release (`9a52d3d`, `feat: ship product management and finance reports`), pushed on 14/08/2026.
+- Production `main` is `dade1dc` (2026-09-07): the platform-reconciliation release — seven commits from `fb6af78` to `dade1dc` shipping the sàn đối soát feature, its Supabase schema, the Production un-gating and the prod.localhost local-scan path. Confirmed pushed (origin/main matches) and the three reconciliation migrations verified applied on the remote via REST probes.
 - Production deploy: Vercel tracks `main`; a normal Git push should redeploy the existing Vercel project.
-- The 14/08/2026 push adds migration `20260813000200_product_management_components.sql`, so it triggers `Apply Supabase migrations`. The workflow result remains unverified locally because GitHub Actions status could not be queried with the available credentials; do not treat the migration as applied until Actions reports success.
+- Earlier release context: `9a52d3d` (14/08) shipped Product Management/Finance Reports with migration `20260813000200`.
 - Production inventory and finance Excel imports use Supabase.
 - Localhost and `-uat` hosts use isolated browser storage for UAT inventory. They must not write to Production Supabase.
 - Product Master is available in both Local/UAT and Production. UAT uses isolated browser storage; Production reads and writes the shared Supabase Product Master tables.
