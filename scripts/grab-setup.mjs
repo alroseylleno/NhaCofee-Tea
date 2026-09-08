@@ -103,7 +103,25 @@ async function main() {
   console.log(`  GRAB_MAIL_APP_PASSWORD=${"*".repeat(16)}`);
   if (sapoEmail) console.log(`  SAPO_EMAIL=${sapoEmail}\n  SAPO_PASSWORD=${"*".repeat(12)}`);
   console.log("\nFile này đã nằm trong .gitignore, không lên GitHub.");
-  console.log("\nBước tiếp: npm run grab:uat -- --days 30");
+
+  // Verify on the spot: a credential that Gmail rejects should fail HERE, in
+  // the person's hands, not silently at 10pm inside the nightly chain.
+  console.log("\nĐang thử đăng nhập Gmail với credential vừa lưu…");
+  try {
+    const { ImapFlow } = await import("imapflow");
+    const finalPassword = password || (existing.match(/^\s*GRAB_MAIL_APP_PASSWORD\s*=\s*(.*)$/m) || [])[1]?.trim() || "";
+    const client = new ImapFlow({ host: "imap.gmail.com", port: 993, secure: true, auth: { user, pass: finalPassword }, logger: false });
+    await client.connect();
+    await client.logout();
+    console.log("✓ Gmail chấp nhận — mail fetch sẽ chạy được.");
+  } catch (error) {
+    console.error("✗ Gmail TỪ CHỐI credential này (" + (error?.responseText || error?.message || "lỗi không rõ") + ").");
+    console.error("  App Password cũ có thể đã bị Google thu hồi (đổi mật khẩu Google là thu hồi hết),");
+    console.error("  hoặc được tạo dưới tài khoản Google khác đang đăng nhập trong trình duyệt.");
+    console.error("  → Tạo cái MỚI tại https://myaccount.google.com/apppasswords — kiểm tra avatar góc phải đúng là " + user + " — rồi chạy lại npm run grab:setup.");
+    process.exit(1);
+  }
+  console.log("\nBước tiếp: npm run sapo:daily");
 }
 
 main().catch((error) => {
