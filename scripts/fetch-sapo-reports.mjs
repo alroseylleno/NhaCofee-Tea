@@ -15,6 +15,7 @@
 //   GRAB_MAIL_USER / GRAB_MAIL_APP_PASSWORD
 
 import { ImapFlow } from "imapflow";
+import { SAPO_DIRS, sapoCanonicalName } from "./sapo-files.mjs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,8 +28,8 @@ const SENDER = "no-reply@sapo.vn";
 /// Each export type lands in its own folder so the app can tell them apart, and
 /// so a price book never overwrites an invoice list.
 const KINDS = [
-  { key: "orders", subject: "hóa đơn", dir: REPORT_ROOT, match: /danh_sach_hoa_don[^"'\s]*\.xlsx/i },
-  { key: "prices", subject: "mặt hàng", dir: path.join(REPORT_ROOT, "Danh mục mặt hàng"), match: /danh_muc_mat_hang[^"'\s]*\.xlsx/i },
+  { key: "orders", subject: "hóa đơn", dir: SAPO_DIRS.orders, match: /danh_sach_hoa_don[^"'\s]*\.xlsx/i },
+  { key: "prices", subject: "mặt hàng", dir: SAPO_DIRS.prices, match: /danh_muc_mat_hang[^"'\s]*\.xlsx/i },
 ];
 
 async function loadEnvLocal() {
@@ -130,7 +131,9 @@ async function fetchOnce(args, user, pass) {
         console.warn(`  ! không tìm thấy link trong "${candidate.subject}"`);
         continue;
       }
-      const fileName = path.basename(new URL(url).pathname);
+      // Canonical, dated name instead of Sapo's uuid soup; the mail's own date
+      // stamps snapshots that carry no timestamp in their name.
+      const fileName = sapoCanonicalName(candidate.kind.key, path.basename(new URL(url).pathname), candidate.date ? new Date(candidate.date) : new Date());
       await mkdir(candidate.kind.dir, { recursive: true });
       const existing = new Set((await readdir(candidate.kind.dir)).map((name) => name.toLowerCase()));
       if (existing.has(fileName.toLowerCase())) {
@@ -192,8 +195,8 @@ async function main() {
   }
 
   console.log(`\nXong. Tải mới ${totalSaved} · bỏ qua ${lastSkipped} (đã có sẵn).`);
-  console.log(`Hoá đơn  → ${REPORT_ROOT}`);
-  console.log(`Bảng giá → ${path.join(REPORT_ROOT, "Danh mục mặt hàng")}`);
+  console.log(`Hoá đơn  → ${SAPO_DIRS.orders}`);
+  console.log(`Bảng giá → ${SAPO_DIRS.prices}`);
   if (totalSaved) console.log('\nMở app → tab Nền tảng → bấm Quét thư mục local để nạp tự động.');
 }
 

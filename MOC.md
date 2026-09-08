@@ -46,6 +46,7 @@ This is the mandatory routing map for code changes in `Operations/nha-ops/`. Rea
 | PDF↔SAPO matching, đối soát auto-fill, platform dashboards | `app/finance-module.tsx` | `lib/grab-report.ts`, `app/finance.module.css` | Writes `grabReconciliations` and `grabDailyReports`; UAT localStorage only |
 | Reading the local Grab PDF folder | `app/api/grab-reports/route.ts` | `next.config.ts` (`serverExternalPackages`) | Dev/UAT only; returns 403 in a production build |
 | Downloading Grab reports from Gmail | `scripts/fetch-grab-reports.mjs` | `package.json` (`grab:uat`, `grab:prod`), `.env.local` | Writes PDFs into `Report/Grab Report/`; never touches the database |
+| Sapo file layout + dated names | `scripts/sapo-files.mjs` (`Report/Doanh thu tổng quan` · `Danh sách hoá đơn` · `Danh mục mặt hàng`; names carry the covered period or the export moment) | `export-sapo-reports.mjs`, `fetch-sapo-reports.mjs`, `app/api/sapo-reports/route.ts` | Pure file organisation |
 | Pressing Sapo's export buttons | `scripts/export-sapo-reports.mjs` (Playwright + system Chrome, SSO login, session in `.grab-state/sapo-session.json`) | `package.json` (`sapo:export`, `sapo:daily`), `.env.local` (`SAPO_EMAIL`/`SAPO_PASSWORD`) | Triggers exports only; revenue file downloads straight into `Report/` |
 | Serving the newest SAPO trio to the browser | `app/api/sapo-reports/route.ts` | `app/finance-module.tsx` (`importFinanceWorkbooks`) | Dev/UAT only (403 in production builds); read-only |
 

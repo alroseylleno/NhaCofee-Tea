@@ -21,7 +21,8 @@
 // expired session never blocks an unattended run.
 
 import { chromium } from "playwright";
-import { mkdir, readFile, readdir, rename } from "node:fs/promises";
+import { SAPO_DIRS, sapoCanonicalName, sapoKindOf } from "./sapo-files.mjs";
+import { mkdir, readFile, readdir, rename, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -242,12 +243,12 @@ async function exportRevenue(page) {
     // No dialog appeared — some tenants export on the first press.
   }
   const download = await downloadPromise;
-  await mkdir(REPORT_DIR, { recursive: true });
+  await mkdir(SAPO_DIRS.revenue, { recursive: true });
   const suggested = download.suggestedFilename() || `doanh-thu-tong-quan-${Date.now()}.xls`;
-  const target = path.join(REPORT_DIR, suggested);
-  await download.saveAs(target);
-  console.log(`   ↓ đã lưu ${suggested} vào Report/`);
-  return suggested;
+  const named = sapoCanonicalName("revenue", suggested);
+  await download.saveAs(path.join(SAPO_DIRS.revenue, named));
+  console.log(`   ↓ đã lưu "Doanh thu tổng quan/${named}"`);
+  return named;
 }
 
 /// Radio options in Sapo's export dialogs do not toggle when their caption text
@@ -319,11 +320,6 @@ async function exportProducts(page) {
 /// gets moved into the managed folders so the app scan always finds it.
 async function sweepDownloadsFolder() {
   const downloadsDir = path.join(process.env.HOME || "", "Downloads");
-  const rules = [
-    { pattern: /^doanh-thu-tong-quan.*\.xlsx?$/i, dir: REPORT_DIR },
-    { pattern: /^danh_sach_hoa_don.*\.xlsx$/i, dir: REPORT_DIR },
-    { pattern: /^danh_muc_mat_hang.*\.xlsx$/i, dir: path.join(REPORT_DIR, "Danh mục mặt hàng") },
-  ];
   let moved = 0;
   let names;
   try {
@@ -332,15 +328,19 @@ async function sweepDownloadsFolder() {
     return 0;
   }
   for (const name of names) {
-    const rule = rules.find((entry) => entry.pattern.test(name));
-    if (!rule) continue;
-    await mkdir(rule.dir, { recursive: true });
-    const target = path.join(rule.dir, name);
+    const kind = sapoKindOf(name);
+    if (!kind) continue;
+    const source = path.join(downloadsDir, name);
+    let when = new Date();
+    try { when = (await stat(source)).mtime; } catch { /* keep now */ }
+    const canonical = sapoCanonicalName(kind, name, when);
+    await mkdir(SAPO_DIRS[kind], { recursive: true });
+    const target = path.join(SAPO_DIRS[kind], canonical);
     if (existsSync(target)) continue;
     try {
-      await rename(path.join(downloadsDir, name), target);
+      await rename(source, target);
       moved++;
-      console.log(`   ⇢ gom từ Downloads: ${name}`);
+      console.log(`   ⇢ gom từ Downloads: ${name} → ${path.basename(SAPO_DIRS[kind])}/${canonical}`);
     } catch {
       // A file mid-download or locked is left for the next sweep.
     }

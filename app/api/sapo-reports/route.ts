@@ -11,10 +11,12 @@ export const dynamic = "force-dynamic";
 
 const REPORT_ROOT = path.join(process.cwd(), "..", "..", "Report");
 
+// Canonical folders (one per export kind) with the Report root kept as a
+// legacy fallback for files that predate the tidy-up.
 const KINDS = [
-  { key: "revenue", dir: REPORT_ROOT, pattern: /^doanh-thu-tong-quan.*\.xlsx?$/i },
-  { key: "orders", dir: REPORT_ROOT, pattern: /^danh_sach_hoa_don.*\.xlsx$/i },
-  { key: "prices", dir: path.join(REPORT_ROOT, "Danh mục mặt hàng"), pattern: /^danh_muc_mat_hang.*\.xlsx$/i },
+  { key: "revenue", dirs: [path.join(REPORT_ROOT, "Doanh thu tổng quan"), REPORT_ROOT], pattern: /^doanh-thu-tong-quan.*\.xlsx?$/i },
+  { key: "orders", dirs: [path.join(REPORT_ROOT, "Danh sách hoá đơn"), REPORT_ROOT], pattern: /^(danh_sach_hoa_don|danh-sach-hoa-don).*\.xlsx$/i },
+  { key: "prices", dirs: [path.join(REPORT_ROOT, "Danh mục mặt hàng")], pattern: /^(danh_muc_mat_hang|danh-muc-mat-hang).*\.xlsx$/i },
 ];
 
 async function newestMatch(dir: string, pattern: RegExp) {
@@ -43,12 +45,16 @@ export async function GET() {
   const files: { kind: string; name: string; base64: string; mtime: string }[] = [];
   const missing: string[] = [];
   for (const kind of KINDS) {
-    const best = await newestMatch(kind.dir, kind.pattern);
+    let best: { dir: string; name: string; mtime: number } | undefined;
+    for (const dir of kind.dirs) {
+      const candidate = await newestMatch(dir, kind.pattern);
+      if (candidate && (!best || candidate.mtime > best.mtime)) best = { dir, ...candidate };
+    }
     if (!best) {
       missing.push(kind.key);
       continue;
     }
-    const buffer = await readFile(path.join(kind.dir, best.name));
+    const buffer = await readFile(path.join(best.dir, best.name));
     files.push({ kind: kind.key, name: best.name, base64: buffer.toString("base64"), mtime: new Date(best.mtime).toISOString() });
   }
   return NextResponse.json({ files, missing });
