@@ -65,21 +65,24 @@ async function main() {
     process.exit(1);
   }
 
-  const rawPassword = await ask("App Password 16 ký tự (gõ/dán, màn hình sẽ không hiện gì): ", { hidden: true });
+  const hasStoredPassword = /^\s*GRAB_MAIL_APP_PASSWORD\s*=\s*\S/m.test(existing);
+  const rawPassword = await ask(`App Password 16 ký tự (gõ/dán, màn hình sẽ không hiện gì${hasStoredPassword ? "; Enter giữ mật khẩu cũ" : ""}): `, { hidden: true });
   // Google shows the password as "abcd efgh ijkl mnop"; pasting it verbatim is
   // the most common setup mistake, so normalise instead of rejecting.
   const password = rawPassword.replace(/\s+/g, "");
-  if (!password) {
+  if (!password && !hasStoredPassword) {
     console.error("\nChưa nhập gì cả.");
     process.exit(1);
   }
-  if (password.length !== 16) {
+  // Forcing a retype here once overwrote a working password with a mistyped
+  // one and silently broke every mail job — Enter now means "keep what works".
+  if (password && password.length !== 16) {
     console.error(`\nApp Password phải đúng 16 ký tự, vừa nhận ${password.length}. Đây là mật khẩu Gmail thường à?`);
     process.exit(1);
   }
 
   let next = upsertEnv(existing, "GRAB_MAIL_USER", user);
-  next = upsertEnv(next, "GRAB_MAIL_APP_PASSWORD", password);
+  if (password) next = upsertEnv(next, "GRAB_MAIL_APP_PASSWORD", password);
 
   // Optional SAPO admin credentials, used by `sapo:export` to press the export
   // buttons. Enter skips and keeps whatever is already stored.

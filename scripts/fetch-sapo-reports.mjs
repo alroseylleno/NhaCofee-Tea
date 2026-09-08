@@ -94,8 +94,6 @@ async function fetchOnce(args, user, pass) {
     since.setDate(since.getDate() - args.days);
     search.since = since;
   }
-  console.log(`Tìm: từ "${SENDER}" · ${args.all ? "toàn bộ hộp thư" : `${args.days} ngày gần nhất`}`);
-
   const client = new ImapFlow({ host: "imap.gmail.com", port: 993, secure: true, auth: { user, pass }, logger: false });
   await client.connect();
   let mailbox = "INBOX";

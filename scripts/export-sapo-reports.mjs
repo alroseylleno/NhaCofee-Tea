@@ -21,7 +21,7 @@
 // expired session never blocks an unattended run.
 
 import { chromium } from "playwright";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -193,43 +193,107 @@ async function login(page) {
 async function exportRevenue(page) {
   console.log("\n[1/3] Doanh thu tổng quan…");
   await page.goto(`${ADMIN}/reports-revenue`, { waitUntil: "domcontentloaded", timeout: 45_000 });
-  await page.waitForTimeout(2_000);
+  await page.waitForTimeout(2_500);
   // The report type may already default to "Doanh thu tổng quan"; select it
   // only when the option is visible so a pre-selected state does not fail.
   try { await clickLabel(page, "Doanh thu tổng quan", { timeout: 4_000 }); } catch { /* already selected */ }
-  try {
-    await clickLabel(page, ["Năm nay", "năm nay"], { timeout: 4_000 });
-  } catch {
-    // The range control might be a dropdown that needs opening first.
+  // The date filter is a picker that must be OPENED first. Its trigger shows
+  // whatever range is active ("Hôm nay", "Tháng này", "dd/mm/yyyy - …"), so
+  // try the known presets and a date-looking chip before giving up.
+  let rangeSet = false;
+  const openerLabels = ["Hôm nay", "Hôm qua", "7 ngày qua", "Tháng này", "Tháng trước", "Thời gian"];
+  for (const opener of [...openerLabels, null]) {
     try {
-      await clickLabel(page, ["Thời gian", "Hôm nay", "7 ngày qua", "Tháng này"], { timeout: 4_000 });
-      await clickLabel(page, ["Năm nay", "năm nay"], { timeout: 4_000 });
+      if (opener) await clickLabel(page, opener, { timeout: 2_000 });
+      else {
+        // Last resort: a chip that displays an explicit dd/mm/yyyy range.
+        const chip = page.locator("text=/\\d{2}\\/\\d{2}\\/\\d{4}/").first();
+        if (!(await chip.isVisible({ timeout: 1_500 }).catch(() => false))) continue;
+        await chip.click();
+      }
+      await page.waitForTimeout(800);
+      await clickLabel(page, ["Năm nay", "Năm này"], { timeout: 3_000 });
+      rangeSet = true;
+      break;
     } catch {
-      console.log("   (không đổi được bộ lọc thời gian — dùng khoảng đang chọn sẵn)");
+      // Try the next opener candidate.
     }
   }
-  await clickLabel(page, ["Xem báo cáo", "Xem báo cáo"]);
+  if (!rangeSet) {
+    await page.screenshot({ path: path.join(STATE_DIR, "sapo-note-timefilter.png"), fullPage: true }).catch(() => {});
+    console.log("   (chưa đổi được bộ lọc thời gian — dùng khoảng đang chọn; gửi .grab-state/sapo-note-timefilter.png để chỉnh selector)");
+  } else {
+    console.log("   ✓ chọn thời gian: Năm nay");
+  }
+  await clickLabel(page, ["Xem báo cáo"]);
   await page.waitForTimeout(3_000);
   const downloadPromise = page.waitForEvent("download", { timeout: 60_000 });
   await clickLabel(page, ["Xuất báo cáo", "Xuất Excel", "Xuất file"]);
+  // A confirm pop-up repeats the same button; the export only fires on the
+  // second press, inside the dialog.
+  await page.waitForTimeout(1_200);
+  try {
+    const confirm = page.locator('[role="dialog"], .modal, [class*="modal" i], [class*="popup" i]').locator("text=/Xuất báo cáo|Xuất file|Xuất/").last();
+    if (await confirm.isVisible({ timeout: 3_000 })) {
+      console.log("   ✓ xác nhận trong pop-up");
+      await confirm.click();
+    }
+  } catch {
+    // No dialog appeared — some tenants export on the first press.
+  }
   const download = await downloadPromise;
   await mkdir(REPORT_DIR, { recursive: true });
   const suggested = download.suggestedFilename() || `doanh-thu-tong-quan-${Date.now()}.xls`;
   const target = path.join(REPORT_DIR, suggested);
   await download.saveAs(target);
-  console.log(`   ↓ đã lưu ${suggested}`);
+  console.log(`   ↓ đã lưu ${suggested} vào Report/`);
   return suggested;
+}
+
+/// Radio options in Sapo's export dialogs do not toggle when their caption text
+/// is clicked, so target the radio role itself and VERIFY it ended up checked —
+/// a silent miss here would quietly export "trang hiện tại" (50 rows) instead
+/// of everything.
+async function chooseRadio(page, variants) {
+  for (const variant of variants) {
+    // 1) The native input is CSS-hidden behind a styled dot, so force the
+    //    check instead of waiting for visibility that never comes.
+    const radio = page.getByRole("radio", { name: variant }).first();
+    try {
+      await radio.check({ timeout: 1_500, force: true });
+      if (await radio.isChecked()) return variant;
+    } catch {
+      // Fall through to the caption click.
+    }
+    // 2) Clicking the caption text toggles these dialogs (verified on the
+    //    invoice export); confirm through the DOM where possible.
+    const caption = page.getByText(variant, { exact: true }).first();
+    if (await caption.isVisible({ timeout: 1_000 }).catch(() => false)) {
+      await caption.click().catch(() => {});
+      await page.waitForTimeout(400);
+      const checked = await caption.evaluate((node) => {
+        const row = node.closest("label, li, [class*='radio' i], div");
+        const input = row?.querySelector('input[type="radio"]') || row?.parentElement?.querySelector('input[type="radio"]');
+        return input ? input.checked : null;
+      }).catch(() => null);
+      // true = verified; null = unverifiable markup — accept the click.
+      if (checked !== false) return variant;
+    }
+  }
+  throw new Error(`Không chọn được radio: ${variants.join(" / ")}`);
 }
 
 async function exportInvoices(page) {
   console.log("\n[2/3] Danh sách hoá đơn (xuất theo mặt hàng → email)…");
   await page.goto(`${ADMIN}/orders`, { waitUntil: "domcontentloaded", timeout: 45_000 });
   await page.waitForTimeout(2_000);
-  await clickLabel(page, ["Xuất hoá đơn", "Xuất hóa đơn", "Xuất file"]);
-  await page.waitForTimeout(1_000);
-  await clickLabel(page, ["theo danh sách mặt hàng", "danh sách mặt hàng"]);
-  await clickLabel(page, ["Tất cả hoá đơn", "Tất cả hóa đơn", "Tất cả"]);
-  await clickLabel(page, ["Xuất file", "Xuất hoá đơn", "Xuất hóa đơn", "Xuất"]);
+  await clickLabel(page, ["Xuất hóa đơn", "Xuất hoá đơn"]);
+  await page.waitForTimeout(1_200);
+  await chooseRadio(page, ["File xuất theo danh sách mặt hàng", "theo danh sách mặt hàng"]);
+  console.log("   ✓ kiểu file: theo danh sách mặt hàng");
+  await chooseRadio(page, ["Tất cả hóa đơn", "Tất cả hoá đơn"]);
+  console.log("   ✓ phạm vi: tất cả hóa đơn");
+  await clickLabel(page, ["Xuất File", "Xuất file"]);
   await page.waitForTimeout(2_000);
   console.log("   ✉ đã yêu cầu — Sapo sẽ gửi link về email");
 }
@@ -239,17 +303,57 @@ async function exportProducts(page) {
   await page.goto(`${ADMIN}/products`, { waitUntil: "domcontentloaded", timeout: 45_000 });
   await page.waitForTimeout(2_000);
   await clickLabel(page, ["Xuất danh sách", "Xuất file", "Xuất"]);
-  await page.waitForTimeout(1_000);
-  await clickLabel(page, ["Tất cả mặt hàng", "Tất cả"]);
-  await clickLabel(page, ["Xuất danh sách mặt hàng", "Xuất file", "Xuất"]);
+  await page.waitForTimeout(1_200);
+  // Same dialog family as the invoice export: pick scope via radio, confirm.
+  await chooseRadio(page, ["Tất cả mặt hàng", "Tất cả"]).then(
+    () => console.log("   ✓ phạm vi: tất cả mặt hàng"),
+    () => console.log("   (không thấy radio phạm vi — dùng lựa chọn mặc định)"),
+  );
+  await clickLabel(page, ["Xuất danh sách mặt hàng", "Xuất File", "Xuất file", "Xuất"]);
   await page.waitForTimeout(2_000);
   console.log("   ✉ đã yêu cầu — Sapo sẽ gửi link về email");
+}
+
+/// Consolidation net: any Sapo export sitting in ~/Downloads — from a manual
+/// browser run or a headed session where Long pressed the confirm himself —
+/// gets moved into the managed folders so the app scan always finds it.
+async function sweepDownloadsFolder() {
+  const downloadsDir = path.join(process.env.HOME || "", "Downloads");
+  const rules = [
+    { pattern: /^doanh-thu-tong-quan.*\.xlsx?$/i, dir: REPORT_DIR },
+    { pattern: /^danh_sach_hoa_don.*\.xlsx$/i, dir: REPORT_DIR },
+    { pattern: /^danh_muc_mat_hang.*\.xlsx$/i, dir: path.join(REPORT_DIR, "Danh mục mặt hàng") },
+  ];
+  let moved = 0;
+  let names;
+  try {
+    names = await readdir(downloadsDir);
+  } catch {
+    return 0;
+  }
+  for (const name of names) {
+    const rule = rules.find((entry) => entry.pattern.test(name));
+    if (!rule) continue;
+    await mkdir(rule.dir, { recursive: true });
+    const target = path.join(rule.dir, name);
+    if (existsSync(target)) continue;
+    try {
+      await rename(path.join(downloadsDir, name), target);
+      moved++;
+      console.log(`   ⇢ gom từ Downloads: ${name}`);
+    } catch {
+      // A file mid-download or locked is left for the next sweep.
+    }
+  }
+  return moved;
 }
 
 async function main() {
   await loadEnvLocal();
   await mkdir(STATE_DIR, { recursive: true });
   console.log(`Bắt đầu export Sapo (${headed ? "có giao diện" : "chạy ngầm — theo dõi bằng chính các dòng log này"}).`);
+  const sweptBefore = await sweepDownloadsFolder();
+  if (sweptBefore) console.log(`Đã gom ${sweptBefore} file Sapo còn sót trong Downloads.`);
   console.log(`Kết quả kiểm tra ở: ${REPORT_DIR} (file Doanh thu tải thẳng; Hoá đơn + Mặt hàng về email, chạy tiếp fetch để vớt).`);
   // The system Google Chrome is driven directly (channel: "chrome"), so no
   // Playwright browser download is needed — the CDN kept timing out here.
@@ -275,6 +379,8 @@ async function main() {
     await exportProducts(page);
 
     await context.storageState({ path: SESSION_FILE });
+    const sweptAfter = await sweepDownloadsFolder();
+    if (sweptAfter) console.log(`Đã gom thêm ${sweptAfter} file từ Downloads về Report/.`);
     console.log("\nXong. Bước tiếp: node scripts/fetch-sapo-reports.mjs --wait 300 (hoặc npm run sapo:daily làm trọn gói).");
   } catch (error) {
     await failStep(page, step, error);
