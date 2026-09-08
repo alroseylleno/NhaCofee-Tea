@@ -117,11 +117,18 @@ async function fetchOnce(args, user, pass) {
       const kind = KINDS.find((entry) => foldAccents(subject).includes(foldAccents(`xuất danh sách ${entry.subject}`)));
       if (kind) candidates.push({ uid: message.uid, subject, date: message.envelope?.date, kind });
     }
-    // Newest first, so the freshest export of each type wins the filename race.
+    // Keep-one-latest policy: only the NEWEST mail per kind is worth touching.
+    // Downloading the whole history re-created old files on every pass and,
+    // worse, gave the oldest mail the freshest mtime, which then out-lived the
+    // prune. One candidate per kind ends that churn at the source.
     candidates.sort((left, right) => Number(right.date || 0) - Number(left.date || 0));
-    console.log(`Có ${candidates.length} email export của Sapo.`);
-
+    const newestPerKind = new Map();
     for (const candidate of candidates) {
+      if (!newestPerKind.has(candidate.kind.key)) newestPerKind.set(candidate.kind.key, candidate);
+    }
+    console.log(`Có ${candidates.length} email export của Sapo — xử lý ${newestPerKind.size} mail mới nhất (mỗi loại một).`);
+
+    for (const candidate of newestPerKind.values()) {
       const download = await client.download(String(candidate.uid), undefined, { uid: true });
       const chunks = [];
       for await (const chunk of download.content) chunks.push(chunk);

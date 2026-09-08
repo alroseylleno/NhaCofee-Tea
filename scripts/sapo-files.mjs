@@ -86,7 +86,11 @@ export async function pruneSapoFolders(log = console.log) {
         // Vanished mid-scan — nothing to prune.
       }
     }
-    dated.sort((a, b) => b.mtime - a.mtime || b.name.localeCompare(a.name));
+    // Snapshot kinds carry their export moment IN the name, and that is the
+    // truthful "latest" — file mtime lies when older mails download last.
+    // Revenue keeps mtime ordering: it is a direct download, written once.
+    if (kind === "orders" || kind === "prices") dated.sort((a, b) => b.name.localeCompare(a.name) || b.mtime - a.mtime);
+    else dated.sort((a, b) => b.mtime - a.mtime || b.name.localeCompare(a.name));
     for (const stale of dated.slice(1)) {
       try {
         await unlink(path.join(dir, stale.name));
