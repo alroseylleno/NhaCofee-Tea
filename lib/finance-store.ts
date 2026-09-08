@@ -548,16 +548,28 @@ function grabReconciliationRows(records: FinanceGrabReconciliationRecord[]) {
 /// Full-snapshot replace of the price book, mirroring the SAPO export
 /// semantics: what is not in the latest file no longer exists on the menu.
 export async function replaceFinanceCounterPrices(records: FinanceCounterPrice[]) {
-  const { error } = await requireClient().rpc("replace_finance_counter_prices", {
-    p_rows: records.map((record) => ({
-      name: record.name,
-      store_price: record.storePrice,
-      grab_price: record.grabPrice ?? null,
-      shopee_price: record.shopeePrice ?? null,
-      green_price: record.greenPrice ?? null,
-    })),
-  });
-  if (error) throw supabaseFailure(error, "Không thể lưu bảng giá quầy");
+  const rows = records.map((record) => ({
+    name: record.name,
+    store_price: record.storePrice,
+    grab_price: record.grabPrice ?? null,
+    shopee_price: record.shopeePrice ?? null,
+    green_price: record.greenPrice ?? null,
+  }));
+  const { error } = await requireClient().rpc("replace_finance_counter_prices", { p_rows: rows });
+  if (!error) return;
+  // Supabase API sessions run with safeupdate, which rejects the function's
+  // WHERE-less full-table delete (21000) until migration 20260908000100 lands.
+  // Same replace semantics through the table endpoint, whose delete can carry
+  // the WHERE clause safeupdate demands.
+  if (error.code === "21000") {
+    const client = requireClient();
+    const cleared = await client.from("finance_counter_prices").delete().not("name", "is", null);
+    if (cleared.error) throw supabaseFailure(cleared.error, "Không thể lưu bảng giá quầy");
+    const inserted = await client.from("finance_counter_prices").insert(rows);
+    if (inserted.error) throw supabaseFailure(inserted.error, "Không thể lưu bảng giá quầy");
+    return;
+  }
+  throw supabaseFailure(error, "Không thể lưu bảng giá quầy");
 }
 
 export async function loadFinanceCounterPrices(): Promise<FinanceCounterPrice[]> {

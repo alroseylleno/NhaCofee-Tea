@@ -266,6 +266,13 @@ export default function Home() {
       setIsLocalUat(true);
       setLoginEmail("UAT");
       setLoginPassword("Giang21c");
+    } else if (hostname.endsWith(".localhost")) {
+      // prod.localhost: the Production-data door on the local dev server. The
+      // dev default is UAT, and without this explicit OFF branch every scan
+      // "to Production" landed in localStorage instead of Supabase.
+      setIsLocalUat(false);
+      setLoginEmail("");
+      setLoginPassword("");
     }
     setRuntimeModeReady(true);
   }, []);

@@ -109,7 +109,7 @@ const COUNTER_PRICE_RATE = 0.7278;
 /// Bumped by hand on each UI change to this panel. If the tag on screen does not
 /// match the one the terminal reports, the browser is running a cached bundle
 /// and no amount of code reading will explain the behaviour.
-const RECONCILIATION_BUILD = "R24";
+const RECONCILIATION_BUILD = "R25";
 
 /// How confidently a PDF row was tied to a SAPO order. "amount-only" means only
 /// the pre-discount value lined up, so the pairing deserves a second look.

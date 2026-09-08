@@ -255,30 +255,41 @@ async function exportRevenue(page) {
 /// is clicked, so target the radio role itself and VERIFY it ended up checked —
 /// a silent miss here would quietly export "trang hiện tại" (50 rows) instead
 /// of everything.
+/// Picks a radio by its caption, hidden input or not. Sapo's export dialogs
+/// pair a CSS-hidden input with a bare text span (no <label> association), and
+/// the same caption can ALSO exist as a list tab behind the dialog — so match
+/// every input[type=radio] by the text of its own row, prefer an exact caption,
+/// then the tightest row that contains it. This replaced a caption-click that
+/// once "chose" the background tab while the dialog kept its current-page
+/// default, silently shrinking the nightly invoice file to one page of rows.
 async function chooseRadio(page, variants) {
   for (const variant of variants) {
-    // 1) The native input is CSS-hidden behind a styled dot, so force the
-    //    check instead of waiting for visibility that never comes.
-    const radio = page.getByRole("radio", { name: variant }).first();
-    try {
-      await radio.check({ timeout: 1_500, force: true });
-      if (await radio.isChecked()) return variant;
-    } catch {
-      // Fall through to the caption click.
-    }
-    // 2) Clicking the caption text toggles these dialogs (verified on the
-    //    invoice export); confirm through the DOM where possible.
-    const caption = page.getByText(variant, { exact: true }).first();
-    if (await caption.isVisible({ timeout: 1_000 }).catch(() => false)) {
-      await caption.click().catch(() => {});
+    const picked = await page.evaluate((wanted) => {
+      const norm = (t) => (t || "").normalize("NFC").replace(/\s+/g, " ").trim().toLowerCase();
+      const target = norm(wanted);
+      const candidates = [];
+      for (const input of document.querySelectorAll('input[type="radio"]')) {
+        // Sapo wraps the input in an empty .next-input-wrapper div; the caption
+        // only appears on an ancestor, so climb until a text-bearing row.
+        let row = input.parentElement;
+        for (let hop = 0; hop < 4 && row && !norm(row.textContent); hop++) row = row.parentElement;
+        const text = norm(row && row.textContent);
+        if (!text || !text.includes(target)) continue;
+        candidates.push({ input, exact: text === target, length: text.length });
+      }
+      candidates.sort((a, b) => Number(b.exact) - Number(a.exact) || a.length - b.length);
+      const best = candidates[0];
+      if (!best) return false;
+      best.input.click();
+      if (!best.input.checked) {
+        best.input.checked = true;
+        best.input.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      return best.input.checked === true;
+    }, variant).catch(() => false);
+    if (picked) {
       await page.waitForTimeout(400);
-      const checked = await caption.evaluate((node) => {
-        const row = node.closest("label, li, [class*='radio' i], div");
-        const input = row?.querySelector('input[type="radio"]') || row?.parentElement?.querySelector('input[type="radio"]');
-        return input ? input.checked : null;
-      }).catch(() => null);
-      // true = verified; null = unverifiable markup — accept the click.
-      if (checked !== false) return variant;
+      return variant;
     }
   }
   throw new Error(`Không chọn được radio: ${variants.join(" / ")}`);
