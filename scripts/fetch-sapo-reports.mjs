@@ -15,7 +15,7 @@
 //   GRAB_MAIL_USER / GRAB_MAIL_APP_PASSWORD
 
 import { ImapFlow } from "imapflow";
-import { SAPO_DIRS, sapoCanonicalName } from "./sapo-files.mjs";
+import { SAPO_DIRS, pruneSapoFolders, sapoCanonicalName } from "./sapo-files.mjs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -194,6 +194,7 @@ async function main() {
     await new Promise((resolve) => setTimeout(resolve, 30_000));
   }
 
+  await pruneSapoFolders();
   console.log(`\nXong. Tải mới ${totalSaved} · bỏ qua ${lastSkipped} (đã có sẵn).`);
   console.log(`Hoá đơn  → ${SAPO_DIRS.orders}`);
   console.log(`Bảng giá → ${SAPO_DIRS.prices}`);

@@ -11,6 +11,7 @@
 // uuid tells a human nothing.
 
 import path from "node:path";
+import { readdir, stat, unlink } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -61,4 +62,41 @@ export function sapoCanonicalName(kind, originalName, when = new Date()) {
   const moment = unix ? new Date(Number(unix[1]) * 1000) : when;
   const base = kind === "orders" ? "danh-sach-hoa-don" : "danh-muc-mat-hang";
   return `${base}_${stampDateTime(moment)}${extension}`;
+}
+
+/// Long's retention rule: each Sapo folder holds exactly ONE file — the latest.
+/// Every ingest pass calls this, so history never piles up. The newest invoice
+/// export always spans the whole period anyway, and the dated archive
+/// subfolders under Report/ are never touched.
+export async function pruneSapoFolders(log = console.log) {
+  let removed = 0;
+  for (const [kind, dir] of Object.entries(SAPO_DIRS)) {
+    let names;
+    try {
+      names = (await readdir(dir)).filter((name) => sapoKindOf(name) === kind);
+    } catch {
+      continue;
+    }
+    if (names.length <= 1) continue;
+    const dated = [];
+    for (const name of names) {
+      try {
+        dated.push({ name, mtime: (await stat(path.join(dir, name))).mtimeMs });
+      } catch {
+        // Vanished mid-scan — nothing to prune.
+      }
+    }
+    dated.sort((a, b) => b.mtime - a.mtime || b.name.localeCompare(a.name));
+    for (const stale of dated.slice(1)) {
+      try {
+        await unlink(path.join(dir, stale.name));
+        removed++;
+        log(`   ✂ xoá bản cũ: ${path.basename(dir)}/${stale.name}`);
+      } catch {
+        // A locked file survives until the next pass.
+      }
+    }
+    if (dated[0]) log(`   ✓ giữ lại: ${path.basename(dir)}/${dated[0].name}`);
+  }
+  return removed;
 }

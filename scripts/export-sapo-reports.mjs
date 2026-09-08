@@ -21,7 +21,7 @@
 // expired session never blocks an unattended run.
 
 import { chromium } from "playwright";
-import { SAPO_DIRS, sapoCanonicalName, sapoKindOf } from "./sapo-files.mjs";
+import { SAPO_DIRS, pruneSapoFolders, sapoCanonicalName, sapoKindOf } from "./sapo-files.mjs";
 import { mkdir, readFile, readdir, rename, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -381,6 +381,7 @@ async function main() {
     await context.storageState({ path: SESSION_FILE });
     const sweptAfter = await sweepDownloadsFolder();
     if (sweptAfter) console.log(`Đã gom thêm ${sweptAfter} file từ Downloads về Report/.`);
+    await pruneSapoFolders();
     console.log("\nXong. Bước tiếp: node scripts/fetch-sapo-reports.mjs --wait 300 (hoặc npm run sapo:daily làm trọn gói).");
   } catch (error) {
     await failStep(page, step, error);
