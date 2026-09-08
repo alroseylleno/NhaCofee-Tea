@@ -80,12 +80,25 @@ async function main() {
 
   let next = upsertEnv(existing, "GRAB_MAIL_USER", user);
   next = upsertEnv(next, "GRAB_MAIL_APP_PASSWORD", password);
+
+  // Optional SAPO admin credentials, used by `sapo:export` to press the export
+  // buttons. Enter skips and keeps whatever is already stored.
+  const currentSapo = (existing.match(/^\s*SAPO_EMAIL\s*=\s*(.*)$/m) || [])[1]?.trim();
+  console.log("\nTài khoản đăng nhập SAPO admin (Enter để bỏ qua/giữ nguyên).");
+  const sapoEmail = (await ask(`Email SAPO${currentSapo ? ` [${currentSapo}]` : ""}: `)) || currentSapo || "";
+  if (sapoEmail) {
+    const sapoPassword = (await ask("Mật khẩu SAPO (gõ/dán, màn hình không hiện gì; Enter giữ mật khẩu cũ): ", { hidden: true })).trim();
+    next = upsertEnv(next, "SAPO_EMAIL", sapoEmail);
+    if (sapoPassword) next = upsertEnv(next, "SAPO_PASSWORD", sapoPassword);
+  }
+
   await writeFile(ENV_FILE, next);
   await chmod(ENV_FILE, 0o600);
 
   console.log(`\nĐã lưu vào ${ENV_FILE} (quyền 600, chỉ Long đọc được).`);
   console.log(`  GRAB_MAIL_USER=${user}`);
   console.log(`  GRAB_MAIL_APP_PASSWORD=${"*".repeat(16)}`);
+  if (sapoEmail) console.log(`  SAPO_EMAIL=${sapoEmail}\n  SAPO_PASSWORD=${"*".repeat(12)}`);
   console.log("\nFile này đã nằm trong .gitignore, không lên GitHub.");
   console.log("\nBước tiếp: npm run grab:uat -- --days 30");
 }

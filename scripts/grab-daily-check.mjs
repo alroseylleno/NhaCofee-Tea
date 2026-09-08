@@ -87,7 +87,8 @@ function askApproval(message, timeoutSeconds) {
 }
 
 /// Pull new PDFs first so the dialog can report a real count. Never opens the
-/// browser here — a browser window flying open at 10pm is not a reminder.
+/// browser window here — a visible browser flying open at 10pm is not a
+/// reminder (the SAPO export runs headless for the same reason).
 function fetchReports() {
   const result = spawnSync(process.execPath, [path.join(here, "fetch-grab-reports.mjs"), "--target", TARGET, "--no-open"], {
     cwd: projectRoot,
@@ -96,6 +97,31 @@ function fetchReports() {
   const output = `${result.stdout || ""}${result.stderr || ""}`;
   const saved = output.match(/tải mới (\d+)/);
   return { ok: result.status === 0, downloaded: saved ? Number(saved[1]) : 0, output };
+}
+
+/// Presses SAPO's three export buttons and waits for the emailed files, so the
+/// dialog pops with everything already on disk. Skipped when SAPO credentials
+/// are absent or --skip-sapo is passed; a failure still nags — that is exactly
+/// when Long needs to know.
+function runSapoChain() {
+  if (!process.env.SAPO_EMAIL || !process.env.SAPO_PASSWORD) return { ran: false, ok: false, note: "" };
+  const exported = spawnSync(process.execPath, [path.join(here, "export-sapo-reports.mjs")], {
+    cwd: projectRoot,
+    encoding: "utf8",
+    timeout: 3 * 60_000,
+  });
+  if (exported.status !== 0) {
+    return { ran: true, ok: false, note: "Bấm export SAPO thất bại — xem .grab-state/sapo-error-*.png." };
+  }
+  const fetched = spawnSync(process.execPath, [path.join(here, "fetch-sapo-reports.mjs"), "--wait", "240"], {
+    cwd: projectRoot,
+    encoding: "utf8",
+    timeout: 5 * 60_000,
+  });
+  const output = `${fetched.stdout || ""}${fetched.stderr || ""}`;
+  const saved = output.match(/Tải mới (\d+)/);
+  const count = saved ? Number(saved[1]) : 0;
+  return { ran: true, ok: fetched.status === 0, note: fetched.status === 0 ? `SAPO: export + tải ${count} file mới.` : "Export SAPO xong nhưng chưa vớt được mail." };
 }
 
 async function appIsUp() {
@@ -144,8 +170,24 @@ async function openApp() {
   console.log(`Đã mở ${APP_URL}`);
 }
 
+/// launchd hands this process a bare environment, so SAPO credentials must be
+/// read from .env.local here — the child fetch scripts load it themselves, but
+/// runSapoChain's guard runs in THIS process.
+async function loadEnvLocal() {
+  try {
+    const raw = await readFile(path.join(projectRoot, ".env.local"), "utf8");
+    for (const line of raw.split("\n")) {
+      const match = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
+      if (match && !(match[1] in process.env)) process.env[match[1]] = match[2].replace(/^["']|["']$/g, "");
+    }
+  } catch {
+    // Missing .env.local just means the SAPO chain is skipped.
+  }
+}
+
 async function main() {
   const argv = process.argv.slice(2);
+  await loadEnvLocal();
   const key = todayKey();
   const state = await readState();
 
@@ -179,6 +221,9 @@ async function main() {
   }
 
   const before = (await listReports()).length;
+  // Full chain: press SAPO's export buttons and harvest the emails first, so
+  // the dialog appears with every report already sitting on disk.
+  const sapo = argv.includes("--skip-sapo") ? { ran: false, ok: false, note: "" } : runSapoChain();
   const fetched = fetchReports();
   const after = (await listReports()).length;
   const total = after;
@@ -193,6 +238,7 @@ async function main() {
   } else {
     headline = "Không có báo cáo Grab mới.";
   }
+  if (sapo.ran) headline += ` ${sapo.note}`;
 
   const message = `${headline}\n\nThư mục đang có ${total} báo cáo${after > before ? ` (+${after - before})` : ""}.\n\nĐối soát ngày ${key} xong chưa?`;
   console.log(message.replace(/\n+/g, " | "));

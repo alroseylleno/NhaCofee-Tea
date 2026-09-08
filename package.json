@@ -12,7 +12,10 @@
     "grab:schedule": "node scripts/grab-schedule.mjs",
     "grab:setup": "node scripts/grab-setup.mjs",
     "sapo:uat": "node scripts/fetch-sapo-reports.mjs --target uat",
-    "sapo:prod": "node scripts/fetch-sapo-reports.mjs --target prod"
+    "sapo:prod": "node scripts/fetch-sapo-reports.mjs --target prod",
+    "cogs:export": "node scripts/export-supabase-cogs.mjs",
+    "sapo:export": "node scripts/export-sapo-reports.mjs",
+    "sapo:daily": "node scripts/export-sapo-reports.mjs && node scripts/fetch-sapo-reports.mjs --wait 300"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.7",
@@ -27,6 +30,7 @@
     "@types/react": "19.1.12",
     "@types/react-dom": "19.1.9",
     "imapflow": "^1.7.8",
+    "playwright": "^1.63.0",
     "typescript": "5.9.2"
   }
 }

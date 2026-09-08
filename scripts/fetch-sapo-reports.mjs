@@ -44,11 +44,12 @@ async function loadEnvLocal() {
 }
 
 function parseArgs(argv) {
-  const args = { days: 14, all: false, target: "uat" };
+  const args = { days: 14, all: false, target: "uat", waitSeconds: 0 };
   for (let index = 0; index < argv.length; index++) {
     if (argv[index] === "--all") args.all = true;
     else if (argv[index] === "--days") args.days = Math.max(1, Number(argv[++index]) || 14);
     else if (argv[index] === "--target") args.target = String(argv[++index] || "uat").toLowerCase();
+    else if (argv[index] === "--wait") args.waitSeconds = Math.max(0, Number(argv[++index]) || 300);
   }
   return args;
 }
@@ -83,17 +84,10 @@ function findDownloadUrl(body, pattern) {
   return undefined;
 }
 
-async function main() {
-  await loadEnvLocal();
-  const args = parseArgs(process.argv.slice(2));
-  checkTarget(args.target);
-  const user = process.env.GRAB_MAIL_USER;
-  const pass = process.env.GRAB_MAIL_APP_PASSWORD;
-  if (!user || !pass) {
-    console.error("Thiếu GRAB_MAIL_USER / GRAB_MAIL_APP_PASSWORD. Chạy: npm run grab:setup");
-    process.exit(1);
-  }
-
+/// One complete mailbox pass. Returns which export kinds saved a NEW file, so
+/// the --wait loop can stop the moment both emailed exports have landed.
+async function fetchOnce(args, user, pass) {
+  const savedKinds = new Set();
   const search = { from: SENDER };
   if (!args.all) {
     const since = new Date();
@@ -158,17 +152,51 @@ async function main() {
       }
       await writeFile(path.join(candidate.kind.dir, fileName), buffer);
       saved++;
+      savedKinds.add(candidate.kind.key);
       console.log(`  + [${candidate.kind.key}] ${fileName}  (${(buffer.length / 1024).toFixed(0)} KB)`);
     }
   } finally {
     lock.release();
     await client.logout();
   }
+  return { saved, skipped, savedKinds };
+}
 
-  console.log(`\nXong. Tải mới ${saved} · bỏ qua ${skipped} (đã có sẵn).`);
+async function main() {
+  await loadEnvLocal();
+  const args = parseArgs(process.argv.slice(2));
+  checkTarget(args.target);
+  const user = process.env.GRAB_MAIL_USER;
+  const pass = process.env.GRAB_MAIL_APP_PASSWORD;
+  if (!user || !pass) {
+    console.error("Thiếu GRAB_MAIL_USER / GRAB_MAIL_APP_PASSWORD. Chạy: npm run grab:setup");
+    process.exit(1);
+  }
+  console.log(`Tìm: từ "${SENDER}" · ${args.all ? "toàn bộ hộp thư" : `${args.days} ngày gần nhất`}${args.waitSeconds ? ` · chờ tối đa ${args.waitSeconds}s cho mail export mới` : ""}`);
+
+  let totalSaved = 0;
+  let lastSkipped = 0;
+  const wantedKinds = new Set(KINDS.map((kind) => kind.key));
+  const gotKinds = new Set();
+  const deadline = Date.now() + args.waitSeconds * 1_000;
+  for (let attempt = 1; ; attempt++) {
+    const result = await fetchOnce(args, user, pass);
+    totalSaved += result.saved;
+    lastSkipped = result.skipped;
+    for (const kind of result.savedKinds) gotKinds.add(kind);
+    const missing = [...wantedKinds].filter((kind) => !gotKinds.has(kind));
+    if (!args.waitSeconds || missing.length === 0 || Date.now() >= deadline) {
+      if (args.waitSeconds && missing.length) console.log(`Hết giờ chờ — chưa thấy mail mới cho: ${missing.join(", ")}.`);
+      break;
+    }
+    console.log(`(lượt ${attempt}) còn thiếu ${missing.join(", ")} — chờ 30s rồi kiểm tra lại…`);
+    await new Promise((resolve) => setTimeout(resolve, 30_000));
+  }
+
+  console.log(`\nXong. Tải mới ${totalSaved} · bỏ qua ${lastSkipped} (đã có sẵn).`);
   console.log(`Hoá đơn  → ${REPORT_ROOT}`);
   console.log(`Bảng giá → ${path.join(REPORT_ROOT, "Danh mục mặt hàng")}`);
-  if (saved) console.log('\nMở app UAT → Tài chính → Doanh thu → Import Center, chọn file vừa tải.');
+  if (totalSaved) console.log('\nMở app → tab Nền tảng → bấm Quét thư mục local để nạp tự động.');
 }
 
 main().catch((error) => {

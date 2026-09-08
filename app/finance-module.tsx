@@ -109,7 +109,7 @@ const COUNTER_PRICE_RATE = 0.7278;
 /// Bumped by hand on each UI change to this panel. If the tag on screen does not
 /// match the one the terminal reports, the browser is running a cached bundle
 /// and no amount of code reading will explain the behaviour.
-const RECONCILIATION_BUILD = "R21";
+const RECONCILIATION_BUILD = "R23";
 
 /// How confidently a PDF row was tied to a SAPO order. "amount-only" means only
 /// the pre-discount value lined up, so the pairing deserves a second look.
@@ -345,7 +345,7 @@ function financeTemplateType(rows: unknown[][]) {
   return undefined;
 }
 
-function parseRevenueRows(file: File, rows: unknown[][]): ParsedRevenueImport {
+function parseRevenueRows(file: { name: string }, rows: unknown[][]): ParsedRevenueImport {
   const headerRowIndex = rows.findIndex((row) => {
     const headers = row.map(normalizedHeader);
     return headers.includes("ngay") && headers.includes("sl don hang") && headers.includes("doanh thu thuc");
@@ -416,7 +416,7 @@ function parseRevenueRows(file: File, rows: unknown[][]): ParsedRevenueImport {
   return { type: "revenue", meta, importMeta: { dataType: "revenue", ...meta, importedAt }, records: records.sort((a, b) => b.date.localeCompare(a.date)), latestDate };
 }
 
-function parseProductRows(file: File, rows: unknown[][]): ParsedProductImport {
+function parseProductRows(file: { name: string }, rows: unknown[][]): ParsedProductImport {
   const headerRowIndex = rows.findIndex((row) => {
     const headers = row.map(normalizedHeader);
     return headers.includes("ten danh muc") && headers.includes("ma mat hang") && headers.includes("ten mat hang") && (headers.includes("tong tien") || headers.includes("tien hang"));
@@ -469,7 +469,7 @@ function parseProductRows(file: File, rows: unknown[][]): ParsedProductImport {
   return { type: "products", meta, importMeta: { dataType: "products", ...meta, importedAt }, records };
 }
 
-function parseServiceRows(file: File, rows: unknown[][]): ParsedServiceImport {
+function parseServiceRows(file: { name: string }, rows: unknown[][]): ParsedServiceImport {
   const headerRowIndex = rows.findIndex((row) => {
     const headers = row.map(normalizedHeader);
     return (headers.includes("loai don hang") || headers.includes("ten") || headers.includes("phuong thuc thanh toan")) && headers.includes("sl don hang") && headers.includes("so don huy") && (headers.includes("tien thu duoc") || headers.includes("doanh thu gom thue") || headers.includes("doanh thu"));
@@ -501,7 +501,7 @@ function parseServiceRows(file: File, rows: unknown[][]): ParsedServiceImport {
   return { type: "service", meta, importMeta: { dataType: "service", ...meta, importedAt }, records };
 }
 
-function parseCounterPriceRows(file: File, rows: unknown[][]): ParsedPriceImport {
+function parseCounterPriceRows(file: { name: string }, rows: unknown[][]): ParsedPriceImport {
   const headerRowIndex = rows.findIndex((row) => row.map(normalizedHeader).includes("gia ban tai nha hang"));
   if (headerRowIndex < 0) throw new Error(`${file.name}: không tìm thấy bảng giá mặt hàng.`);
   const headers = rows[headerRowIndex].map(normalizedHeader);
@@ -525,7 +525,7 @@ function parseCounterPriceRows(file: File, rows: unknown[][]): ParsedPriceImport
   return { type: "prices", meta, importMeta: { dataType: "prices", ...meta, importedAt }, records };
 }
 
-function parsePlatformOrderRows(file: File, rows: unknown[][]): ParsedOrderImport {
+function parsePlatformOrderRows(file: { name: string }, rows: unknown[][]): ParsedOrderImport {
   const headerRowIndex = rows.findIndex((row) => {
     const headers = row.map(normalizedHeader);
     return firstColumn(headers, ["ma don hang", "ma don", "ma hoa don", "so hoa don", "order code", "order id"]) >= 0
@@ -1637,20 +1637,14 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     }
   }
 
-  async function importFinanceExcel(event: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files || []);
-    event.target.value = "";
-    if (!files.length) return;
-    if (files.length > 4) { window.alert("Bộ import SAPO hỗ trợ tối đa 4 file: Doanh thu, Mặt hàng, Phương thức/Hình thức và Danh sách hóa đơn."); return; }
-    const invalidFile = files.find((file) => !/\.(xls|xlsx)$/i.test(file.name) || file.size > 10 * 1024 * 1024);
-    if (invalidFile) { window.alert(`${invalidFile.name}: chỉ hỗ trợ Excel .xls/.xlsx và tối đa 10 MB mỗi file.`); return; }
-    setImportingFinance(true);
-    setFinanceImportNotice(undefined);
-    try {
+  /// The single import path for the SAPO bundle, shared by the file picker and
+  /// the local-folder scan so both behave identically (template detection,
+  /// !ref repair, replace-by-period, Production persistence via RPC).
+  async function importFinanceWorkbooks(inputs: { name: string; buffer: ArrayBuffer }[], options?: { confirmReplace?: boolean }): Promise<{ platformOrders: PlatformOrderRecord[]; counterPrices: FinanceCounterPrice[] }> {
       const XLSX = await import("xlsx");
       const parsed: ParsedFinanceImport[] = [];
-      for (const file of files) {
-        const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
+      for (const file of inputs) {
+        const workbook = XLSX.read(file.buffer, { type: "array", cellDates: true });
         const sheet = workbook.Sheets[workbook.SheetNames[0]];
         if (!sheet) throw new Error(`${file.name}: không tìm thấy sheet dữ liệu.`);
         // Some SAPO exports declare a range starting below their real header.
@@ -1684,7 +1678,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       const pickImport = <T extends { meta: FinanceImportMeta | ImportMetaInput }>(entries: T[]) => [...entries].sort((left, right) => right.meta.periodEnd.localeCompare(left.meta.periodEnd) || right.meta.rowCount - left.meta.rowCount)[0];
       const duplicateTypes = [revenueImports.length > 1 ? "Doanh thu" : "", productImports.length > 1 ? "Mặt hàng" : "", serviceImports.length > 1 ? "Phương thức/Hình thức" : "", orderImports.length > 1 ? "Danh sách hóa đơn" : ""].filter(Boolean);
       const replacing = [revenueImports.length && state.revenues.length ? "Doanh thu" : "", productImports.length && state.products.length ? "Mặt hàng" : "", serviceImports.length && state.services.length ? "Hình thức phục vụ" : "", orderImports.length && state.platformOrders.length ? "Danh sách hóa đơn nền tảng" : ""].filter(Boolean);
-      if (replacing.length && !window.confirm(uatMode ? `Import mới sẽ thay dữ liệu ${replacing.join(" và ")} trong đúng kỳ báo cáo; các kỳ khác và lịch sử import vẫn được giữ. Tiếp tục?` : `Import mới sẽ thay toàn bộ dữ liệu ${replacing.join(" và ")} hiện tại. Tiếp tục?`)) return;
+      if (options?.confirmReplace !== false && replacing.length && !window.confirm(uatMode ? `Import mới sẽ thay dữ liệu ${replacing.join(" và ")} trong đúng kỳ báo cáo; các kỳ khác và lịch sử import vẫn được giữ. Tiếp tục?` : `Import mới sẽ thay toàn bộ dữ liệu ${replacing.join(" và ")} hiện tại. Tiếp tục?`)) throw new Error("cancelled-by-user");
       const revenue = pickImport(revenueImports);
       const products = pickImport(productImports);
       const service = pickImport(serviceImports);
@@ -1704,6 +1698,14 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         // Read after write so the success state always reflects the latest committed Supabase snapshot.
         verifiedCloudState = await loadFinanceImports();
       }
+      // The scan chain needs the post-import order list synchronously — state
+      // updates land later, so compute the same merge against the closure state.
+      const mergedPlatformOrders: PlatformOrderRecord[] = verifiedCloudState
+        ? verifiedCloudState.platformOrders
+        : orders
+          ? [...new Map([...orders.records, ...state.platformOrders.filter((entry) => entry.orderDate < orders.periodStart || entry.orderDate > orders.periodEnd)].map((entry) => [entry.id, entry])).values()]
+          : state.platformOrders;
+      const mergedCounterPrices: FinanceCounterPrice[] = verifiedCloudState ? verifiedCloudState.counterPrices : prices ? prices.records : state.counterPrices;
       setState((current) => {
         if (verifiedCloudState) return { ...current, ...verifiedCloudState };
         let imports = current.imports;
@@ -1739,14 +1741,30 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       }
       // When the invoice file is part of the bundle, land on the platform tab
       // so the imported channel dashboards and order list are immediately visible.
-      setRevenueSubTab(uatMode && orders ? "platform" : revenue || service ? "overview" : "products");
+      setRevenueSubTab(orders ? "platform" : revenue || service ? "overview" : "products");
       setFinanceSyncError(undefined);
       setFinanceImportNotice(`Đã tự nhận diện và map ${parsed.map((entry) => entry.type === "revenue" ? `Doanh thu (${entry.meta.rowCount} ngày)` : entry.type === "products" ? `Mặt hàng (${entry.meta.rowCount} SKU)` : entry.type === "service" ? `Phương thức/Hình thức (${entry.meta.rowCount} nhóm)` : entry.type === "prices" ? `Bảng giá mặt hàng (${entry.records.length} món)` : `Danh sách hóa đơn nền tảng (${entry.records.length} đơn, ${entry.records.filter((record) => "channelName" in record && normalizedHeader(record.channelName).includes("grab")).length} Grab)`).join(" + ")}${duplicateTypes.length ? `; ưu tiên file có kỳ mới hơn trong nhóm trùng: ${duplicateTypes.join(", ")}` : ""}.`);
+      return { platformOrders: mergedPlatformOrders, counterPrices: mergedCounterPrices };
+  }
+
+  async function importFinanceExcel(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!files.length) return;
+    if (files.length > 4) { window.alert("Bộ import SAPO hỗ trợ tối đa 4 file cùng lúc."); return; }
+    const invalidFile = files.find((file) => !/\.(xls|xlsx)$/i.test(file.name) || file.size > 10 * 1024 * 1024);
+    if (invalidFile) { window.alert(`${invalidFile.name}: chỉ hỗ trợ Excel .xls/.xlsx và tối đa 10 MB mỗi file.`); return; }
+    setImportingFinance(true);
+    setFinanceImportNotice(undefined);
+    try {
+      const inputs = await Promise.all(files.map(async (file) => ({ name: file.name, buffer: await file.arrayBuffer() })));
+      await importFinanceWorkbooks(inputs);
     } catch (error) {
-      const objectMessage = error && typeof error === "object" && "message" in error ? String(error.message || "") : "";
-      const message = error instanceof Error ? error.message : objectMessage || "Không thể phân tích các file Excel.";
-      setFinanceSyncError(message);
-      window.alert(message);
+      const message = error instanceof Error ? error.message : "Không thể phân tích các file Excel.";
+      if (message !== "cancelled-by-user") {
+        setFinanceSyncError(message);
+        window.alert(message);
+      }
     } finally {
       setImportingFinance(false);
     }
@@ -1838,12 +1856,12 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   /// The real counter value of an order: every line item priced at its in-store
   /// price. Returns `covered: false` when any item is missing from the price
   /// book, so a partial total is never presented as the whole basket.
-  function counterPriceFromItems(order: PlatformOrderRecord | undefined) {
-    if (!order?.items?.length || !counterPriceBook.size) return undefined;
+  function counterPriceFromItems(order: PlatformOrderRecord | undefined, book: Map<string, FinanceCounterPrice> = counterPriceBook) {
+    if (!order?.items?.length || !book.size) return undefined;
     let total = 0;
     const missing: string[] = [];
     for (const item of order.items) {
-      const priced = counterPriceBook.get(normalizedHeader(item.name));
+      const priced = book.get(normalizedHeader(item.name));
       if (!priced) { missing.push(item.name); continue; }
       total += priced.storePrice * (item.quantity || 1);
     }
@@ -1983,8 +2001,8 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   /// turns every match into a reconciliation record. Key insight from the data:
   /// SAPO's "Tổng tiền thanh toán" equals Grab's Trị giá − KM người bán, so that
   /// difference is the primary match key; delivery-vs-created time breaks ties.
-  function buildGrabReportApplication(report: ParsedGrabReport, fileName: string, existingRecords: GrabReconciliationRecord[]) {
-    const dayOrders = state.platformOrders.filter((order) =>
+  function buildGrabReportApplication(report: ParsedGrabReport, fileName: string, existingRecords: GrabReconciliationRecord[], platformOrders: PlatformOrderRecord[], priceBook: Map<string, FinanceCounterPrice>) {
+    const dayOrders = platformOrders.filter((order) =>
       order.orderDate === report.reportDate
       && marketplaceKey(`${order.channelName} ${order.paymentMethod || ""} ${order.deliveryPartner || ""}`) === "grab"
       && !/huy|cancel/.test(normalizedHeader(order.status)));
@@ -2064,7 +2082,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         // Real basket price wins now that line items and the price book persist;
         // the 0.7278 ratio is only the last resort for orders without items.
         counterPrice: existing?.counterPrice ?? (() => {
-          const basket = counterPriceFromItems(match);
+          const basket = counterPriceFromItems(match, priceBook);
           if (basket?.covered) return basket.total;
           return counterPriceEstimate(pdfOrder.orderValue) || undefined;
         })(),
@@ -2091,7 +2109,13 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   /// Shared tail of both ingest paths (file picker and local folder scan):
   /// match every report, fold the results into one state update, and report
   /// per-day outcomes so a silent partial match is impossible to miss.
-  async function applyGrabReports(parsed: { report: ParsedGrabReport; fileName: string }[]) {
+  async function applyGrabReports(parsed: { report: ParsedGrabReport; fileName: string }[], overrides?: { platformOrders?: PlatformOrderRecord[]; counterPrices?: FinanceCounterPrice[] }) {
+    // The one-click scan imports the SAPO trio in the same gesture; matching
+    // must see THOSE orders and prices, not the pre-import state.
+    const platformOrders = overrides?.platformOrders ?? state.platformOrders;
+    const priceBook = overrides?.counterPrices
+      ? new Map(overrides.counterPrices.map((entry) => [normalizedHeader(entry.name), entry] as const))
+      : counterPriceBook;
     let workingRecords = [...state.grabReconciliations];
     let workingReports = [...state.grabDailyReports];
     let matchedTotal = 0;
@@ -2103,7 +2127,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         emptyDays++;
         continue;
       }
-      const { records, daily } = buildGrabReportApplication(report, fileName, workingRecords);
+      const { records, daily } = buildGrabReportApplication(report, fileName, workingRecords, platformOrders, priceBook);
       matchedTotal += records.length;
       orderTotal += report.orders.length;
       const replacedIds = new Set(records.map((entry) => entry.id));
@@ -2164,6 +2188,30 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     setImportingGrabReport(true);
     if (!silent) setGrabReportNotice(undefined);
     try {
+      // Step 1: the freshest SAPO trio from disk, through the same import path
+      // as a manual upload. A missing/unreadable trio must not block the PDFs.
+      let sapoSummary = "";
+      let freshOverrides: { platformOrders?: PlatformOrderRecord[]; counterPrices?: FinanceCounterPrice[] } | undefined;
+      try {
+        const sapoResponse = await fetch("/api/sapo-reports", { cache: "no-store" });
+        if (sapoResponse.ok) {
+          const sapoPayload = await sapoResponse.json() as { files?: { kind: string; name: string; base64: string }[]; missing?: string[] };
+          const sapoFiles = (sapoPayload.files || []).map((entry) => ({
+            name: entry.name,
+            buffer: Uint8Array.from(atob(entry.base64), (char) => char.charCodeAt(0)).buffer as ArrayBuffer,
+          }));
+          if (sapoFiles.length) {
+            const imported = await importFinanceWorkbooks(sapoFiles, { confirmReplace: false });
+            freshOverrides = { platformOrders: imported.platformOrders, counterPrices: imported.counterPrices };
+            sapoSummary = `Nạp ${sapoFiles.length} file SAPO`;
+            if (sapoPayload.missing?.length) sapoSummary += ` (thiếu ${sapoPayload.missing.join(", ")})`;
+          }
+        }
+      } catch (error) {
+        sapoSummary = `SAPO lỗi: ${error instanceof Error ? error.message : "không nạp được"}`;
+      }
+
+      // Step 2: the Grab PDFs, matched against the just-imported orders.
       const response = await fetch("/api/grab-reports", { cache: "no-store" });
       const payload = await response.json() as { directory?: string; reports?: (ParsedGrabReport & { fileName: string })[]; failures?: { fileName: string; message: string }[]; error?: string };
       if (!response.ok) throw new Error(payload.error || "Không đọc được thư mục báo cáo Grab.");
@@ -2179,12 +2227,12 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         return !existing || existing.matchedCount === 0 || existing.unmatched.length > 0;
       });
       if (!fresh.length) {
-        if (!silent) setGrabReportNotice(`Thư mục có ${reports.length} báo cáo, tất cả đã khớp đủ đơn. Dùng "Quét lại tất cả" nếu vừa import file SAPO mới.${payload.failures?.length ? ` ${payload.failures.length} file không đọc được.` : ""}`);
+        if (!silent) setGrabReportNotice(`${sapoSummary ? sapoSummary + " · " : ""}Thư mục có ${reports.length} báo cáo Grab, tất cả đã khớp đủ đơn.${payload.failures?.length ? ` ${payload.failures.length} file không đọc được.` : ""}`);
         return;
       }
-      const { summary } = await applyGrabReports(fresh.map((report) => ({ report, fileName: report.fileName })));
+      const { summary } = await applyGrabReports(fresh.map((report) => ({ report, fileName: report.fileName })), freshOverrides);
       const failureNote = payload.failures?.length ? ` · ${payload.failures.length} file không đọc được` : "";
-      setGrabReportNotice(summary + failureNote);
+      setGrabReportNotice(`${sapoSummary ? sapoSummary + " · " : ""}${summary}${failureNote}`);
     } catch (error) {
       if (!silent) setGrabReportNotice(error instanceof Error ? error.message : "Không đọc được thư mục báo cáo Grab.");
     } finally {
