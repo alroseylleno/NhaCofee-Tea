@@ -90,13 +90,22 @@ async function clickLabel(page, labels, { timeout = 15_000 } = {}) {
   throw lastError || new Error(`Không tìm thấy nút nào trong: ${list.join(" / ")}`);
 }
 
+function inAdmin(url) {
+  return /mysapo\.vn\/admin/i.test(url) && !/authorization\/login/i.test(url);
+}
+
 async function isLoggedIn(page) {
   await page.goto(`${ADMIN}/reports-revenue`, { waitUntil: "domcontentloaded", timeout: 45_000 });
   await page.waitForTimeout(1_500);
-  const url = page.url();
-  return !/login|signin|dang-nhap|accounts?\./i.test(url);
+  return inAdmin(page.url());
 }
 
+/// SSO makes login a little dance, not one submit: fnb's login page only has a
+/// "Đăng nhập ngay với Sapo SSO" button; the credential form lives on the SSO
+/// domain; and after authenticating there, fnb can bounce BACK to its login
+/// page where the SSO button must be pressed a second time — that click now
+/// passes straight through and finally lands in /admin. So this walks a small
+/// state machine until the admin shell appears, logging each transition.
 async function login(page) {
   const email = process.env.SAPO_EMAIL;
   const password = process.env.SAPO_PASSWORD;
@@ -105,33 +114,80 @@ async function login(page) {
     process.exit(1);
   }
   console.log("Phiên hết hạn — đăng nhập lại…");
-  // Sapo FnB's login page carries no form of its own: the "Chủ cửa hàng" tab
-  // shows one button, "Đăng nhập ngay với Sapo SSO", and the real email +
-  // password form lives on the SSO page it redirects to.
-  try {
-    const ssoButton = page.getByText("Đăng nhập ngay với Sapo SSO").first();
-    if (await ssoButton.isVisible({ timeout: 5_000 })) {
-      await Promise.all([
-        page.waitForLoadState("domcontentloaded", { timeout: 45_000 }).catch(() => {}),
-        ssoButton.click(),
-      ]);
-      await page.waitForTimeout(2_000);
+  // Sapo's own frontend crashes on a 401 and renders NO error message, so the
+  // form just sits there looking innocent. Watching the login POST directly is
+  // the only honest signal of what the server actually said.
+  let loginRejection = "";
+  page.on("response", async (response) => {
+    if (/accounts\.sapo\.vn\/login/.test(response.url()) && response.request().method() === "POST" && response.status() >= 400) {
+      try {
+        const body = JSON.parse(await response.text());
+        loginRejection = body?.message || `HTTP ${response.status()}`;
+      } catch {
+        loginRejection = `HTTP ${response.status()}`;
+      }
     }
-  } catch {
-    // No SSO interstitial — some tenants land straight on the form.
+  });
+  let filledCredentials = false;
+  let submitAttempts = 0;
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    const url = page.url();
+    if (inAdmin(url)) {
+      console.log("→ đã vào admin.");
+      return;
+    }
+    const ssoButton = page.getByText("Đăng nhập ngay với Sapo SSO").first();
+    if (await ssoButton.isVisible({ timeout: 1_000 }).catch(() => false)) {
+      console.log(`→ bấm nút SSO${filledCredentials ? " (lần hai — đổi phiên SSO lấy phiên admin)" : ""}…`);
+      await ssoButton.click().catch(() => {});
+      await page.waitForLoadState("domcontentloaded", { timeout: 30_000 }).catch(() => {});
+      await page.waitForTimeout(2_000);
+      continue;
+    }
+    const passwordBox = page.locator('input[type="password"]').first();
+    if (await passwordBox.isVisible({ timeout: 1_000 }).catch(() => false)) {
+      if (!filledCredentials) {
+        console.log("→ điền email + mật khẩu trên trang SSO…");
+        const emailBox = page.locator('input[type="email"], input[name*="mail" i], input[name*="user" i], input[name*="phone" i], input[type="text"], input[type="tel"]').first();
+        await emailBox.fill(email);
+        await passwordBox.fill(password);
+        filledCredentials = true;
+      }
+      if (loginRejection) {
+        throw new Error(`Sapo từ chối đăng nhập: "${loginRejection}". Nếu Long vẫn đăng nhập Sapo bằng Google/Facebook thì tài khoản CHƯA có mật khẩu Sapo riêng — đặt qua "Quên mật khẩu" trên accounts.sapo.vn rồi chạy npm run grab:setup lưu lại.`);
+      }
+      if (submitAttempts >= 2) {
+        throw new Error("Đã bấm Đăng nhập 2 lần mà form vẫn còn và server không phản hồi lỗi — chạy --headed để nhìn trực tiếp.");
+      }
+      // Enter does not fire Sapo's JS-only submit button, so click it by name;
+      // Enter stays as the fallback for form variants that do submit on it.
+      submitAttempts++;
+      console.log(`→ bấm nút Đăng nhập (lần ${submitAttempts})…`);
+      const submitButton = page.getByRole("button", { name: /^Đăng nhập$/ }).first();
+      if (await submitButton.isVisible({ timeout: 1_500 }).catch(() => false)) {
+        await submitButton.click().catch(() => {});
+      } else {
+        await passwordBox.press("Enter").catch(() => {});
+      }
+      await page.waitForLoadState("domcontentloaded", { timeout: 30_000 }).catch(() => {});
+      await page.waitForTimeout(3_000);
+      continue;
+    }
+    // A store/tenant picker can appear between SSO and admin; pick the one
+    // matching SAPO_STORE, else the first store card on offer.
+    const storeHint = process.env.SAPO_STORE || "Hàn Hải Nguyên";
+    const storeChoice = page.getByText(storeHint).first();
+    if (await storeChoice.isVisible({ timeout: 1_000 }).catch(() => false)) {
+      console.log(`→ chọn cửa hàng "${storeHint}"…`);
+      await storeChoice.click().catch(() => {});
+      await page.waitForTimeout(2_500);
+      continue;
+    }
+    await page.waitForTimeout(1_000);
   }
-  const emailBox = page.locator('input[type="email"], input[name*="mail" i], input[name*="user" i], input[name*="phone" i], input[type="text"], input[type="tel"]').first();
-  await emailBox.waitFor({ timeout: 20_000 });
-  await emailBox.fill(email);
-  const passwordBox = page.locator('input[type="password"]').first();
-  await passwordBox.fill(password);
-  await Promise.all([
-    page.waitForLoadState("networkidle", { timeout: 45_000 }).catch(() => {}),
-    passwordBox.press("Enter"),
-  ]);
-  await page.waitForTimeout(2_000);
-  if (!(await isLoggedIn(page))) throw new Error("Đăng nhập không thành công — kiểm tra SAPO_EMAIL/SAPO_PASSWORD.");
-  console.log("Đăng nhập OK, lưu phiên.");
+  if (!(await isLoggedIn(page))) throw new Error("Sau 90s vẫn chưa vào được admin — xem screenshot để biết đang kẹt ở màn nào.");
+  console.log("→ đã vào admin.");
 }
 
 async function exportRevenue(page) {
@@ -193,6 +249,8 @@ async function exportProducts(page) {
 async function main() {
   await loadEnvLocal();
   await mkdir(STATE_DIR, { recursive: true });
+  console.log(`Bắt đầu export Sapo (${headed ? "có giao diện" : "chạy ngầm — theo dõi bằng chính các dòng log này"}).`);
+  console.log(`Kết quả kiểm tra ở: ${REPORT_DIR} (file Doanh thu tải thẳng; Hoá đơn + Mặt hàng về email, chạy tiếp fetch để vớt).`);
   // The system Google Chrome is driven directly (channel: "chrome"), so no
   // Playwright browser download is needed — the CDN kept timing out here.
   const browser = await chromium.launch({ headless: !headed, channel: "chrome" });
