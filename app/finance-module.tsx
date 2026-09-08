@@ -109,7 +109,7 @@ const COUNTER_PRICE_RATE = 0.7278;
 /// Bumped by hand on each UI change to this panel. If the tag on screen does not
 /// match the one the terminal reports, the browser is running a cached bundle
 /// and no amount of code reading will explain the behaviour.
-const RECONCILIATION_BUILD = "R23";
+const RECONCILIATION_BUILD = "R24";
 
 /// How confidently a PDF row was tied to a SAPO order. "amount-only" means only
 /// the pre-discount value lined up, so the pairing deserves a second look.
@@ -2563,7 +2563,9 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           <div className={styles.revenuePanelTitle}><div><span>ĐỐI SOÁT ĐƠN SÀN · {RECONCILIATION_BUILD} · {bounds.label}</span><strong>{reconciliationDoneCount.toLocaleString("vi-VN")}/{reconciliationRowsView.length.toLocaleString("vi-VN")} đơn đã đối soát</strong></div><small>{percent(reconciliationRowsView.length ? reconciliationDoneCount / reconciliationRowsView.length * 100 : 0)} coverage</small></div>
           <div className={styles.grabIngestRow}>
             <label className={`${styles.grabPdfUpload} ${importingGrabReport ? styles.importing : ""}`}><input type="file" accept="application/pdf,.pdf" multiple disabled={importingGrabReport} onChange={(event) => void importGrabReportPdf(event)} /><span>{importingGrabReport ? "Đang đọc báo cáo PDF…" : "⇧ Upload báo cáo Grab (PDF)"}</span></label>
-            {onLocalMachine && <button type="button" className={styles.grabFolderScan} disabled={importingGrabReport} onClick={() => void scanLocalGrabReports({ force: true })}><span>{importingGrabReport ? "Đang quét…" : uatMode ? "⟳ Quét thư mục local" : "⟳ Quét thư mục local → ghi Production"}</span></button>}
+            {onLocalMachine
+              ? <button type="button" className={styles.grabFolderScan} disabled={importingGrabReport} onClick={() => void scanLocalGrabReports({ force: true })}><span>{importingGrabReport ? "Đang quét…" : uatMode ? "⟳ Quét thư mục local" : "⟳ Quét thư mục local → ghi Production"}</span></button>
+              : <div className={styles.grabFolderScanHint}><span>Quét thư mục chỉ chạy trên máy có thư mục Report</span><small>Mở <b>http://prod.localhost:3001</b> trên máy đó — cùng dữ liệu Production này, có nút quét. Ở đây vẫn upload tay được.</small></div>}
           </div>
           {grabReportNotice && <p className={styles.grabReportNotice}>{grabReportNotice}</p>}
           {marketplaceMonths.length > 0 && <div className={styles.monthChips}>

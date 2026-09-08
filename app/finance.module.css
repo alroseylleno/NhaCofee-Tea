@@ -245,6 +245,10 @@
 .grabReconciliationPanel { display: grid; gap: 14px; }
 .grabIngestRow { display: grid; gap: 8px; }
 .grabFolderScan { display: grid; place-content: center; gap: 4px; padding: 13px 14px; border: 1px solid #cfc0a2; border-radius: 12px; background: #fffaf0; text-align: left; cursor: pointer; }
+.grabFolderScanHint { display: grid; place-content: center; gap: 4px; padding: 13px 14px; border: 1px dashed #d5ddd2; border-radius: 12px; background: #fafbf8; }
+.grabFolderScanHint span { color: #69806d; font: 700 10px Arial, sans-serif; }
+.grabFolderScanHint small { color: var(--muted); font: 9px/1.4 Arial, sans-serif; }
+.grabFolderScanHint small b { font: 700 9px monospace; }
 .grabFolderScan:hover:not(:disabled) { border-color: #b39c6f; background: #fdf4e3; }
 .grabFolderScan:disabled { cursor: default; opacity: .5; }
 .grabFolderScan span { color: #6b5a35; font: 700 11px Arial, sans-serif; }
