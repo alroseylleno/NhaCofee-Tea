@@ -53,6 +53,27 @@ function reportDirectory() {
   return process.env.GRAB_REPORT_DIR ? path.resolve(process.env.GRAB_REPORT_DIR) : DEFAULT_REPORT_DIR;
 }
 
+/// One count per sàn folder, so the dialog reports all three pipelines.
+async function countReports() {
+  const folders = [
+    { label: "Grab", dir: reportDirectory(), extension: ".pdf" },
+    { label: "Shopee", dir: path.join(projectRoot, "..", "..", "Report", "Shopee Report"), extension: ".csv" },
+    { label: "GreenSM", dir: path.join(projectRoot, "..", "..", "Report", "GreenSM Report"), extension: ".xlsx" },
+  ];
+  const counts = [];
+  let total = 0;
+  for (const folder of folders) {
+    try {
+      const count = (await readdir(folder.dir)).filter((name) => name.toLowerCase().endsWith(folder.extension)).length;
+      counts.push(`${count} ${folder.label}`);
+      total += count;
+    } catch {
+      counts.push(`0 ${folder.label}`);
+    }
+  }
+  return { total, detail: counts.join(" · ") };
+}
+
 async function listReports() {
   try {
     return (await readdir(reportDirectory())).filter((name) => name.toLowerCase().endsWith(".pdf")).sort();
@@ -73,10 +94,10 @@ function notify(title, message) {
 /// Returns the button label, or "" when the dialog timed out. `giving up after`
 /// matters: without it an unattended dialog would sit forever and every later
 /// launchd tick would stack another one on the screen.
-function askApproval(message, timeoutSeconds) {
-  const script = `display dialog ${osaQuote(message)} with title ${osaQuote("Đối soát Grab")} `
-    + `buttons {${osaQuote("Để sau")}, ${osaQuote("Mở app")}, ${osaQuote("Đã đối soát xong")}} `
-    + `default button ${osaQuote("Mở app")} giving up after ${timeoutSeconds}`;
+function askApproval(message, timeoutSeconds, buttons = ["Để sau", "Mở app", "Đã đối soát xong"], defaultButton = "Mở app") {
+  const script = `display dialog ${osaQuote(message)} with title ${osaQuote("Đối soát sàn")} `
+    + `buttons {${buttons.map((label) => osaQuote(label)).join(", ")}} `
+    + `default button ${osaQuote(defaultButton)} giving up after ${timeoutSeconds}`;
   const result = spawnSync("/usr/bin/osascript", ["-e", script], { encoding: "utf8" });
   // Cancel/dismiss exits non-zero; treat it the same as "later".
   if (result.status !== 0) return "";
@@ -105,13 +126,19 @@ function fetchReports() {
 /// when Long needs to know.
 function runSapoChain() {
   if (!process.env.SAPO_EMAIL || !process.env.SAPO_PASSWORD) return { ran: false, ok: false, note: "" };
+  // 6 minutes: a warm run takes ~1-2, but a cold Chrome start plus an expired
+  // Sapo session can exceed the old 3-minute box — the kill then left NO error
+  // screenshot while the message pointed at one, which read as a mystery.
   const exported = spawnSync(process.execPath, [path.join(here, "export-sapo-reports.mjs")], {
     cwd: projectRoot,
     encoding: "utf8",
-    timeout: 3 * 60_000,
+    timeout: 6 * 60_000,
   });
   if (exported.status !== 0) {
-    return { ran: true, ok: false, note: "Bấm export SAPO thất bại — xem .grab-state/sapo-error-*.png." };
+    const note = exported.signal
+      ? "Export SAPO bị dừng vì chạy quá 6 phút (máy chậm hoặc Sapo chậm) — bấm Thử lại thường là xong."
+      : "Bấm export SAPO thất bại — xem .grab-state/sapo-error-*.png.";
+    return { ran: true, ok: false, note };
   }
   const fetched = spawnSync(process.execPath, [path.join(here, "fetch-sapo-reports.mjs"), "--wait", "240"], {
     cwd: projectRoot,
@@ -220,41 +247,62 @@ async function main() {
     return;
   }
 
-  const before = (await listReports()).length;
-  // Full chain: press SAPO's export buttons and harvest the emails first, so
-  // the dialog appears with every report already sitting on disk.
-  const sapo = argv.includes("--skip-sapo") ? { ran: false, ok: false, note: "" } : runSapoChain();
-  const fetched = fetchReports();
-  const after = (await listReports()).length;
-  const total = after;
   const isNag = argv.includes("--nag");
 
-  let headline;
-  if (!fetched.ok) {
-    // Still nag: a broken mail fetch is exactly when Long needs to know.
-    headline = "Không tải được báo cáo mới từ Gmail (kiểm tra App Password trong .env.local).";
-  } else if (fetched.downloaded > 0) {
-    headline = `Vừa tải ${fetched.downloaded} báo cáo Grab mới.`;
-  } else {
-    headline = "Không có báo cáo Grab mới.";
-  }
-  if (sapo.ran) headline += ` ${sapo.note}`;
+  /// One full pass of the nightly chain. Also the body of the "Thử lại"
+  /// button, so a flaky night (slow Chrome, slow Sapo, dropped Gmail) can be
+  /// re-run straight from the dialog instead of waiting for the next tick.
+  const runChainOnce = async () => {
+    const before = (await countReports()).total;
+    // Press SAPO's export buttons and harvest the emails first, so the dialog
+    // appears with every report already sitting on disk.
+    const sapo = argv.includes("--skip-sapo") ? { ran: false, ok: true, note: "" } : runSapoChain();
+    const fetched = fetchReports();
+    const counted = await countReports();
 
-  const message = `${headline}\n\nThư mục đang có ${total} báo cáo${after > before ? ` (+${after - before})` : ""}.\n\nĐối soát ngày ${key} xong chưa?`;
-  console.log(message.replace(/\n+/g, " | "));
+    let headline;
+    if (!fetched.ok) {
+      // Still nag: a broken mail fetch is exactly when Long needs to know.
+      headline = "Không tải được báo cáo mới từ Gmail (kiểm tra App Password trong .env.local).";
+    } else if (fetched.downloaded > 0) {
+      headline = `Vừa tải ${fetched.downloaded} báo cáo sàn mới.`;
+    } else {
+      headline = "Không có báo cáo sàn mới.";
+    }
+    if (sapo.ran || sapo.note) headline += ` ${sapo.note}`;
 
+    const failed = !fetched.ok || (sapo.ran && !sapo.ok);
+    const delta = counted.total - before;
+    const message = `${failed ? "⚠ CÓ BƯỚC THẤT BẠI\n\n" : ""}${headline}\n\nThư mục: ${counted.detail}${delta > 0 ? ` (+${delta})` : ""}.\n\nĐối soát ngày ${key} xong chưa?`;
+    console.log(message.replace(/\n+/g, " | "));
+    return { message, total: counted.total, failed };
+  };
+
+  let outcome = await runChainOnce();
   if (!isNag) return;
 
-  const choice = askApproval(message, Number(process.env.GRAB_DIALOG_TIMEOUT || 240));
-  if (choice === "Đã đối soát xong") {
-    state[key] = { approvedAt: new Date().toISOString(), via: "dialog", reports: total };
-    await writeState(state);
-    notify("Đối soát Grab", `Ngày ${key}: DONE. Không nhắc lại nữa.`);
-    console.log(`${key}: DONE.`);
+  for (;;) {
+    // macOS dialogs top out at three buttons, so on a failure "Thử lại"
+    // takes the slot (and the default) that "Mở app" normally holds.
+    const buttons = outcome.failed ? ["Để sau", "Thử lại", "Đã đối soát xong"] : ["Để sau", "Mở app", "Đã đối soát xong"];
+    const choice = askApproval(outcome.message, Number(process.env.GRAB_DIALOG_TIMEOUT || 240), buttons, outcome.failed ? "Thử lại" : "Mở app");
+    if (choice === "Đã đối soát xong") {
+      state[key] = { approvedAt: new Date().toISOString(), via: "dialog", reports: outcome.total };
+      await writeState(state);
+      notify("Đối soát sàn", `Ngày ${key}: DONE. Không nhắc lại nữa.`);
+      console.log(`${key}: DONE.`);
+      return;
+    }
+    if (choice === "Thử lại") {
+      notify("Đối soát sàn", "Đang chạy lại chuỗi export SAPO + tải mail…");
+      console.log("Chọn: Thử lại — chạy lại chuỗi.");
+      outcome = await runChainOnce();
+      continue;
+    }
+    if (choice === "Mở app") await openApp();
+    console.log(choice ? `Chọn: ${choice} — sẽ nhắc lại ở lượt sau.` : "Không trả lời — sẽ nhắc lại ở lượt sau.");
     return;
   }
-  if (choice === "Mở app") await openApp();
-  console.log(choice ? `Chọn: ${choice} — sẽ nhắc lại ở lượt sau.` : "Không trả lời — sẽ nhắc lại ở lượt sau.");
 }
 
 main().catch((error) => {
