@@ -120,6 +120,8 @@ export type FinanceReconciliationDiscount = { label: string; amount: number };
 // positive magnitudes; payout is what Grab actually pays for the order before
 // the day-level marketing charge.
 export type FinanceGrabSettlement = {
+  /// "grab" | "shopee" | "greensm"; absent means "grab" (pre-platform rows).
+  platform?: string;
   reportDate: string;
   fileName?: string;
   deliveryTime?: string;
@@ -149,6 +151,8 @@ export type FinanceGrabSettlement = {
 /// spend that Grab never attributes to individual orders.
 export type FinanceGrabDailyReportRecord = {
   id: string;
+  /// Which sàn produced the report; defaults to "grab" for pre-platform rows.
+  platform: string;
   reportDate: string;
   fileName: string;
   importedAt: string;
@@ -164,6 +168,8 @@ export type FinanceGrabDailyReportRecord = {
 
 export type FinanceGrabReconciliationRecord = {
   id: string;
+  /// Which sàn settled this order; defaults to "grab" for pre-platform rows.
+  platform?: string;
   platformOrderId?: string;
   orderCode: string;
   orderDate: string;
@@ -184,6 +190,7 @@ export function normalizeGrabSettlement(value: unknown): FinanceGrabSettlement |
   const reportDate = String(record.reportDate ?? "").trim();
   if (!reportDate) return undefined;
   return {
+    platform: record.platform ? String(record.platform) : undefined,
     reportDate,
     fileName: record.fileName ? String(record.fileName) : undefined,
     deliveryTime: record.deliveryTime ? String(record.deliveryTime) : undefined,
@@ -290,6 +297,7 @@ function expenseFromRow(row: Record<string, unknown>): FinanceExpenseRecord {
 function grabReconciliationFromRow(row: Record<string, unknown>): FinanceGrabReconciliationRecord {
   return {
     id: String(row.id),
+    platform: row.platform ? String(row.platform) : "grab",
     platformOrderId: row.platform_order_id ? String(row.platform_order_id) : undefined,
     orderCode: String(row.order_code),
     orderDate: String(row.order_date),
@@ -307,6 +315,7 @@ function grabDailyReportFromRow(row: Record<string, unknown>): FinanceGrabDailyR
   const unmatched = Array.isArray(row.unmatched) ? row.unmatched : [];
   return {
     id: String(row.id),
+    platform: row.platform ? String(row.platform) : "grab",
     reportDate: String(row.report_date),
     fileName: row.file_name ? String(row.file_name) : "",
     importedAt: row.imported_at ? String(row.imported_at) : new Date().toISOString(),
@@ -532,6 +541,7 @@ export async function upsertFinanceExpenses(records: FinanceExpenseRecord[], ign
 function grabReconciliationRows(records: FinanceGrabReconciliationRecord[]) {
   return records.map((record) => ({
     id: record.id,
+    platform: record.platform || "grab",
     platform_order_id: record.platformOrderId || null,
     order_code: record.orderCode,
     order_date: record.orderDate,
@@ -586,10 +596,12 @@ export async function loadFinanceCounterPrices(): Promise<FinanceCounterPrice[]>
 
 export async function upsertFinanceGrabDailyReports(records: FinanceGrabDailyReportRecord[]) {
   if (!records.length) return;
-  // report_date carries a UNIQUE constraint; conflicting on it (not on id)
-  // means a re-imported day replaces its previous row instead of erroring.
+  // (platform, report_date) carries the UNIQUE index; conflicting on it (not
+  // on id) means a re-imported day replaces its previous row instead of
+  // erroring, while three sàn can each own the same date.
   const { error } = await requireClient().from("finance_grab_daily_reports").upsert(records.map((record) => ({
     id: record.id,
+    platform: record.platform || "grab",
     report_date: record.reportDate,
     file_name: record.fileName || null,
     imported_at: record.importedAt,
@@ -601,7 +613,7 @@ export async function upsertFinanceGrabDailyReports(records: FinanceGrabDailyRep
     total_marketing: record.totalMarketing,
     marketing_lines: record.marketingLines,
     unmatched: record.unmatched,
-  })), { onConflict: "report_date" });
+  })), { onConflict: "platform,report_date" });
   if (error) throw supabaseFailure(error, "Không thể lưu báo cáo Grab theo ngày");
 }
 

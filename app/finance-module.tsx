@@ -24,7 +24,7 @@ import {
   type FinanceRevenueRecord,
   type FinanceServiceRecord,
 } from "@/lib/finance-store";
-import { extractGrabPdfText, parseGrabReportText, type ParsedGrabReport } from "@/lib/grab-report";
+import { extractGrabPdfText, parseGrabReportText, parseGreenRevenueRows, parseShopeeIncomeCsv, type ParsedGrabReport } from "@/lib/grab-report";
 import { isSupabaseConfigured } from "@/lib/supabase";
 import styles from "./finance.module.css";
 
@@ -109,7 +109,7 @@ const COUNTER_PRICE_RATE = 0.7278;
 /// Bumped by hand on each UI change to this panel. If the tag on screen does not
 /// match the one the terminal reports, the browser is running a cached bundle
 /// and no amount of code reading will explain the behaviour.
-const RECONCILIATION_BUILD = "R25";
+const RECONCILIATION_BUILD = "R26";
 
 /// How confidently a PDF row was tied to a SAPO order. "amount-only" means only
 /// the pre-discount value lined up, so the pairing deserves a second look.
@@ -1084,7 +1084,9 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const platformCostModel = useMemo(() => {
     const marketingByDate = new Map<string, number>();
     for (const report of state.grabDailyReports) {
-      if (inRange(report.reportDate, bounds)) marketingByDate.set(report.reportDate, report.totalMarketing);
+      // Three sàn can report the same date; only Grab bills marketing but a
+      // later zero-marketing report must never overwrite Grab's spend.
+      if (inRange(report.reportDate, bounds)) marketingByDate.set(report.reportDate, (marketingByDate.get(report.reportDate) || 0) + report.totalMarketing);
     }
     const settledByDate = new Map<string, { commission: number; tax: number; shipSupport: number }>();
     for (const entry of state.grabReconciliations) {
@@ -1251,7 +1253,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   /// can show done and pending side by side. Pending rows carry the reason they
   /// cannot be settled yet — the usual cause is simply a missing Grab PDF.
   const reconciliationRowsView = useMemo(() => {
-    const reportDates = new Set(state.grabDailyReports.map((report) => report.reportDate));
+    const reportDays = new Set(state.grabDailyReports.map((report) => `${report.platform || "grab"}:${report.reportDate}`));
     const byOrderId = new Map<string, GrabReconciliationRecord>();
     const byCodeDate = new Map<string, GrabReconciliationRecord>();
     for (const entry of grabReconciliationRows) {
@@ -1263,11 +1265,11 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       const channel = marketplaceKey(`${order.channelName} ${order.paymentMethod || ""} ${order.deliveryPartner || ""}`);
       const reason = reconciliation
         ? undefined
-        : channel !== "grab"
+        : !TRACKED_MARKETPLACES.includes(channel)
           ? "Sàn này chưa có báo cáo đối soát"
-          : reportDates.has(order.orderDate)
+          : reportDays.has(`${channel}:${order.orderDate}`)
             ? "Có báo cáo ngày này nhưng không khớp được số tiền"
-            : `Chưa có báo cáo Grab ngày ${dateLabel(order.orderDate)}`;
+            : `Chưa có báo cáo ${MARKETPLACE_LABELS[channel] || channel} ngày ${dateLabel(order.orderDate)}`;
       return { order, reconciliation, reason };
     });
     // A reconciliation whose SAPO order fell outside the period (cancelled, or
@@ -2002,9 +2004,11 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   /// SAPO's "Tổng tiền thanh toán" equals Grab's Trị giá − KM người bán, so that
   /// difference is the primary match key; delivery-vs-created time breaks ties.
   function buildGrabReportApplication(report: ParsedGrabReport, fileName: string, existingRecords: GrabReconciliationRecord[], platformOrders: PlatformOrderRecord[], priceBook: Map<string, FinanceCounterPrice>) {
+    const platform = report.platform ?? "grab";
+    const platformLabel = MARKETPLACE_LABELS[platform] || platform;
     const dayOrders = platformOrders.filter((order) =>
       order.orderDate === report.reportDate
-      && marketplaceKey(`${order.channelName} ${order.paymentMethod || ""} ${order.deliveryPartner || ""}`) === "grab"
+      && marketplaceKey(`${order.channelName} ${order.paymentMethod || ""} ${order.deliveryPartner || ""}`) === platform
       && !/huy|cancel/.test(normalizedHeader(order.status)));
     const marketingShare = report.orders.length ? Math.round(report.totalMarketing / report.orders.length) : 0;
     const toMinutes = (time: string) => Number(time.slice(0, 2)) * 60 + Number(time.slice(3, 5));
@@ -2050,6 +2054,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       used.add(match.id);
       const existing = existingRecords.find((entry) => entry.platformOrderId === match.id || (entry.orderDate === match.orderDate && entry.orderCode.toLocaleLowerCase("vi") === match.orderCode.toLocaleLowerCase("vi")));
       const settlement: FinanceGrabSettlement = {
+        platform,
         reportDate: report.reportDate,
         fileName,
         deliveryTime: pdfOrder.time,
@@ -2069,7 +2074,8 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           : [],
       };
       records.push({
-        id: existing?.id || `grab-pdf-${report.reportDate}-${pdfOrder.code.toLocaleLowerCase("vi")}`,
+        id: existing?.id || `${platform === "grab" ? "grab-pdf" : `${platform}-report`}-${report.reportDate}-${pdfOrder.code.toLocaleLowerCase("vi")}`,
+        platform,
         platformOrderId: match.id,
         orderCode: match.orderCode,
         orderDate: match.orderDate,
@@ -2084,13 +2090,16 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         counterPrice: existing?.counterPrice ?? (() => {
           const basket = counterPriceFromItems(match, priceBook);
           if (basket?.covered) return basket.total;
-          return counterPriceEstimate(pdfOrder.orderValue) || undefined;
+          // The ratio fallback was measured on Grab listings only; a Shopee or
+          // GreenSM order without price-book coverage keeps no counter price.
+          return platform === "grab" ? counterPriceEstimate(pdfOrder.orderValue) || undefined : undefined;
         })(),
-        note: existing?.note?.trim() ? existing.note : `Tự động từ báo cáo Grab ${dateLabel(report.reportDate)}`,
+        note: existing?.note?.trim() ? existing.note : `Tự động từ báo cáo ${platformLabel} ${dateLabel(report.reportDate)}`,
       });
     }
     const daily: GrabDailyReportRecord = {
-      id: `grab-daily-${report.reportDate}`,
+      id: `${platform}-daily-${report.reportDate}`,
+      platform,
       reportDate: report.reportDate,
       fileName,
       importedAt: new Date().toISOString(),
@@ -2133,7 +2142,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       const replacedIds = new Set(records.map((entry) => entry.id));
       const replacedOrderIds = new Set(records.map((entry) => entry.platformOrderId).filter(Boolean));
       workingRecords = [...records, ...workingRecords.filter((entry) => !replacedIds.has(entry.id) && !(entry.platformOrderId && replacedOrderIds.has(entry.platformOrderId)))];
-      workingReports = [daily, ...workingReports.filter((entry) => entry.reportDate !== report.reportDate)];
+      workingReports = [daily, ...workingReports.filter((entry) => !((entry.platform || "grab") === daily.platform && entry.reportDate === report.reportDate))];
       // Only days that still have a problem are worth naming; a clean day adds
       // nothing but noise to the notice.
       const wobbly = report.orders.filter((order) => !order.balanced).length;
@@ -2145,11 +2154,11 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     if (!uatMode) {
       if (!isSupabaseConfigured) throw new Error("Production chưa cấu hình Supabase.");
       const changedIds = new Set<string>();
-      for (const { report } of parsed) for (const entry of workingRecords) if (entry.settlement?.reportDate === report.reportDate) changedIds.add(entry.id);
+      for (const { report } of parsed) for (const entry of workingRecords) if (entry.settlement?.reportDate === report.reportDate && (entry.settlement?.platform || "grab") === (report.platform ?? "grab")) changedIds.add(entry.id);
       const changedRecords = workingRecords.filter((entry) => changedIds.has(entry.id));
       if (changedRecords.length) await upsertFinanceGrabReconciliations(changedRecords);
-      const changedDates = new Set(parsed.map(({ report }) => report.reportDate));
-      await upsertFinanceGrabDailyReports(workingReports.filter((entry) => changedDates.has(entry.reportDate)));
+      const changedDays = new Set(parsed.map(({ report }) => `${report.platform ?? "grab"}:${report.reportDate}`));
+      await upsertFinanceGrabDailyReports(workingReports.filter((entry) => changedDays.has(`${entry.platform || "grab"}:${entry.reportDate}`)));
     }
     setState((current) => ({ ...current, grabReconciliations: workingRecords, grabDailyReports: workingReports }));
     const summary = `Đã quét ${parsed.length} báo cáo · khớp ${matchedTotal}/${orderTotal} đơn${emptyDays ? ` · ${emptyDays} ngày không có đơn` : ""}`;
@@ -2165,11 +2174,21 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     setGrabReportNotice(undefined);
     try {
       const parsed: { report: ParsedGrabReport; fileName: string }[] = [];
-      for (const file of files) parsed.push({ report: parseGrabReportText(await extractGrabPdfText(await file.arrayBuffer())), fileName: file.name });
+      for (const file of files) {
+        const name = file.name.toLowerCase();
+        if (name.endsWith(".csv")) parsed.push({ report: parseShopeeIncomeCsv(await file.text(), file.name), fileName: file.name });
+        else if (name.endsWith(".xlsx")) {
+          const XLSX = await import("xlsx");
+          const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
+          const sheetName = workbook.SheetNames.find((entry) => /detail/i.test(entry)) || workbook.SheetNames[0];
+          const rows = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[sheetName], { header: 1, raw: false, defval: null });
+          parsed.push({ report: parseGreenRevenueRows(rows, file.name), fileName: file.name });
+        } else parsed.push({ report: parseGrabReportText(await extractGrabPdfText(await file.arrayBuffer())), fileName: file.name });
+      }
       const { summary } = await applyGrabReports(parsed);
       setGrabReportNotice(summary);
     } catch (error) {
-      setGrabReportNotice(error instanceof Error ? error.message : "Không đọc được file PDF báo cáo Grab.");
+      setGrabReportNotice(error instanceof Error ? error.message : "Không đọc được file báo cáo sàn.");
     } finally {
       setImportingGrabReport(false);
     }
@@ -2214,7 +2233,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       // Step 2: the Grab PDFs, matched against the just-imported orders.
       const response = await fetch("/api/grab-reports", { cache: "no-store" });
       const payload = await response.json() as { directory?: string; reports?: (ParsedGrabReport & { fileName: string })[]; failures?: { fileName: string; message: string }[]; error?: string };
-      if (!response.ok) throw new Error(payload.error || "Không đọc được thư mục báo cáo Grab.");
+      if (!response.ok) throw new Error(payload.error || "Không đọc được thư mục báo cáo sàn.");
       const reports = payload.reports || [];
       // Skip days already ingested from the exact same file, so the automatic
       // scan never rewrites reconciliations Long has since edited by hand.
@@ -2223,18 +2242,18 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       // invoice was imported recorded 0 matches and then blocked every retry.
       const fresh = reports.filter((report) => {
         if (force) return true;
-        const existing = state.grabDailyReports.find((entry) => entry.reportDate === report.reportDate && entry.fileName === report.fileName);
+        const existing = state.grabDailyReports.find((entry) => (entry.platform || "grab") === (report.platform ?? "grab") && entry.reportDate === report.reportDate && entry.fileName === report.fileName);
         return !existing || existing.matchedCount === 0 || existing.unmatched.length > 0;
       });
       if (!fresh.length) {
-        if (!silent) setGrabReportNotice(`${sapoSummary ? sapoSummary + " · " : ""}Thư mục có ${reports.length} báo cáo Grab, tất cả đã khớp đủ đơn.${payload.failures?.length ? ` ${payload.failures.length} file không đọc được.` : ""}`);
+        if (!silent) setGrabReportNotice(`${sapoSummary ? sapoSummary + " · " : ""}Thư mục có ${reports.length} báo cáo sàn, tất cả đã khớp đủ đơn.${payload.failures?.length ? ` ${payload.failures.length} file không đọc được.` : ""}`);
         return;
       }
       const { summary } = await applyGrabReports(fresh.map((report) => ({ report, fileName: report.fileName })), freshOverrides);
       const failureNote = payload.failures?.length ? ` · ${payload.failures.length} file không đọc được` : "";
       setGrabReportNotice(`${sapoSummary ? sapoSummary + " · " : ""}${summary}${failureNote}`);
     } catch (error) {
-      if (!silent) setGrabReportNotice(error instanceof Error ? error.message : "Không đọc được thư mục báo cáo Grab.");
+      if (!silent) setGrabReportNotice(error instanceof Error ? error.message : "Không đọc được thư mục báo cáo sàn.");
     } finally {
       setImportingGrabReport(false);
     }
@@ -2464,7 +2483,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
 
       {revenueSubTab === "platform" && <>
         <div className={styles.revenueHeader}>
-          <div><span>SÀN & ĐỐI SOÁT</span><h2>{bounds.label}</h2><p>Chỉ tính đơn sàn — Grab, ShopeeFood và Xanh/Green Food. Website và các kênh tự bán được tách riêng ở mục Kênh khác vì không chịu phí sàn và không phải đối soát. Đối soát Grab chỉ cần chọn mã đơn và nhập tiền thực nhận.</p></div>
+          <div><span>SÀN & ĐỐI SOÁT</span><h2>{bounds.label}</h2><p>Chỉ tính đơn sàn — Grab, ShopeeFood và Xanh/Green Food. Website và các kênh tự bán được tách riêng ở mục Kênh khác vì không chịu phí sàn và không phải đối soát. Đối soát tự đọc báo cáo quyết toán của từng sàn — Grab (PDF), ShopeeFood (CSV), GreenSM (xlsx); vẫn đối soát tay được từng đơn.</p></div>
         </div>
         <div className={styles.revenueKpis}>
           <article className={styles.primaryRevenueKpi}><span>DOANH THU SÀN GHI NHẬN</span><strong>{settledEntries.length ? money(platformRecordedRevenue) : "-"}</strong><small>{settledEntries.length ? `${platformRecordedChannels.covered.join(", ")} · ${settledEntries.length.toLocaleString("vi-VN")} đơn${platformRecordedChannels.missing.length ? ` · chưa có báo cáo ${platformRecordedChannels.missing.join(", ")}` : ""}` : "chờ báo cáo từ sàn"}</small></article>
@@ -2472,9 +2491,9 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           <article className={styles.primaryRevenueKpi}><span>DOANH THU SÀN · THỰC NHẬN</span><strong>{money(receivedRevenue)}</strong><small>{reconciledEntries.length ? `${percent(reportedRevenue ? receivedRevenue / reportedRevenue * 100 : 0)} số SAPO · ${reconciledEntries.length.toLocaleString("vi-VN")} đơn đã đối soát` : "chưa đối soát đơn nào"}</small></article>
           <article><span>Trung bình/đơn</span><strong>{money(platformAverageOrder)}</strong><small>theo Danh sách hóa đơn</small></article>
           <article><span>Giảm giá sàn</span><strong>{money(platformDiscountAmount)}</strong><small>{percent(platformDiscountRate)} tiền hàng</small></article>
-          <article><span>Phí sàn trung bình</span><strong>{settledEntries.length ? money(avgPlatformFee) : "-"}</strong><small>{settledEntries.length ? `${percent(avgListPrice ? avgPlatformFee / avgListPrice * 100 : 0)} giá bán · mỗi đơn` : "chờ báo cáo Grab"}</small></article>
-          <article><span>Quảng cáo trung bình</span><strong>{settledEntries.length ? money(avgMarketing) : "-"}</strong><small>{settledEntries.length ? `${percent(avgListPrice ? avgMarketing / avgListPrice * 100 : 0)} giá bán · mỗi đơn` : "chờ báo cáo Grab"}</small></article>
-          <article><span>Giảm giá trung bình</span><strong>{settledEntries.length ? money(avgDiscount) : "-"}</strong><small>{settledEntries.length ? `${percent(avgListPrice ? avgDiscount / avgListPrice * 100 : 0)} giá bán · mỗi đơn` : "chờ báo cáo Grab"}</small></article>
+          <article><span>Phí sàn trung bình</span><strong>{settledEntries.length ? money(avgPlatformFee) : "-"}</strong><small>{settledEntries.length ? `${percent(avgListPrice ? avgPlatformFee / avgListPrice * 100 : 0)} giá bán · mỗi đơn` : "chờ báo cáo sàn"}</small></article>
+          <article><span>Quảng cáo trung bình</span><strong>{settledEntries.length ? money(avgMarketing) : "-"}</strong><small>{settledEntries.length ? `${percent(avgListPrice ? avgMarketing / avgListPrice * 100 : 0)} giá bán · mỗi đơn` : "chờ báo cáo sàn"}</small></article>
+          <article><span>Giảm giá trung bình</span><strong>{settledEntries.length ? money(avgDiscount) : "-"}</strong><small>{settledEntries.length ? `${percent(avgListPrice ? avgDiscount / avgListPrice * 100 : 0)} giá bán · mỗi đơn` : "chờ báo cáo sàn"}</small></article>
         </div>
         <div className={styles.revenueInsightGrid}>
           <article className={styles.revenuePanel}>
@@ -2523,7 +2542,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         </div>
         <div className={styles.revenueInsightGrid}>
           <article className={styles.revenuePanel}>
-            <div className={styles.revenuePanelTitle}><div><span>CHÊNH LỆCH SAPO ↔ THỰC NHẬN GRAB</span><strong>{reconciledEntries.length ? percent(gapRateAverage) : "Chờ đối soát"}</strong></div><small>tỉ lệ lệch trung bình</small></div>
+            <div className={styles.revenuePanelTitle}><div><span>CHÊNH LỆCH SAPO ↔ THỰC NHẬN SÀN</span><strong>{reconciledEntries.length ? percent(gapRateAverage) : "Chờ đối soát"}</strong></div><small>tỉ lệ lệch trung bình</small></div>
             {reconciliationWeekly.length ? <>
               <div className={styles.marketplaceFeeStats}>
                 <div><span>Tỉ lệ lệch TB</span><b>{percent(gapRateAverage)}</b></div>
@@ -2539,11 +2558,11 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 </div>
               </div>)}</div>
               <div className={styles.weekLegend}><span><i className={styles.segKept} />Thực nhận</span><span><i className={styles.segGap} />Sàn giữ lại</span></div>
-            </> : <div className={styles.panelEmpty}>Chưa có đơn nào được đối soát trong kỳ. Upload báo cáo Grab PDF để thấy tỉ lệ lệch theo tuần.</div>}
+            </> : <div className={styles.panelEmpty}>Chưa có đơn nào được đối soát trong kỳ. Upload báo cáo sàn để thấy tỉ lệ lệch theo tuần.</div>}
             <p className={styles.metricDisclaimer}>Mỗi cột là một tuần, chia theo tỉ lệ trên số SAPO ghi nhận: phần xanh là tiền thực nhận về, phần đỏ là toàn bộ phí và thuế sàn giữ lại. Chưa gồm chi phí quảng cáo vì Grab trừ khoản đó theo ngày.</p>
           </article>
           <article className={styles.revenuePanel}>
-            <div className={styles.revenuePanelTitle}><div><span>CHI PHÍ MARKETING GRAB</span><strong>{periodGrabReports.length ? money(grabMarketingTotal) : "Chờ báo cáo PDF"}</strong></div><small>{periodGrabReports.length.toLocaleString("vi-VN")} ngày có báo cáo</small></div>
+            <div className={styles.revenuePanelTitle}><div><span>CHI PHÍ MARKETING GRAB</span><strong>{periodGrabReports.length ? money(grabMarketingTotal) : "Chờ báo cáo PDF"}</strong></div><small>{periodGrabReports.filter((report) => (report.platform || "grab") === "grab").length.toLocaleString("vi-VN")} ngày có báo cáo</small></div>
             {periodGrabReports.length ? <>
               <div className={styles.marketplaceFeeStats}>
                 <div><span>% doanh thu sàn</span><b>{percent(grabMarketingRate)}</b></div>
@@ -2562,7 +2581,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         <article className={`${styles.revenuePanel} ${styles.grabReconciliationPanel}`}>
           <div className={styles.revenuePanelTitle}><div><span>ĐỐI SOÁT ĐƠN SÀN · {RECONCILIATION_BUILD} · {bounds.label}</span><strong>{reconciliationDoneCount.toLocaleString("vi-VN")}/{reconciliationRowsView.length.toLocaleString("vi-VN")} đơn đã đối soát</strong></div><small>{percent(reconciliationRowsView.length ? reconciliationDoneCount / reconciliationRowsView.length * 100 : 0)} coverage</small></div>
           <div className={styles.grabIngestRow}>
-            <label className={`${styles.grabPdfUpload} ${importingGrabReport ? styles.importing : ""}`}><input type="file" accept="application/pdf,.pdf" multiple disabled={importingGrabReport} onChange={(event) => void importGrabReportPdf(event)} /><span>{importingGrabReport ? "Đang đọc báo cáo PDF…" : "⇧ Upload báo cáo Grab (PDF)"}</span></label>
+            <label className={`${styles.grabPdfUpload} ${importingGrabReport ? styles.importing : ""}`}><input type="file" accept="application/pdf,.pdf,.csv,.xlsx" multiple disabled={importingGrabReport} onChange={(event) => void importGrabReportPdf(event)} /><span>{importingGrabReport ? "Đang đọc báo cáo…" : "⇧ Upload báo cáo sàn (Grab PDF · Shopee CSV · GreenSM xlsx)"}</span></label>
             {onLocalMachine
               ? <button type="button" className={styles.grabFolderScan} disabled={importingGrabReport} onClick={() => void scanLocalGrabReports({ force: true })}><span>{importingGrabReport ? "Đang quét…" : uatMode ? "⟳ Quét thư mục local" : "⟳ Quét thư mục local → ghi Production"}</span></button>
               : <div className={styles.grabFolderScanHint}><span>Quét thư mục chỉ chạy trên máy có thư mục Report</span><small>Mở <b>http://prod.localhost:3001</b> trên máy đó — cùng dữ liệu Production này, có nút quét. Ở đây vẫn upload tay được.</small></div>}
@@ -2580,7 +2599,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           </div>
           <div className={styles.filterSummary}>[{RECONCILIATION_BUILD}] kỳ {bounds.start}→{bounds.end} · SAPO {state.platformOrders.length} đơn ({new Set(state.platformOrders.map((entry) => entry.id)).size} id duy nhất) · ngoài kỳ lọt vào: {reconciliationRowsView.filter((row) => !inRange(row.order.orderDate, bounds)).length} · Đang hiện <b>{visibleReconciliationRows.length.toLocaleString("vi-VN")}</b> / {reconciliationRowsView.length.toLocaleString("vi-VN")} đơn · {reconciliationFilter === "all" ? "tất cả" : reconciliationFilter === "done" ? "đã đối soát" : "chưa đối soát"} · {bounds.label}</div>
           {visibleReconciliationRows.length ? <div className={styles.reconciliationTableWrap}><div className={styles.reconciliationTable}>
-            <div className={styles.reconciliationTableHead}><span>Đơn</span><span>Doanh thu Grab</span><span>Grab ghi nhận sau trừ</span><span>SAPO ghi nhận</span><span>Thực nhận</span><span>So với quầy</span><span /></div>
+            <div className={styles.reconciliationTableHead}><span>Đơn</span><span>Doanh thu sàn</span><span>Sàn ghi nhận sau trừ</span><span>SAPO ghi nhận</span><span>Thực nhận</span><span>So với quầy</span><span /></div>
             {visibleReconciliationRows.map(({ order, reconciliation, reason }) => {
               if (!reconciliation) {
                 return <div className={`${styles.reconciliationTableRow} ${styles.pendingRow}`} key={order.id}>
@@ -2595,7 +2614,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
               }
               const journey = reconciliationJourney(reconciliation);
               return <div className={styles.reconciliationTableRow} key={reconciliation.id}>
-                <button type="button" onClick={() => editGrabReconciliation(reconciliation)}><b>{reconciliation.orderCode}</b><small>{reconciliation.settlement?.grabOrderCode ? `${reconciliation.settlement.grabOrderCode} · ` : ""}{dateLabel(reconciliation.orderDate)}{reconciliation.settlement ? (reconciliation.settlement.matchQuality === "amount-only" ? " · ⚠ khớp lỏng" : "") : " · tay"}</small></button>
+                <button type="button" onClick={() => editGrabReconciliation(reconciliation)}><b>{reconciliation.orderCode}</b><small>{(reconciliation.settlement?.platform || reconciliation.platform || "grab") !== "grab" ? `${MARKETPLACE_LABELS[reconciliation.settlement?.platform || reconciliation.platform || "grab"]} · ` : ""}{reconciliation.settlement?.grabOrderCode ? `${reconciliation.settlement.grabOrderCode} · ` : ""}{dateLabel(reconciliation.orderDate)}{reconciliation.settlement ? (reconciliation.settlement.matchQuality === "amount-only" ? " · ⚠ khớp lỏng" : "") : " · tay"}</small></button>
                 <span>{journey.listPrice ? money(journey.listPrice) : "—"}</span>
                 <span>{journey.settlement ? money(journey.grabPayout) : "—"}</span>
                 <span>{money(reconciliation.reportedAmount)}</span>
@@ -2607,7 +2626,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
               </div>;
             })}
           </div></div> : <div className={styles.panelEmpty}>Không có đơn nào trong bộ lọc này.</div>}
-          <p className={styles.metricDisclaimer}>Bấm mã đơn để xem đường đi của tiền hoặc đối soát tay. Đơn chưa đối soát thường vì <b>chưa có báo cáo Grab của ngày đó</b>, hoặc vì sàn đó (Shopee, GreenSM) chưa có báo cáo đối soát nào. <b>So với quầy</b> đối chiếu tiền thực nhận với giá bán tại quầy của cùng giỏ hàng.</p>
+          <p className={styles.metricDisclaimer}>Bấm mã đơn để xem đường đi của tiền hoặc đối soát tay. Đơn chưa đối soát thường vì <b>chưa có báo cáo của sàn cho ngày đó</b> — Grab gửi PDF hằng ngày, ShopeeFood/GreenSM chỉ gửi mail ngày có đơn. <b>So với quầy</b> đối chiếu tiền thực nhận với giá bán tại quầy của cùng giỏ hàng.</p>
         </article>
         {otherChannelOrders.length > 0 && <article className={styles.revenuePanel}>
           <div className={styles.revenuePanelTitle}><div><span>KÊNH KHÁC · KHÔNG PHẢI SÀN</span><strong>{money(otherChannelRevenue)}</strong></div><small>{successfulOtherChannelOrders.length.toLocaleString("vi-VN")} đơn · TB {money(otherChannelAverageOrder)}</small></div>
@@ -2630,9 +2649,11 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           // Stage 1 is what Grab settles on the order itself; stage 2 is the
           // day-level ad bill, which lands after the payout. Mixing them would
           // make the payout stop matching Grab's own report.
+          const sanKey = j.settlement?.platform || marketplaceKey(`${selectedGrabOrder.channelName} ${selectedGrabOrder.paymentMethod || ""} ${selectedGrabOrder.deliveryPartner || ""}`);
+          const sanLabel = MARKETPLACE_LABELS[sanKey] || "Sàn";
           const orderSteps = [
             { label: "Giảm giá", value: j.discount, rate: j.discountRate, tone: styles.segDiscount, lines: j.discountLayers.map((layer) => ({ label: layer.label || "Không rõ chương trình", amount: layer.amount })) },
-            { label: "Chiết khấu Grab", value: j.commission, rate: j.commissionRate, tone: styles.segCommission, lines: [] },
+            { label: `Chiết khấu ${sanLabel}`, value: j.commission, rate: j.commissionRate, tone: styles.segCommission, lines: [] },
             { label: "Thuế GTGT + TNCN", value: j.tax, rate: j.taxRate, tone: styles.segTax, lines: [] },
             { label: "Tài trợ phí ship", value: j.shipping, rate: j.shippingRate, tone: styles.segShip, lines: [] },
           ].filter((step) => step.value > 0);
@@ -2640,12 +2661,12 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           const keptRate = j.listPrice ? Math.max(0, j.netAfterMarketing) / j.listPrice * 100 : 0;
           return <>
             <div className={styles.orderIdentity}>
-              <div><span>Mã đơn Grab</span><b>{j.settlement?.grabOrderCode || "—"}</b><small>{j.settlement ? `giao ${j.settlement.deliveryTime || "—"}` : "chưa có báo cáo Grab"}</small></div>
+              <div><span>Mã đơn {sanLabel}</span><b>{j.settlement?.grabOrderCode || "—"}</b><small>{j.settlement ? `giao ${j.settlement.deliveryTime || "—"}` : `chưa có báo cáo ${sanLabel}`}</small></div>
               <div><span>Mã hoá đơn SAPO</span><b>{selectedGrabOrder.orderCode}</b><small>tạo {selectedGrabOrder.orderCreatedAt ? selectedGrabOrder.orderCreatedAt.slice(11, 16) : "—"}</small></div>
-              <div><span>Giá Grab</span><b>{money(j.listPrice)}</b><small>giá niêm yết trên sàn</small></div>
+              <div><span>Giá trên sàn</span><b>{money(j.listPrice)}</b><small>giá niêm yết {sanLabel}</small></div>
               <div><span>Giá quầy</span><b>{j.counterPrice == null ? "—" : money(j.counterPrice)}</b><small>{j.counterPrice == null ? "chưa có giá" : counterPriceFromItems(selectedGrabOrder)?.covered ? "tính từ món trong đơn" : "nhập tay"}</small></div>
             </div>
-            {j.settlement?.matchQuality === "amount-only" && <p className={styles.grabReportNotice}>⚠ Đơn này khớp bằng tầng lỏng nhất — chỉ giá trước giảm giá trùng nhau. SAPO không lưu mã đơn Grab nên không có khoá chung để kiểm chứng; đối chiếu tay bằng mã <b>{j.settlement.grabOrderCode}</b> trong app GrabMerchant nếu con số trông lạ.</p>}
+            {j.settlement?.matchQuality === "amount-only" && <p className={styles.grabReportNotice}>⚠ Đơn này khớp bằng tầng lỏng nhất — chỉ giá trước giảm giá trùng nhau. SAPO không lưu mã đơn của sàn nên không có khoá chung để kiểm chứng; đối chiếu tay bằng mã <b>{j.settlement.grabOrderCode}</b> trong app merchant của sàn nếu con số trông lạ.</p>}
             <div className={styles.journeyTop}>
               <div><span>Giá bán trên sàn</span><b>{money(j.listPrice)}</b>{j.listVersusCounter !== undefined && <small className={j.listVersusCounter >= 0 ? styles.positiveCell : styles.negativeCell}>{j.listVersusCounter >= 0 ? "cao hơn" : "thấp hơn"} {percent(Math.abs(j.listVersusCounter))} so với quầy</small>}</div>
               <div className={styles.journeyKept}><span>Còn lại sau tất cả</span><b>{money(j.netAfterMarketing)}</b><small>{percent(keptRate)} giá bán</small></div>
@@ -2673,20 +2694,20 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                     <i>{basket ? money(basket.total) : "—"}</i>
                   </div>
                 </div>
-                <div className={styles.basketLegend}><span>Giá Grab</span><span>Giá quầy{basket && !basket.covered ? ` · thiếu giá ${basket.missing.length} món` : ""}</span></div>
+                <div className={styles.basketLegend}><span>Giá sàn</span><span>Giá quầy{basket && !basket.covered ? ` · thiếu giá ${basket.missing.length} món` : ""}</span></div>
               </>;
             })()}
-            <div className={styles.journeyStage}><b>1</b><span>Grab quyết toán trên đơn</span></div>
-            <div className={styles.journeyBar} aria-label={`Grab trả ${percent(payoutRate)} giá bán`}>
+            <div className={styles.journeyStage}><b>1</b><span>{sanLabel} quyết toán trên đơn</span></div>
+            <div className={styles.journeyBar} aria-label={`${sanLabel} trả ${percent(payoutRate)} giá bán`}>
               {orderSteps.map((step) => <i key={step.label} className={step.tone} style={{ width: `${Math.max(0, step.rate)}%` }} title={`${step.label} ${money(step.value)}`} />)}
-              <b style={{ width: `${Math.max(0, payoutRate)}%` }} title={`Grab trả ${money(j.grabPayout)}`} />
+              <b style={{ width: `${Math.max(0, payoutRate)}%` }} title={`${sanLabel} trả ${money(j.grabPayout)}`} />
             </div>
             <div className={styles.journeyList}>
               {orderSteps.map((step) => <div key={step.label}>
                 <span><i className={step.tone} />{step.label}{step.lines.length > 0 && <em className={styles.stepLines}>{step.lines.map((line) => line.label).join(" · ")}</em>}</span>
                 <b>−{money(step.value)}</b><em>{percent(step.rate)}</em>
               </div>)}
-              <div className={styles.journeyPayout}><span>Thực nhận Grab trả</span><b>{money(j.grabPayout)}</b><em>{percent(payoutRate)}</em></div>
+              <div className={styles.journeyPayout}><span>Thực nhận {sanLabel} trả</span><b>{money(j.grabPayout)}</b><em>{percent(payoutRate)}</em></div>
             </div>
 
             {j.marketing > 0 && <>
@@ -2707,7 +2728,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
             <div className={styles.journeyChecks}>
               <div className={Math.abs(j.sapoGap) < 1 ? styles.checkOk : styles.checkWarn}>
                 <span>SAPO ghi nhận</span><b>{money(base.reportedAmount)}</b>
-                <small>{Math.abs(j.sapoGap) < 1 ? "khớp thực nhận Grab" : `lệch ${j.sapoGap >= 0 ? "+" : "−"}${money(Math.abs(j.sapoGap))} · ${percent(Math.abs(j.sapoGapRate))} so thực nhận Grab`}</small>
+                <small>{Math.abs(j.sapoGap) < 1 ? "khớp thực nhận sàn" : `lệch ${j.sapoGap >= 0 ? "+" : "−"}${money(Math.abs(j.sapoGap))} · ${percent(Math.abs(j.sapoGapRate))} so thực nhận sàn`}</small>
               </div>
               <div className={j.netVersusCounter === undefined ? "" : j.netVersusCounter >= 0 ? styles.checkOk : styles.checkWarn}>
                 <span>So với giá quầy</span><b>{j.counterPrice == null ? "—" : `${j.netVersusCounter! >= 0 ? "+" : "−"}${money(Math.abs(j.netVersusCounter!))}`}</b>
