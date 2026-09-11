@@ -128,7 +128,7 @@ function readWorkbookQuietly<T>(read: () => T): T {
   }
 }
 
-const RECONCILIATION_BUILD = "R27";
+const RECONCILIATION_BUILD = "R28";
 
 /// How confidently a PDF row was tied to a SAPO order. "amount-only" means only
 /// the pre-discount value lined up, so the pairing deserves a second look.
@@ -2765,6 +2765,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
 
             {(() => {
               const basket = counterPriceFromItems(selectedGrabOrder);
+              const basketCogs = cogsFromItems(selectedGrabOrder);
               if (!selectedGrabOrder.items?.length) {
                 return <p className={styles.grabReportNotice}>Chưa có chi tiết món cho đơn này. Import file SAPO <b>Doanh thu theo danh sách mặt hàng</b> để biết đơn gồm món gì và tính đúng giá quầy.</p>;
               }
@@ -2773,19 +2774,22 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 <div className={styles.basketList}>
                   {selectedGrabOrder.items.map((item, index) => {
                     const priced = counterPriceBook.get(normalizedHeader(item.name));
+                    const unitCogs = cogsBook.get(normalizedHeader(item.name));
                     return <div key={`${item.name}-${index}`}>
                       <span><b>{item.quantity} × {item.name}</b>{item.option && <small>{item.option}</small>}</span>
                       <em>{money(item.amount)}</em>
                       <i className={priced ? "" : styles.negativeCell}>{priced ? money(priced.storePrice * (item.quantity || 1)) : "chưa có giá quầy"}</i>
+                      <i className={unitCogs === undefined ? `${styles.basketCogsCell} ${styles.negativeCell}` : styles.basketCogsCell}>{unitCogs === undefined ? "chưa có giá vốn" : money(unitCogs * (item.quantity || 1))}</i>
                     </div>;
                   })}
                   <div className={styles.basketTotal}>
                     <span><b>Tổng</b></span>
                     <em>{money(selectedGrabOrder.items.reduce((sum, item) => sum + item.amount, 0))}</em>
                     <i>{basket ? money(basket.total) : "—"}</i>
+                    <i className={styles.basketCogsCell}>{basketCogs?.covered ? money(basketCogs.total) : "—"}</i>
                   </div>
                 </div>
-                <div className={styles.basketLegend}><span>Giá sàn</span><span>Giá quầy{basket && !basket.covered ? ` · thiếu giá ${basket.missing.length} món` : ""}</span></div>
+                <div className={styles.basketLegend}><span>Giá sàn</span><span>Giá quầy{basket && !basket.covered ? ` · thiếu giá ${basket.missing.length} món` : ""}</span><span>Giá vốn{basketCogs && !basketCogs.covered ? ` · thiếu ${basketCogs.missing.length} món` : ""}</span></div>
               </>;
             })()}
             <div className={styles.journeyStage}><b>1</b><span>{sanLabel} quyết toán trên đơn</span></div>

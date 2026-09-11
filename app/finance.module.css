@@ -403,15 +403,16 @@
 .journeyPayout b { color: #1e4b3f !important; font-size: 13px !important; }
 
 .basketList { display: grid; gap: 1px; margin-top: 8px; overflow: hidden; border: 1px solid #e2e8df; border-radius: 11px; background: #e8ede5; }
-.basketList > div { display: grid; grid-template-columns: minmax(0, 1fr) 92px 92px; gap: 10px; align-items: center; padding: 8px 12px; background: #fff; }
+.basketList > div { display: grid; grid-template-columns: minmax(0, 1fr) 88px 88px 88px; gap: 10px; align-items: center; padding: 8px 12px; background: #fff; }
 .basketList span { display: block; min-width: 0; }
 .basketList b { display: block; overflow: hidden; font: 700 11px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
 .basketList small { display: block; margin-top: 2px; color: var(--muted); font: 8px Arial, sans-serif; }
 .basketList em { color: var(--ink); font: 11px Arial, sans-serif; font-style: normal; text-align: right; font-variant-numeric: tabular-nums; }
 .basketList i { color: #39715d; font: 700 11px Arial, sans-serif; font-style: normal; text-align: right; font-variant-numeric: tabular-nums; }
 .basketTotal { background: #f6faf4 !important; }
+.basketCogsCell { color: #8a6d3b !important; }
 .basketTotal em, .basketTotal i { font-weight: 700; }
-.basketLegend { display: grid; grid-template-columns: minmax(0, 1fr) 92px 92px; gap: 10px; padding: 4px 12px 0; }
+.basketLegend { display: grid; grid-template-columns: minmax(0, 1fr) 88px 88px 88px; gap: 10px; padding: 4px 12px 0; }
 .basketLegend span { color: var(--muted); font: 8px Arial, sans-serif; text-align: right; text-transform: uppercase; letter-spacing: .04em; }
 .basketLegend span:first-child { grid-column: 2; }
 
