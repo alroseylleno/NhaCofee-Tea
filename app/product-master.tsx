@@ -30,9 +30,12 @@ import {
 } from "@/lib/master-data";
 import { deleteCloudProduct, loadCloudMasterData, saveCloudProduct, saveCloudRecipe } from "@/lib/master-data-store";
 import { applyUatWorkbookRecipes, workbookRecipeSummary } from "@/lib/uat-recipe-workbook";
+import { syncProductionToUat } from "@/lib/uat-sync";
+import { supabase } from "@/lib/supabase";
 import styles from "./product-master.module.css";
 
 type MasterTab = "overview" | "queue" | "products";
+type CatalogSort = "sku" | "cost" | "price" | "margin";
 type FinanceLocalState = {
   products?: ImportedProductSource[];
   imports?: Array<{ dataType: "revenue" | "products" | "service"; fileName: string; periodStart: string; periodEnd: string; rowCount: number; importedAt: string }>;
@@ -203,6 +206,13 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState<MasterTab>("overview");
   const [search, setSearch] = useState("");
+  const [catalogCategory, setCatalogCategory] = useState("");
+  const [catalogSort, setCatalogSort] = useState<CatalogSort>("sku");
+  const [catalogSortAscending, setCatalogSortAscending] = useState(true);
+  // Category groups start collapsed: the catalogue is long enough that opening
+  // every group pushed the controls off screen.
+  const [openCatalogCategories, setOpenCatalogCategories] = useState<string[]>([]);
+  const [uatSyncing, setUatSyncing] = useState(false);
   const [financeSnapshot, setFinanceSnapshot] = useState<FinanceLocalState>({});
   const [replacementSelection, setReplacementSelection] = useState<Record<string, string>>({});
   const [inlineReplacementKey, setInlineReplacementKey] = useState("");
@@ -291,14 +301,32 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
   const activeProducts = state.products;
   const availableIngredients = state.ingredients.filter(ingredientIsAvailable);
   const filteredProducts = useMemo(() => state.products.filter((product) => normalizedText(`${product.sku} ${product.name} ${product.category}`).includes(normalizedText(search))), [state.products, search]);
+  const catalogCategories = useMemo(() => [...new Set(state.products.map((product) => product.category.trim() || "Chưa phân loại"))].sort((left, right) => left.localeCompare(right, "vi")), [state.products]);
   const productGroups = useMemo(() => {
+    // A SKU with no theoretical COGS yet has no comparable cost or margin, so it
+    // sorts to the bottom in both directions instead of faking a zero.
+    const metric = (product: ProductMaster) => {
+      if (catalogSort === "price") return product.sellingPrice || undefined;
+      const cost = theoreticalProductCostWithComponents(product, state.products, state.recipeVersions, state.ingredients);
+      if (catalogSort === "cost") return cost;
+      if (cost === undefined || !product.sellingPrice) return undefined;
+      return (product.sellingPrice - cost) / product.sellingPrice * 100;
+    };
     const groups = new Map<string, ProductMaster[]>();
     for (const product of filteredProducts) {
       const category = product.category.trim() || "Chưa phân loại";
+      if (catalogCategory && category !== catalogCategory) continue;
       groups.set(category, [...(groups.get(category) || []), product]);
     }
-    return [...groups.entries()].sort(([left], [right]) => left.localeCompare(right, "vi"));
-  }, [filteredProducts]);
+    const compare = (left: ProductMaster, right: ProductMaster) => {
+      if (catalogSort === "sku") return `${left.sku} ${left.name}`.localeCompare(`${right.sku} ${right.name}`, "vi");
+      const leftValue = metric(left);
+      const rightValue = metric(right);
+      if (leftValue === undefined || rightValue === undefined) return leftValue === rightValue ? 0 : leftValue === undefined ? 1 : -1;
+      return catalogSortAscending ? leftValue - rightValue : rightValue - leftValue;
+    };
+    return [...groups.entries()].map(([category, products]) => [category, [...products].sort(compare)] as const).sort(([left], [right]) => left.localeCompare(right, "vi"));
+  }, [filteredProducts, catalogCategory, catalogSort, catalogSortAscending, state.products, state.recipeVersions, state.ingredients]);
   const selectedProduct = state.products.find((product) => product.id === selectedProductId);
   const selectedVersions = state.recipeVersions.filter((version) => version.productId === selectedProductId).sort((a, b) => b.version - a.version);
   const currentRecipe = activeRecipeVersion(selectedProductId, state.recipeVersions);
@@ -691,6 +719,35 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
     if (focusRecipe) alertOutOfStockRecipe(product.id);
   }
 
+  /// UAT sandbox refill. Reads Production and writes browser storage only —
+  /// there is no write path back, so this cannot touch Production data.
+  async function syncFromProduction() {
+    if (!uatMode) return;
+    if (!supabase) { window.alert("Supabase chưa được cấu hình nên không đọc được dữ liệu Production."); return; }
+    if (!window.confirm("Chép dữ liệu Sản phẩm, công thức và Kho NVL từ Production về UAT?\n\nToàn bộ dữ liệu UAT hiện tại sẽ bị thay thế. Production chỉ được ĐỌC, không ghi gì.")) return;
+    // UAT has no Supabase session of its own — the UAT gate is a local password
+    // — and the master tables are RLS'd to `authenticated`, so an unauthenticated
+    // read returns zero rows instead of failing. Sign in for the read, then out.
+    const email = window.prompt("Email Supabase (chỉ dùng để ĐỌC Production)")?.trim();
+    if (!email) return;
+    const password = window.prompt("Mật khẩu Supabase");
+    if (!password) return;
+    setUatSyncing(true);
+    try {
+      const { error: authError } = await supabase.auth.signInWithPassword({ email, password });
+      if (authError) throw authError;
+      const summary = await syncProductionToUat();
+      await supabase.auth.signOut();
+      window.alert(`Đã chép về UAT:\n${summary.products} SKU · ${summary.recipeVersions} phiên bản công thức · ${summary.ingredients} NVL\n${summary.lots} lô Kho NVL · ${summary.activeSessions} phiên đang dùng\n\nTrang sẽ tải lại để nạp dữ liệu mới.`);
+      window.location.reload();
+    } catch (error) {
+      await supabase.auth.signOut().catch(() => undefined);
+      window.alert(error instanceof Error ? error.message : "Không đồng bộ được dữ liệu Production về UAT.");
+    } finally {
+      setUatSyncing(false);
+    }
+  }
+
   async function createManualProduct(source?: ProductMaster) {
     const suggestedSku = source ? `${source.sku}-COPY` : "SKU-MOI";
     const sku = window.prompt("Mã SKU sản phẩm", suggestedSku)?.trim();
@@ -804,10 +861,17 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
       </>}
 
       {tab === "products" && <>
-        <div className={styles.pageIntro}><div><span>PRODUCT & COGS</span><h2>Quản lý sản phẩm</h2><p>Danh mục Finance được đồng bộ tự động; sản phẩm tạo mới, bản clone và công thức được lưu theo môi trường hiện tại.</p></div><button onClick={() => void createManualProduct()}>+ Tạo sản phẩm</button></div>
+        <div className={styles.pageIntro}><div><span>PRODUCT & COGS</span><h2>Quản lý sản phẩm</h2><p>Danh mục Finance được đồng bộ tự động; sản phẩm tạo mới, bản clone và công thức được lưu theo môi trường hiện tại.</p></div><div className={styles.introActions}>{uatMode && <button className={styles.secondaryAction} disabled={uatSyncing} onClick={() => void syncFromProduction()}>{uatSyncing ? "Đang đồng bộ..." : "⟱ Đồng bộ từ Production"}</button>}<button onClick={() => void createManualProduct()}>+ Tạo sản phẩm</button></div></div>
         <div className={styles.toolbar}><label className={styles.search}><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Tìm SKU, sản phẩm, category..." /></label></div>
+        <div className="inventory-category-tabs" role="tablist" aria-label="Lọc sản phẩm theo category"><button type="button" role="tab" aria-selected={!catalogCategory} className={!catalogCategory ? "selected" : ""} onClick={() => setCatalogCategory("")}>Tất cả ({filteredProducts.length})</button>{catalogCategories.map((category) => <button type="button" role="tab" key={category} aria-selected={catalogCategory === category} className={catalogCategory === category ? "selected" : ""} onClick={() => { setCatalogCategory(category); setOpenCatalogCategories([category]); }}>{category} ({filteredProducts.filter((product) => (product.category.trim() || "Chưa phân loại") === category).length})</button>)}</div>
+        <div className={styles.catalogToolbar}>
+          <label>Sắp xếp<select value={catalogSort} onChange={(event) => setCatalogSort(event.target.value as CatalogSort)}><option value="sku">Mã SKU</option><option value="cost">Giá vốn</option><option value="price">Giá bán</option><option value="margin">Biên gộp</option></select></label>
+          <button type="button" className={styles.sortDirection} disabled={catalogSort === "sku"} onClick={() => setCatalogSortAscending((ascending) => !ascending)} title={catalogSort === "sku" ? "Chọn một tiêu chí số để đổi chiều" : undefined}>{catalogSortAscending ? "↑ Thấp → cao" : "↓ Cao → thấp"}</button>
+          {openCatalogCategories.length > 0 && <button type="button" className={styles.sortDirection} onClick={() => setOpenCatalogCategories([])}>Thu gọn tất cả</button>}
+          <span className={styles.catalogCount}>{productGroups.reduce((total, [, products]) => total + products.length, 0)} SKU · {productGroups.length} category</span>
+        </div>
         {!loaded ? <div className={styles.empty}>Đang tải sản phẩm...</div> : !filteredProducts.length ? <div className={styles.empty}>Không có SKU phù hợp.</div> : <>
-          <div className={styles.productGroups}>{productGroups.map(([category, products]) => <details className={`${styles.categoryGroup} ${styles.productCategoryGroup}`} open key={category}><summary className={styles.productCategorySummary}><span>{category}</span><b>{products.length} SKU</b><i aria-hidden="true">+</i></summary><div className={styles.productCategoryBody}><div className={styles.productTable}><div className={styles.tableHead}><span>SKU / Sản phẩm</span><span>Giá bán</span><span>Giá vốn</span><span>Biên gộp</span><span>Ước tính</span><span>Thao tác</span></div>{products.map((product) => { const cost = theoreticalProductCostWithComponents(product, state.products, state.recipeVersions, state.ingredients); const margin = cost !== undefined && product.sellingPrice ? (product.sellingPrice - cost) / product.sellingPrice * 100 : undefined; const capacity = capacityEstimate(activeRecipeVersion(product.id, state.recipeVersions), state.ingredients); const errors = productValidationErrors(product, state.recipeVersions, state.ingredients, state.products); return <div className={styles.tableRow} key={product.id}><button className={styles.tableMain} onClick={() => openDetail(product)}><span><b>{product.sku}</b><strong>{product.name}{product.variant ? ` · ${product.variant}` : ""}</strong>{errors.length > 0 && <small className={styles.issueLine}>{errors.length} điểm cần xử lý · {errors[0]}</small>}</span><span>{product.productType === "prepared_component" ? "Công thức nền" : money(product.sellingPrice)}{product.sellingPriceOverridden && <small>Chỉnh tay</small>}</span><span>{cost === undefined ? "Chưa đủ" : money(cost)}</span><span className={margin !== undefined && margin < 55 ? styles.negative : ""}>{product.productType === "prepared_component" ? "-" : percent(margin)}</span><span>{capacity ? `${numberLabel(capacity.servings, 0)} ly` : "-"}</span></button><div className={styles.rowActions}><button className={styles.cloneButton} title="Copy sản phẩm" aria-label={`Copy ${product.name}`} onClick={() => void createManualProduct(product)}>⧉<span>Copy</span></button><button className={styles.removeProductButton} title="Xoá sản phẩm" aria-label={`Xoá ${product.name}`} onClick={() => void deleteProduct(product)}>×<span>Xoá</span></button></div></div>; })}</div><div className={styles.productCards}>{products.map((product) => { const cost = theoreticalProductCostWithComponents(product, state.products, state.recipeVersions, state.ingredients); const margin = cost !== undefined && product.sellingPrice ? (product.sellingPrice - cost) / product.sellingPrice * 100 : undefined; const errors = productValidationErrors(product, state.recipeVersions, state.ingredients, state.products); return <article className={styles.productCard} key={product.id}><button className={styles.cardMain} onClick={() => openDetail(product)}><div><span>{product.sku}</span>{product.sellingPriceOverridden && <small>ĐÃ CHỈNH GIÁ</small>}</div><h3>{product.name}{product.variant ? ` · ${product.variant}` : ""}</h3><div className={styles.moneyGrid}><div><span>{product.productType === "prepared_component" ? "Loại SKU" : "Giá bán"}</span><strong>{product.productType === "prepared_component" ? "Công thức nền" : money(product.sellingPrice)}</strong></div><div><span>Giá vốn</span><strong>{cost === undefined ? "Chưa đủ" : money(cost)}</strong></div><div><span>Biên gộp</span><strong>{product.productType === "prepared_component" ? "-" : percent(margin)}</strong></div></div>{errors.length > 0 && <small className={styles.issueLine}>{errors.length} điểm cần xử lý · {errors[0]}</small>}</button><div className={styles.cardActions}><button className={styles.cloneButton} onClick={() => void createManualProduct(product)}>⧉ Copy</button><button className={styles.removeProductButton} title="Xoá sản phẩm" aria-label={`Xoá ${product.name}`} onClick={() => void deleteProduct(product)}>× Xoá</button></div></article>; })}</div></div></details>)}</div>
+          <div className={styles.productGroups}>{productGroups.map(([category, products]) => <details className={`${styles.categoryGroup} ${styles.productCategoryGroup}`} open={openCatalogCategories.includes(category)} onToggle={(event) => { const isOpen = event.currentTarget.open; setOpenCatalogCategories((current) => isOpen ? [...new Set([...current, category])] : current.filter((entry) => entry !== category)); }} key={category}><summary className={styles.productCategorySummary}><span>{category}</span><b>{products.length} SKU</b><i aria-hidden="true">+</i></summary><div className={styles.productCategoryBody}><div className={styles.productTable}><div className={styles.tableHead}><span>SKU / Sản phẩm</span><span>Giá bán</span><span>Giá vốn</span><span>Biên gộp</span><span>Ước tính</span><span>Thao tác</span></div>{products.map((product) => { const cost = theoreticalProductCostWithComponents(product, state.products, state.recipeVersions, state.ingredients); const margin = cost !== undefined && product.sellingPrice ? (product.sellingPrice - cost) / product.sellingPrice * 100 : undefined; const capacity = capacityEstimate(activeRecipeVersion(product.id, state.recipeVersions), state.ingredients); const errors = productValidationErrors(product, state.recipeVersions, state.ingredients, state.products); return <div className={styles.tableRow} key={product.id}><button className={styles.tableMain} onClick={() => openDetail(product)}><span><b>{product.sku}</b><strong>{product.name}{product.variant ? ` · ${product.variant}` : ""}</strong>{errors.length > 0 && <small className={styles.issueLine}>{errors.length} điểm cần xử lý · {errors[0]}</small>}</span><span>{product.productType === "prepared_component" ? "Công thức nền" : money(product.sellingPrice)}{product.sellingPriceOverridden && <small>Chỉnh tay</small>}</span><span>{cost === undefined ? "Chưa đủ" : money(cost)}</span><span className={margin !== undefined && margin < 55 ? styles.negative : ""}>{product.productType === "prepared_component" ? "-" : percent(margin)}</span><span>{capacity ? `${numberLabel(capacity.servings, 0)} ly` : "-"}</span></button><div className={styles.rowActions}><button className={styles.cloneButton} title="Copy sản phẩm" aria-label={`Copy ${product.name}`} onClick={() => void createManualProduct(product)}>⧉<span>Copy</span></button><button className={styles.removeProductButton} title="Xoá sản phẩm" aria-label={`Xoá ${product.name}`} onClick={() => void deleteProduct(product)}>×<span>Xoá</span></button></div></div>; })}</div><div className={styles.productCards}>{products.map((product) => { const cost = theoreticalProductCostWithComponents(product, state.products, state.recipeVersions, state.ingredients); const margin = cost !== undefined && product.sellingPrice ? (product.sellingPrice - cost) / product.sellingPrice * 100 : undefined; const errors = productValidationErrors(product, state.recipeVersions, state.ingredients, state.products); return <article className={styles.productCard} key={product.id}><button className={styles.cardMain} onClick={() => openDetail(product)}><div><span>{product.sku}</span>{product.sellingPriceOverridden && <small>ĐÃ CHỈNH GIÁ</small>}</div><h3>{product.name}{product.variant ? ` · ${product.variant}` : ""}</h3><div className={styles.moneyGrid}><div><span>{product.productType === "prepared_component" ? "Loại SKU" : "Giá bán"}</span><strong>{product.productType === "prepared_component" ? "Công thức nền" : money(product.sellingPrice)}</strong></div><div><span>Giá vốn</span><strong>{cost === undefined ? "Chưa đủ" : money(cost)}</strong></div><div><span>Biên gộp</span><strong>{product.productType === "prepared_component" ? "-" : percent(margin)}</strong></div></div>{errors.length > 0 && <small className={styles.issueLine}>{errors.length} điểm cần xử lý · {errors[0]}</small>}</button><div className={styles.cardActions}><button className={styles.cloneButton} onClick={() => void createManualProduct(product)}>⧉ Copy</button><button className={styles.removeProductButton} title="Xoá sản phẩm" aria-label={`Xoá ${product.name}`} onClick={() => void deleteProduct(product)}>× Xoá</button></div></article>; })}</div></div></details>)}</div>
         </>}
       </>}
     </div>
