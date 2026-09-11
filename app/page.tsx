@@ -74,7 +74,13 @@ function parsePrice(value: string) { return Number(value.replace(/\D/g, "")); }
 function normalizeCategory(value: string) { return value.trim().replace(/\s+/g, " ").toLocaleUpperCase("vi") || "CHƯA PHÂN LOẠI"; }
 function categoryInputValue(value: string) { return value.toLocaleUpperCase("vi"); }
 function parseDecimalInput(value: string) { const compact = value.trim().replace(/\s/g, ""); if (!compact) return 0; const normalized = /[.,]\d{3}(?:[.,]\d{3})*$/.test(compact) ? compact.replace(/[.,]/g, "") : compact.replace(",", "."); return Number(normalized); }
-function parseSpecification(value: string) { const match = value.trim().match(/^([\d.,]+)\s*(ml|l|g|kg|mg|oz|cái|viên|phần)\b\s*(.*)$/i); if (!match) return { amount: "", unit: "ml", note: value === "Chưa ghi định lượng" ? "" : value }; return { amount: match[1], unit: match[2].toLowerCase(), note: match[3] }; }
+// The unit is any run of non-space, non-digit characters. The previous
+// whitelist plus `\b` could not see custom units (cuộn, tờ, tem, túi), and
+// because `\b` is ASCII-only it also cut Vietnamese words open after a number —
+// "1 lần" parsed as unit `l` with note `ần`. Anything it failed to parse fell
+// into the note, so the next save re-appended the amount and unit and the định
+// lượng grew on every edit ("1 cuộn 1 cuộn 1 cuộn 16 cuộn").
+function parseSpecification(value: string) { const match = value.trim().match(/^([\d.,]+)\s*([^\s\d]+)\s*(.*)$/); if (!match) return { amount: "", unit: "ml", note: value === "Chưa ghi định lượng" ? "" : value }; return { amount: match[1], unit: match[2].toLocaleLowerCase("vi"), note: match[3].trim() }; }
 function buildSpecification(amount: string, unit: string, note: string) { const core = amount.trim() ? `${amount.trim()} ${unit}` : ""; return [core, note.trim()].filter(Boolean).join(" ") || "Chưa ghi định lượng"; }
 function conversionLabel(conversion?: Ingredient["conversion"]) { return conversion?.amount ? `${conversion.amount.toLocaleString("vi-VN")} ${conversion.unit}` : "Chưa quy đổi"; }
 function stockStateLabel(item: Ingredient) { return item.stockState === "opened" ? "Kho đã mở" : "Kho niêm phong"; }
