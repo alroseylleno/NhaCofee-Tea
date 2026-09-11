@@ -84,6 +84,30 @@ export async function loadCloudMasterData(inventoryLots: InventorySourceLot[]): 
   return { state: { ...emptyMasterDataState(), stores: [{ ...DEFAULT_STORE, id: storeId }], ingredients: mergeInventoryDrafts((freshIngredients.data || []).map((row) => toIngredient(row)), inventoryLots), products, recipeVersions: recipeVersions.filter((version) => productIds.has(version.productId)), auditEvents }, ...finance };
 }
 
+/// Read-only slice of the Product Master catalog for callers that only need
+/// theoretical COGS (the finance reconciliation's "so với giá vốn" column).
+/// Unlike loadCloudMasterData this performs NO upserts and NO reconciliation —
+/// it must be safe to call from the finance tab without touching master data.
+export async function loadCogsCatalog(): Promise<{ products: ProductMaster[]; recipeVersions: RecipeVersion[]; ingredients: IngredientMaster[] }> {
+  const client = requireClient();
+  const { data: store, error: storeError } = await client.from("stores").select("id").eq("code", DEFAULT_STORE.code).maybeSingle();
+  if (storeError || !store) return { products: [], recipeVersions: [], ingredients: [] };
+  const storeId = String(store.id);
+  const [ingredientsResult, productsResult, versionsResult] = await Promise.all([
+    client.from("ingredient_master").select("*").eq("store_id", storeId),
+    client.from("product_master").select("*").eq("store_id", storeId),
+    client.from("product_recipe_versions").select("*, product_recipe_items!product_recipe_items_recipe_version_id_fkey(*)"),
+  ]);
+  if (ingredientsResult.error || productsResult.error || versionsResult.error) throw ingredientsResult.error || productsResult.error || versionsResult.error;
+  const products = (productsResult.data || []).map((row) => toProduct(row));
+  const productIds = new Set(products.map((product) => product.id));
+  const recipeVersions: RecipeVersion[] = (versionsResult.data || []).map((row) => {
+    const recipeItems = (row.product_recipe_items || []) as Record<string, unknown>[];
+    return { id: row.id, productId: row.product_id, version: number(row.version), effectiveFrom: row.effective_from, effectiveTo: row.effective_to || undefined, status: row.status, createdAt: row.created_at, outputQuantity: row.output_quantity ? number(row.output_quantity) : undefined, outputUnit: row.output_unit ? String(row.output_unit) : undefined, items: recipeItems.filter((item) => item.component_type !== "packaging").map(toRecipeItem), packagingItems: recipeItems.filter((item) => item.component_type === "packaging").map(toRecipeItem) };
+  }).filter((version) => productIds.has(version.productId));
+  return { products, recipeVersions, ingredients: (ingredientsResult.data || []).map((row) => toIngredient(row)) };
+}
+
 export async function saveCloudProduct(product: ProductMaster) {
   const client = requireClient();
   const { error } = await client.rpc("save_product_master", { p_id: product.id, p_store_id: product.storeId, p_sku: product.sku, p_name: product.name, p_category: product.category, p_variant: product.variant, p_selling_price: product.sellingPrice, p_selling_price_overridden: product.sellingPriceOverridden, p_packaging_cost: product.packagingCost, p_source: product.source, p_product_type: product.productType || "sellable" });

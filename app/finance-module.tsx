@@ -25,6 +25,8 @@ import {
   type FinanceServiceRecord,
 } from "@/lib/finance-store";
 import { extractGrabPdfText, parseGrabReportText, parseGreenRevenueRows, parseShopeeIncomeCsv, type ParsedGrabReport } from "@/lib/grab-report";
+import { theoreticalProductCostWithComponents, type IngredientMaster, type ProductMaster as MasterProduct, type RecipeVersion } from "@/lib/master-data";
+import { loadCogsCatalog } from "@/lib/master-data-store";
 import { isSupabaseConfigured } from "@/lib/supabase";
 import styles from "./finance.module.css";
 
@@ -109,7 +111,7 @@ const COUNTER_PRICE_RATE = 0.7278;
 /// Bumped by hand on each UI change to this panel. If the tag on screen does not
 /// match the one the terminal reports, the browser is running a cached bundle
 /// and no amount of code reading will explain the behaviour.
-const RECONCILIATION_BUILD = "R26";
+const RECONCILIATION_BUILD = "R27";
 
 /// How confidently a PDF row was tied to a SAPO order. "amount-only" means only
 /// the pre-discount value lined up, so the pairing deserves a second look.
@@ -878,6 +880,46 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const [savingGrabReconciliation, setSavingGrabReconciliation] = useState(false);
   const [importingGrabReport, setImportingGrabReport] = useState(false);
   const [reconciliationFilter, setReconciliationFilter] = useState<"all" | "pending" | "done">("all");
+  const [reconciliationPlatform, setReconciliationPlatform] = useState<"all" | "grab" | "shopee" | "greensm">("all");
+  /// normalizedHeader(product name) → theoretical COGS of one unit. Built from
+  /// Product Master (UAT: its browser storage; Prod: a read-only Supabase
+  /// slice). Sàn listings carry no size, so variant M — the size the sàn menu
+  /// is priced from — wins; without an M the cheapest variant stands in.
+  const [cogsBook, setCogsBook] = useState<Map<string, number>>(new Map());
+  useEffect(() => {
+    let cancelled = false;
+    const build = (products: MasterProduct[], versions: RecipeVersion[], ingredients: IngredientMaster[]) => {
+      const best = new Map<string, { cost: number; sellingPrice: number; isM: boolean }>();
+      for (const product of products) {
+        if (product.productType && product.productType !== "sellable") continue;
+        const cost = theoreticalProductCostWithComponents(product, products, versions, ingredients);
+        if (cost === undefined || cost <= 0) continue;
+        const key = normalizedHeader(product.name);
+        const isM = normalizedHeader(product.variant || "") === "m";
+        const current = best.get(key);
+        if (!current || (isM && !current.isM) || (isM === current.isM && product.sellingPrice > 0 && (current.sellingPrice <= 0 || product.sellingPrice < current.sellingPrice))) {
+          best.set(key, { cost, sellingPrice: product.sellingPrice, isM });
+        }
+      }
+      return new Map([...best.entries()].map(([key, value]) => [key, value.cost] as const));
+    };
+    (async () => {
+      try {
+        if (uatMode) {
+          const raw = window.localStorage.getItem("nha-ops-master-data-uat-v5");
+          if (!raw) return;
+          const stored = JSON.parse(raw) as { products?: MasterProduct[]; recipeVersions?: RecipeVersion[]; ingredients?: IngredientMaster[] };
+          if (!cancelled) setCogsBook(build(stored.products || [], stored.recipeVersions || [], stored.ingredients || []));
+        } else if (isSupabaseConfigured) {
+          const catalog = await loadCogsCatalog();
+          if (!cancelled) setCogsBook(build(catalog.products, catalog.recipeVersions, catalog.ingredients));
+        }
+      } catch {
+        // No catalog just means the "so với giá vốn" column shows "—".
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [uatMode]);
   // "Running on Long's machine" is orthogonal to UAT/Production: prod.localhost
   // serves the PRODUCTION data mode from the local dev server, so the local
   // folder scan can feed Supabase directly. On Vercel this is always false.
@@ -1263,6 +1305,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     const rows = grabOrderOptions.map((order) => {
       const reconciliation = byOrderId.get(order.id) || byCodeDate.get(`${order.orderDate}:${order.orderCode.toLocaleLowerCase("vi")}`);
       const channel = marketplaceKey(`${order.channelName} ${order.paymentMethod || ""} ${order.deliveryPartner || ""}`);
+      const platformKey = reconciliation?.settlement?.platform || reconciliation?.platform || channel;
       const reason = reconciliation
         ? undefined
         : !TRACKED_MARKETPLACES.includes(channel)
@@ -1270,13 +1313,14 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           : reportDays.has(`${channel}:${order.orderDate}`)
             ? "Có báo cáo ngày này nhưng không khớp được số tiền"
             : `Chưa có báo cáo ${MARKETPLACE_LABELS[channel] || channel} ngày ${dateLabel(order.orderDate)}`;
-      return { order, reconciliation, reason };
+      return { order, reconciliation, reason, platformKey };
     });
     // A reconciliation whose SAPO order fell outside the period (cancelled, or
     // re-imported under a different id) would otherwise vanish from every view,
     // making "Đã đối soát" under-report silently.
     const shown = new Set(rows.map((row) => row.reconciliation?.id).filter(Boolean));
     const orphans = grabReconciliationRows.filter((entry) => !shown.has(entry.id)).map((entry) => ({
+      platformKey: entry.settlement?.platform || entry.platform || "grab",
       order: state.platformOrders.find((order) => order.id === entry.platformOrderId) || {
         id: entry.id, orderCode: entry.orderCode, orderDate: entry.orderDate, channelName: "Grab",
         reportedAmount: entry.reportedAmount, goodsAmount: entry.settlement?.orderValue || 0, discountAmount: 0,
@@ -1367,7 +1411,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
 
   const reconciliationDoneCount = reconciliationRowsView.filter((row) => row.reconciliation).length;
   const reconciliationPendingCount = reconciliationRowsView.length - reconciliationDoneCount;
-  const visibleReconciliationRows = reconciliationRowsView.filter((row) => reconciliationFilter === "all" || (reconciliationFilter === "done") === Boolean(row.reconciliation));
+  const visibleReconciliationRows = reconciliationRowsView.filter((row) => (reconciliationFilter === "all" || (reconciliationFilter === "done") === Boolean(row.reconciliation)) && (reconciliationPlatform === "all" || row.platformKey === reconciliationPlatform));
 
   const marketplaceFeeByChannel = useMemo(() => {
     const reconciliationByKey = new Map<string, GrabReconciliationRecord>();
@@ -1866,6 +1910,21 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       const priced = book.get(normalizedHeader(item.name));
       if (!priced) { missing.push(item.name); continue; }
       total += priced.storePrice * (item.quantity || 1);
+    }
+    return { total, missing, covered: missing.length === 0 };
+  }
+
+  /// Theoretical COGS of the order's basket — the twin of
+  /// counterPriceFromItems, priced from Product Master recipes instead of the
+  /// SAPO price book. Only a fully covered basket returns a usable total.
+  function cogsFromItems(order: PlatformOrderRecord | undefined) {
+    if (!order?.items?.length || !cogsBook.size) return undefined;
+    let total = 0;
+    const missing: string[] = [];
+    for (const item of order.items) {
+      const unitCost = cogsBook.get(normalizedHeader(item.name));
+      if (unitCost === undefined) { missing.push(item.name); continue; }
+      total += unitCost * (item.quantity || 1);
     }
     return { total, missing, covered: missing.length === 0 };
   }
@@ -2597,9 +2656,14 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
               <button type="button" key={value} className={reconciliationFilter === value ? styles.selected : ""} onClick={() => setReconciliationFilter(value)}>{label}<b>{count.toLocaleString("vi-VN")}</b></button>
             ))}
           </div>
+          <div className={styles.reconciliationFilters}>
+            {([["all", "Mọi sàn"], ["grab", "GrabFood"], ["shopee", "ShopeeFood"], ["greensm", "GreenSM"]] as const).map(([value, label]) => (
+              <button type="button" key={value} className={reconciliationPlatform === value ? styles.selected : ""} onClick={() => setReconciliationPlatform(value)}>{label}<b>{(value === "all" ? reconciliationRowsView.length : reconciliationRowsView.filter((row) => row.platformKey === value).length).toLocaleString("vi-VN")}</b></button>
+            ))}
+          </div>
           <div className={styles.filterSummary}>[{RECONCILIATION_BUILD}] kỳ {bounds.start}→{bounds.end} · SAPO {state.platformOrders.length} đơn ({new Set(state.platformOrders.map((entry) => entry.id)).size} id duy nhất) · ngoài kỳ lọt vào: {reconciliationRowsView.filter((row) => !inRange(row.order.orderDate, bounds)).length} · Đang hiện <b>{visibleReconciliationRows.length.toLocaleString("vi-VN")}</b> / {reconciliationRowsView.length.toLocaleString("vi-VN")} đơn · {reconciliationFilter === "all" ? "tất cả" : reconciliationFilter === "done" ? "đã đối soát" : "chưa đối soát"} · {bounds.label}</div>
           {visibleReconciliationRows.length ? <div className={styles.reconciliationTableWrap}><div className={styles.reconciliationTable}>
-            <div className={styles.reconciliationTableHead}><span>Đơn</span><span>Doanh thu sàn</span><span>Sàn ghi nhận sau trừ</span><span>SAPO ghi nhận</span><span>Thực nhận</span><span>So với quầy</span><span /></div>
+            <div className={styles.reconciliationTableHead}><span>Đơn</span><span>Doanh thu sàn</span><span>Sàn ghi nhận sau trừ</span><span>SAPO ghi nhận</span><span>Thực nhận</span><span>So với quầy</span><span>So với giá vốn</span><span /></div>
             {visibleReconciliationRows.map(({ order, reconciliation, reason }) => {
               if (!reconciliation) {
                 return <div className={`${styles.reconciliationTableRow} ${styles.pendingRow}`} key={order.id}>
@@ -2607,6 +2671,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                   <span>{order.goodsAmount ? money(order.goodsAmount) : "—"}</span>
                   <span className={styles.pendingReason} title={reason}>{reason}</span>
                   <span>{money(order.reportedAmount)}</span>
+                  <span>—</span>
                   <span>—</span>
                   <span>—</span>
                   <button type="button" className={styles.pendingAction} aria-label="Đối soát tay" onClick={() => openPlatformReconciliation(order)}>›</button>
@@ -2622,6 +2687,14 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 <span className={journey.versusCounter === undefined ? "" : journey.versusCounter >= 0 ? styles.positiveCell : styles.negativeCell}>
                   {journey.versusCounter === undefined ? "—" : <>{journey.versusCounter >= 0 ? "+" : "−"}{money(Math.abs(journey.versusCounter))}<small>{journey.versusCounter >= 0 ? "+" : "−"}{percent(Math.abs(journey.versusCounterRate))}</small></>}
                 </span>
+                {(() => {
+                  const basketCogs = cogsFromItems(state.platformOrders.find((order) => order.id === reconciliation.platformOrderId));
+                  if (!basketCogs?.covered) return <span title={basketCogs?.missing.length ? `Thiếu giá vốn: ${basketCogs.missing.join(", ")}` : "Chưa có công thức/giá vốn cho đơn này"}>—</span>;
+                  const gain = reconciliation.receivedAmount - basketCogs.total;
+                  return <span className={gain >= 0 ? styles.positiveCell : styles.negativeCell} title={`Giá vốn giỏ hàng ${money(basketCogs.total)}`}>
+                    {gain >= 0 ? "+" : "−"}{money(Math.abs(gain))}<small>{reconciliation.receivedAmount > 0 ? `biên ${percent(gain / reconciliation.receivedAmount * 100)}` : "—"}</small>
+                  </span>;
+                })()}
                 <button type="button" aria-label="Xóa đối soát" onClick={() => void deleteGrabReconciliation(reconciliation.id)}>×</button>
               </div>;
             })}
@@ -2734,6 +2807,21 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 <span>So với giá quầy</span><b>{j.counterPrice == null ? "—" : `${j.netVersusCounter! >= 0 ? "+" : "−"}${money(Math.abs(j.netVersusCounter!))}`}</b>
                 <small>{j.counterPrice == null ? "nhập giá quầy bên dưới" : `${percent(Math.abs(j.netVersusCounterRate))} · quầy ${money(j.counterPrice)}`}</small>
               </div>
+              {(() => {
+                const basketCogs = cogsFromItems(selectedGrabOrder);
+                const received = parseAmount(grabForm.receivedAmount);
+                if (!basketCogs?.covered) {
+                  return <div className={styles.checkWarn}>
+                    <span>So với giá vốn</span><b>—</b>
+                    <small>{basketCogs?.missing.length ? `thiếu giá vốn ${basketCogs.missing.length} món: ${basketCogs.missing.slice(0, 3).join(", ")}${basketCogs.missing.length > 3 ? "…" : ""}` : cogsBook.size ? "chưa có chi tiết món" : "chưa nạp công thức ở tab Sản phẩm"}</small>
+                  </div>;
+                }
+                const gain = received - basketCogs.total;
+                return <div className={gain >= 0 ? styles.checkOk : styles.checkWarn}>
+                  <span>So với giá vốn</span><b>{gain >= 0 ? "+" : "−"}{money(Math.abs(gain))}</b>
+                  <small>giá vốn {money(basketCogs.total)}{received > 0 ? ` · biên ${percent(gain / received * 100)} thực nhận` : ""}</small>
+                </div>;
+              })()}
             </div>
             <details className={styles.journeyEdit}>
               <summary>Sửa số liệu</summary>
