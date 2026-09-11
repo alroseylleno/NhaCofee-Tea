@@ -111,6 +111,23 @@ const COUNTER_PRICE_RATE = 0.7278;
 /// Bumped by hand on each UI change to this panel. If the tag on screen does not
 /// match the one the terminal reports, the browser is running a cached bundle
 /// and no amount of code reading will explain the behaviour.
+/// SAPO's .xlsx files are streaming zips whose local headers declare size 0;
+/// SheetJS parses them correctly but console.errors "Bad uncompressed size"
+/// once per entry, which Next's dev overlay turns into a scary red screen.
+/// Silence exactly that line for the duration of one read — real errors pass.
+function readWorkbookQuietly<T>(read: () => T): T {
+  const original = console.error;
+  console.error = (...args: unknown[]) => {
+    if (typeof args[0] === "string" && args[0].startsWith("Bad uncompressed size")) return;
+    original(...args);
+  };
+  try {
+    return read();
+  } finally {
+    console.error = original;
+  }
+}
+
 const RECONCILIATION_BUILD = "R27";
 
 /// How confidently a PDF row was tied to a SAPO order. "amount-only" means only
@@ -1690,7 +1707,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       const XLSX = await import("xlsx");
       const parsed: ParsedFinanceImport[] = [];
       for (const file of inputs) {
-        const workbook = XLSX.read(file.buffer, { type: "array", cellDates: true });
+        const workbook = readWorkbookQuietly(() => XLSX.read(file.buffer, { type: "array", cellDates: true }));
         const sheet = workbook.Sheets[workbook.SheetNames[0]];
         if (!sheet) throw new Error(`${file.name}: không tìm thấy sheet dữ liệu.`);
         // Some SAPO exports declare a range starting below their real header.
@@ -2238,7 +2255,8 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         if (name.endsWith(".csv")) parsed.push({ report: parseShopeeIncomeCsv(await file.text(), file.name), fileName: file.name });
         else if (name.endsWith(".xlsx")) {
           const XLSX = await import("xlsx");
-          const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
+          const fileBuffer = await file.arrayBuffer();
+          const workbook = readWorkbookQuietly(() => XLSX.read(fileBuffer, { type: "array" }));
           const sheetName = workbook.SheetNames.find((entry) => /detail/i.test(entry)) || workbook.SheetNames[0];
           const rows = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[sheetName], { header: 1, raw: false, defval: null });
           parsed.push({ report: parseGreenRevenueRows(rows, file.name), fileName: file.name });

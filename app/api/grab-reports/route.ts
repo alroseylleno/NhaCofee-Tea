@@ -39,7 +39,16 @@ async function extractPdfText(data: Buffer) {
 
 async function parseGreenXlsx(buffer: Buffer, fileName: string) {
   const XLSX = await import("xlsx");
-  const workbook = XLSX.read(buffer, { type: "buffer" });
+  // SAPO/GreenSM streaming zips make SheetJS console.error "Bad uncompressed
+  // size" per entry while parsing fine; keep the server log readable.
+  const original = console.error;
+  console.error = (...args: unknown[]) => { if (typeof args[0] === "string" && args[0].startsWith("Bad uncompressed size")) return; original(...args); };
+  let workbook: ReturnType<typeof XLSX.read>;
+  try {
+    workbook = XLSX.read(buffer, { type: "buffer" });
+  } finally {
+    console.error = original;
+  }
   const sheetName = workbook.SheetNames.find((name) => /detail/i.test(name)) || workbook.SheetNames[0];
   const sheet = workbook.Sheets[sheetName];
   if (!sheet) throw new Error("Không tìm thấy sheet dữ liệu.");
