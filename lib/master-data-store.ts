@@ -11,6 +11,7 @@ import {
   type RecipeVersion,
   emptyMasterDataState,
   mergeInventoryDrafts,
+  normalizeChannelPrices,
   unitDefinition,
 } from "@/lib/master-data";
 import { supabase } from "@/lib/supabase";
@@ -27,7 +28,7 @@ function toIngredient(row: Record<string, unknown>): IngredientMaster {
   return { id: String(row.id), storeId: String(row.store_id), code: String(row.code), name: String(row.name), aliases: aliases(row.aliases), category: String(row.category), brand: String(row.brand), baseUnit: String(row.base_unit), conversionUnit: conversionUnit(row.conversion_unit), purchaseUnit: String(row.purchase_unit), latestPurchasePrice: number(row.latest_purchase_price), latestPurchasePricePerBaseUnit: number(row.latest_purchase_price_per_base_unit), standardWastePercent: number(row.standard_waste_percent), latestPurchasedOn: row.latest_purchased_on ? String(row.latest_purchased_on) : undefined, oldestInStockPurchasedOn: row.oldest_in_stock_purchased_on ? String(row.oldest_in_stock_purchased_on) : undefined, sourceInventoryLotId: row.source_inventory_receipt_id ? String(row.source_inventory_receipt_id) : undefined, stockQuantityBase: number(row.stock_quantity_base), stockLotCount: number(row.stock_lot_count), sourceKey: String(row.source_key), status: row.status === "inactive" ? "inactive" : "active", updatedAt: String(row.updated_at || new Date().toISOString()) };
 }
 function toProduct(row: Record<string, unknown>): ProductMaster {
-  return { id: String(row.id), storeId: String(row.store_id), sku: String(row.sku), name: String(row.name), category: String(row.category), variant: String(row.variant || ""), sellingPrice: number(row.selling_price), sellingPriceOverridden: Boolean(row.selling_price_overridden), packagingCost: number(row.packaging_cost), status: "active", source: row.source === "manual" ? "manual" : "import", productType: row.product_type === "prepared_component" || row.product_type === "packaging" ? row.product_type : "sellable", updatedAt: String(row.updated_at || new Date().toISOString()) };
+  return { id: String(row.id), storeId: String(row.store_id), sku: String(row.sku), name: String(row.name), category: String(row.category), variant: String(row.variant || ""), sellingPrice: number(row.selling_price), sellingPriceOverridden: Boolean(row.selling_price_overridden), packagingCost: number(row.packaging_cost), status: "active", source: row.source === "manual" ? "manual" : "import", channelPrices: normalizeChannelPrices(row.channel_prices), nameOverridden: Boolean(row.name_overridden), categoryOverridden: Boolean(row.category_overridden), productType: row.product_type === "prepared_component" || row.product_type === "packaging" ? row.product_type : "sellable", updatedAt: String(row.updated_at || new Date().toISOString()) };
 }
 function toRecipeItem(row: Record<string, unknown>): ProductRecipeItem {
   return { id: String(row.id), ingredientId: row.ingredient_id ? String(row.ingredient_id) : "", quantity: number(row.quantity), unit: String(row.unit), wastePercent: number(row.waste_percent), customName: row.custom_name ? String(row.custom_name) : undefined, customBrand: row.custom_brand ? String(row.custom_brand) : undefined, customCategory: row.custom_category ? String(row.custom_category) : undefined, customCost: row.custom_cost ? number(row.custom_cost) : undefined, preparedProductId: row.prepared_product_id ? String(row.prepared_product_id) : undefined, preparedRecipeVersionId: row.prepared_recipe_version_id ? String(row.prepared_recipe_version_id) : undefined };
@@ -110,7 +111,7 @@ export async function loadCogsCatalog(): Promise<{ products: ProductMaster[]; re
 
 export async function saveCloudProduct(product: ProductMaster) {
   const client = requireClient();
-  const { error } = await client.rpc("save_product_master", { p_id: product.id, p_store_id: product.storeId, p_sku: product.sku, p_name: product.name, p_category: product.category, p_variant: product.variant, p_selling_price: product.sellingPrice, p_selling_price_overridden: product.sellingPriceOverridden, p_packaging_cost: product.packagingCost, p_source: product.source, p_product_type: product.productType || "sellable" });
+  const { error } = await client.rpc("save_product_master", { p_id: product.id, p_store_id: product.storeId, p_sku: product.sku, p_name: product.name, p_category: product.category, p_variant: product.variant, p_selling_price: product.sellingPrice, p_selling_price_overridden: product.sellingPriceOverridden, p_packaging_cost: product.packagingCost, p_source: product.source, p_product_type: product.productType || "sellable", p_channel_prices: product.channelPrices || {}, p_name_overridden: Boolean(product.nameOverridden), p_category_overridden: Boolean(product.categoryOverridden) });
   if (error) throw error;
 }
 

@@ -75,8 +75,73 @@ export type ProductMaster = {
   status: MasterStatus;
   source: "import" | "manual";
   productType?: ProductType;
+  /// Listed price per online platform. `sellingPrice` stays the counter price,
+  /// so every existing consumer of it keeps meaning "giá quầy".
+  channelPrices?: Partial<Record<OnlineSalesChannel, number>>;
+  /// Finance reconciliation rewrites name/category of imported SKUs from the
+  /// latest Finance snapshot. Without these flags a rename would silently
+  /// revert on the next Production load, exactly like a hand-set price would
+  /// without `sellingPriceOverridden`.
+  nameOverridden?: boolean;
+  categoryOverridden?: boolean;
   updatedAt: string;
 };
+
+export type OnlineSalesChannel = "grab" | "shopee" | "greensm";
+export type SalesChannel = "counter" | OnlineSalesChannel;
+
+/// Money actually received per 1đ listed, measured from đối soát (2026-09-11),
+/// not from the platforms' published rate cards:
+///   GTGT 3% + TNCN 1,5% = 4,5% on all three, commission on top of that.
+/// Blended rates are forbidden — each sàn is charged at its own commission.
+export const SALES_CHANNELS: { key: SalesChannel; label: string; netRate: number; note: string }[] = [
+  { key: "counter", label: "Quầy", netRate: 1, note: "Bán tại quầy · không hoa hồng, không thuế sàn" },
+  { key: "grab", label: "GrabFood", netRate: 1 - 0.24538 - 0.045, note: "Hoa hồng 24,538% + thuế 4,5% → về tay 71,0%" },
+  { key: "shopee", label: "ShopeeFood", netRate: 1 - 0.2855 - 0.045, note: "Hoa hồng 28,55% + thuế 4,5% → về tay 67,0%" },
+  { key: "greensm", label: "GreenSM", netRate: 1 - 0.045, note: "Hoa hồng 0% + thuế 4,5% → về tay 95,5%" },
+];
+
+export function normalizeChannelPrices(value: unknown): Partial<Record<OnlineSalesChannel, number>> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const source = value as Record<string, unknown>;
+  const prices: Partial<Record<OnlineSalesChannel, number>> = {};
+  for (const channel of ["grab", "shopee", "greensm"] as const) {
+    const price = Math.round(Number(source[channel]) || 0);
+    if (price > 0) prices[channel] = price;
+  }
+  return Object.keys(prices).length ? prices : undefined;
+}
+
+export function channelPrice(product: ProductMaster, channel: SalesChannel) {
+  const price = channel === "counter" ? product.sellingPrice : product.channelPrices?.[channel];
+  return price && price > 0 ? price : undefined;
+}
+
+export function channelNetRevenue(price: number | undefined, channel: SalesChannel) {
+  if (price === undefined) return undefined;
+  return price * (SALES_CHANNELS.find((entry) => entry.key === channel)?.netRate ?? 1);
+}
+
+/// Margin is measured against money received, not the listed price: a 58k Grab
+/// listing only ever puts 41,2k in the till, and a margin on the sticker price
+/// would read ~13 points better than the business actually earns.
+export function channelMargin(price: number | undefined, channel: SalesChannel, cost: number | undefined) {
+  const net = channelNetRevenue(price, channel);
+  if (net === undefined || cost === undefined || net <= 0) return undefined;
+  return (net - cost) / net * 100;
+}
+
+/// Unweighted mean across the channels that carry a price. Volume per channel is
+/// not stored here, so this deliberately does NOT pretend to be a revenue-weighted
+/// blended margin; it answers "across the prices I list, where do I sit".
+export function averageChannelPricing(product: ProductMaster, cost: number | undefined) {
+  const priced = SALES_CHANNELS.map((channel) => ({ channel, price: channelPrice(product, channel.key) })).filter((entry): entry is { channel: typeof SALES_CHANNELS[number]; price: number } => entry.price !== undefined);
+  if (!priced.length) return { averagePrice: undefined, averageNet: undefined, averageMargin: undefined, channelCount: 0 };
+  const averagePrice = priced.reduce((total, entry) => total + entry.price, 0) / priced.length;
+  const averageNet = priced.reduce((total, entry) => total + entry.price * entry.channel.netRate, 0) / priced.length;
+  const averageMargin = cost === undefined || averageNet <= 0 ? undefined : (averageNet - cost) / averageNet * 100;
+  return { averagePrice, averageNet, averageMargin, channelCount: priced.length };
+}
 
 export type ProductRecipeItem = {
   id: string;
@@ -327,8 +392,8 @@ export function mergeProductDrafts(current: ProductMaster[], imported: ImportedP
     }
     merged.push({
       ...existing,
-      name: source.name.trim() || existing.name,
-      category: source.category.trim() || "Chưa phân loại",
+      name: existing.nameOverridden ? existing.name : source.name.trim() || existing.name,
+      category: existing.categoryOverridden ? existing.category : source.category.trim() || "Chưa phân loại",
       variant: source.variant?.trim() || "",
       sellingPrice: existing.sellingPriceOverridden ? existing.sellingPrice : Math.max(0, Math.round(observedPrice || 0)),
       status: "active",
@@ -459,7 +524,7 @@ export function normalizeMasterDataState(value: unknown): MasterDataState {
   const stored = value as Partial<MasterDataState> & { recipes?: Array<ProductRecipeItem & { productId?: string }> };
   const now = new Date().toISOString();
   const normalizeStatus = (status: unknown): MasterStatus => MASTER_STATUSES.includes(status as MasterStatus) ? status as MasterStatus : "draft";
-  const products = Array.isArray(stored.products) ? stored.products.map((product) => ({ ...product, variant: typeof product.variant === "string" ? product.variant : "", sellingPriceOverridden: Boolean(product.sellingPriceOverridden), productType: product.productType === "prepared_component" || product.productType === "packaging" ? product.productType : normalizedText(product.category || "") === "bao bi" ? "packaging" as const : "sellable" as const, status: "active" as MasterStatus })) : [];
+  const products = Array.isArray(stored.products) ? stored.products.map((product) => ({ ...product, variant: typeof product.variant === "string" ? product.variant : "", sellingPriceOverridden: Boolean(product.sellingPriceOverridden), nameOverridden: Boolean(product.nameOverridden), categoryOverridden: Boolean(product.categoryOverridden), channelPrices: normalizeChannelPrices(product.channelPrices), productType: product.productType === "prepared_component" || product.productType === "packaging" ? product.productType : normalizedText(product.category || "") === "bao bi" ? "packaging" as const : "sellable" as const, status: "active" as MasterStatus })) : [];
   const ingredients = Array.isArray(stored.ingredients) ? stored.ingredients.map((ingredient) => ({ ...ingredient, conversionUnit: typeof ingredient.conversionUnit === "string" && unitDefinition(ingredient.conversionUnit) ? ingredient.conversionUnit : undefined, aliases: Array.isArray(ingredient.aliases) ? ingredient.aliases : [], standardWastePercent: Number(ingredient.standardWastePercent) || 0, stockQuantityBase: Number(ingredient.stockQuantityBase) || 0, stockLotCount: Number(ingredient.stockLotCount) || 0, status: normalizeStatus(ingredient.status) })) : [];
   let recipeVersions = Array.isArray(stored.recipeVersions) ? stored.recipeVersions : [];
   if (!recipeVersions.length && Array.isArray(stored.recipes)) {

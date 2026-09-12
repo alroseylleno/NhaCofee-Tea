@@ -50,7 +50,7 @@
 .uatBanner > div { display: flex; flex: 0 0 auto; gap: 4px; }
 .uatBanner button { padding: 7px; border: 1px solid #d9bd78; border-radius: 8px; color: #735424; background: #fffbef; font: 700 8px Arial, sans-serif; white-space: nowrap; }
 
-.tabs { position: sticky; z-index: 5; top: 0; display: flex; overflow-x: auto; padding: 0 8px; border-bottom: 1px solid var(--line); background: #fffdf6ed; backdrop-filter: blur(14px); scrollbar-width: none; }
+.tabs { position: sticky; z-index: 5; top: 0; display: flex; overflow-x: auto; overscroll-behavior-x: contain; padding: 0 8px; border-bottom: 1px solid var(--line); background: var(--paper); scrollbar-width: none; }
 .tabs::-webkit-scrollbar { display: none; }
 .tabs button { flex: 1 0 112px; padding: 14px 7px 12px; border: 0; border-bottom: 3px solid transparent; color: var(--muted); background: transparent; font: 800 9px Arial, sans-serif; white-space: nowrap; }
 .tabs button span { display: inline-grid; min-width: 17px; height: 17px; margin-left: 3px; place-items: center; border-radius: 99px; color: #fff; background: var(--clay); font-size: 8px; }
@@ -218,7 +218,7 @@
 .inactive, .archived { color: #77736b; background: #ece9e2; }
 
 .ingredientSearch { margin-bottom: 10px; }
-.categoryChips { display: flex; gap: 6px; margin: 0 -14px 12px; padding: 0 14px 7px; overflow-x: auto; scrollbar-width: thin; }
+.categoryChips { display: flex; gap: 6px; margin: 0 -14px 12px; padding: 0 14px 7px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; }
 .categoryChips button { flex: 0 0 auto; padding: 8px 10px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); background: #fff; font: 800 9px Arial, sans-serif; white-space: nowrap; }
 .categoryChips button span { margin-left: 3px; opacity: .7; }
 .categoryChips .selected { border-color: var(--pine); color: #fff; background: var(--pine); }
@@ -297,7 +297,7 @@
 .costTrend svg { display: block; width: 100%; height: 76px; margin-top: 5px; overflow: visible; }
 .costTrend polyline { fill: none; stroke: var(--clay); stroke-linecap: round; stroke-linejoin: round; stroke-width: 3; }
 .costTrend circle { fill: #fff; stroke: var(--pine); stroke-width: 2.5; }
-.costTrendLabels { display: flex; gap: 5px; overflow-x: auto; padding-bottom: 2px; }
+.costTrendLabels { display: flex; gap: 5px; overflow-x: auto; overscroll-behavior-x: contain; padding-bottom: 2px; }
 .costTrendLabels span { flex: 0 0 auto; min-width: 62px; padding: 6px; border-radius: 8px; background: #f1f4ed; }
 .costTrendLabels b, .costTrendLabels small { display: block; }
 .costTrendLabels b { color: #39715d; font: 800 8px Arial, sans-serif; }
@@ -487,4 +487,35 @@
   .productTable { display: block; }
   .productCards { display: none; }
   .detailPanel { width: min(800px, 74vw); }
+}
+
+.identityFields { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 10px; margin-bottom: 12px; }
+.identityFields label { display: grid; gap: 4px; color: var(--muted); font: 800 8px Arial, sans-serif; letter-spacing: .1em; }
+.identityFields input { min-width: 0; padding: 9px 10px; border: 1px solid #d8dfd2; border-radius: 9px; background: #fff; color: var(--ink); font: 700 12px Arial, sans-serif; }
+
+.renameCategoryButton { margin-left: 7px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: #fff; font: 700 9px Arial, sans-serif; }
+.renameCategoryButton:hover { border-color: var(--pine); color: var(--pine); }
+
+.channelPricing { margin-top: 12px; padding: 13px; border: 1px solid var(--line); border-radius: 13px; background: #fff; }
+.channelPricing > b { display: block; font: 700 12px Arial, sans-serif; }
+.channelPricing > small { display: block; margin: 4px 0 11px; color: var(--muted); font: 9px/1.45 Arial, sans-serif; }
+.channelPriceHead, .channelPriceRow, .channelPriceAverage { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(88px, .9fr) minmax(72px, .8fr) minmax(58px, .6fr); gap: 9px; align-items: center; }
+.channelPriceHead { padding: 0 2px 6px; border-bottom: 1px solid var(--line); color: var(--muted); font: 800 8px Arial, sans-serif; letter-spacing: .09em; }
+.channelPriceHead span:not(:first-child), .channelPriceRow > span:not(:first-child), .channelPriceRow > strong, .channelPriceAverage span:not(:first-child), .channelPriceAverage strong { text-align: right; }
+.channelPriceRow { padding: 9px 2px; border-bottom: 1px solid #f0efe7; }
+.channelPriceRow > span:first-child { display: grid; gap: 2px; min-width: 0; }
+.channelPriceRow b { font: 700 11px Arial, sans-serif; }
+.channelPriceRow small { color: var(--muted); font: 8px/1.35 Arial, sans-serif; }
+.channelPriceRow input { min-width: 0; padding: 8px 9px; border: 1px solid #d8dfd2; border-radius: 8px; background: #fff; color: var(--ink); font: 700 11px Arial, sans-serif; text-align: right; }
+.channelPriceRow > span:not(:first-child) { color: var(--muted); font: 700 10px Arial, sans-serif; }
+.channelPriceRow > strong { font: 700 11px Arial, sans-serif; }
+.channelPriceAverage { margin-top: 9px; padding: 10px 2px 2px; border-top: 1px solid var(--line); font: 700 11px Arial, sans-serif; }
+.channelPriceAverage span:first-child { color: #34705a; font: 800 8px Arial, sans-serif; letter-spacing: .09em; }
+.channelPriceAverage strong { color: var(--pine); font: 700 13px Arial, sans-serif; }
+
+@media (max-width: 560px) {
+  .identityFields { grid-template-columns: minmax(0, 1fr); }
+  .channelPriceHead { display: none; }
+  .channelPriceRow, .channelPriceAverage { grid-template-columns: minmax(0, 1fr) minmax(76px, auto); gap: 6px 9px; }
+  .channelPriceRow > span:first-child, .channelPriceAverage span:first-child { grid-column: 1 / -1; }
 }
