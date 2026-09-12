@@ -519,3 +519,11 @@
   .channelPriceRow, .channelPriceAverage { grid-template-columns: minmax(0, 1fr) minmax(76px, auto); gap: 6px 9px; }
   .channelPriceRow > span:first-child, .channelPriceAverage span:first-child { grid-column: 1 / -1; }
 }
+
+.channelMetrics { display: grid; gap: 7px; margin-top: 7px; }
+.channelMetricRow { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.channelMetricRow > div { min-width: 0; padding: 11px; border: 1px solid var(--line); border-radius: 11px; background: #fff; }
+.channelMetricRow span, .channelMetricRow strong { display: block; }
+.channelMetricRow span { color: var(--muted); font: 8px Arial, sans-serif; }
+.channelMetricRow strong { overflow: hidden; margin-top: 5px; font: 700 14px Georgia, serif; text-overflow: ellipsis; white-space: nowrap; }
+.channelMetricRow small { display: block; overflow: hidden; margin-top: 4px; color: #39715d; font: 800 7px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
