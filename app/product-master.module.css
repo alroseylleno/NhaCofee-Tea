@@ -527,3 +527,13 @@
 .channelMetricRow span { color: var(--muted); font: 8px Arial, sans-serif; }
 .channelMetricRow strong { overflow: hidden; margin-top: 5px; font: 700 14px Georgia, serif; text-overflow: ellipsis; white-space: nowrap; }
 .channelMetricRow small { display: block; overflow: hidden; margin-top: 4px; color: #39715d; font: 800 7px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+
+.priceSyncReport { margin-bottom: 14px; padding: 13px 14px; border: 1px solid #cfd9c8; border-radius: 12px; background: #f4f8f1; }
+.priceSyncReport > div:first-child { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+.priceSyncReport b { font: 800 10px Arial, sans-serif; }
+.priceSyncReport > div:first-child button { padding: 4px 8px; border: 1px solid #cfd9c8; border-radius: 7px; color: var(--muted); background: #fff; font: 700 8px Arial, sans-serif; }
+.priceSyncReport p { margin-top: 7px; color: var(--muted); font: 9px/1.55 Arial, sans-serif; }
+.driftList { display: grid; gap: 4px; margin-top: 10px; padding-top: 9px; border-top: 1px solid #d9e2d4; }
+.driftList b { color: var(--red); }
+.driftList span { display: flex; justify-content: space-between; gap: 10px; color: var(--ink); font: 700 9px Arial, sans-serif; }
+.driftList em { flex: 0 0 auto; color: var(--red); font: 800 9px Arial, sans-serif; font-style: normal; }

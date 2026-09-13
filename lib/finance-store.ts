@@ -85,7 +85,7 @@ export type FinanceOrderItem = { name: string; quantity: number; amount: number;
 /// Counter (in-store) and per-channel prices for one menu item, from SAPO's
 /// "Danh mục mặt hàng" export. This is what turns "giá quầy" from a guess into
 /// a lookup.
-export type FinanceCounterPrice = { name: string; storePrice: number; grabPrice?: number; shopeePrice?: number; greenPrice?: number };
+export type FinanceCounterPrice = { name: string; size?: string; storePrice: number; grabPrice?: number; shopeePrice?: number; greenPrice?: number };
 
 export type FinancePlatformOrderRecord = {
   id: string;
@@ -339,6 +339,7 @@ function grabDailyReportFromRow(row: Record<string, unknown>): FinanceGrabDailyR
 function counterPriceFromRow(row: Record<string, unknown>): FinanceCounterPrice {
   return {
     name: String(row.name),
+    size: row.size ? String(row.size) : "",
     storePrice: numberValue(row.store_price),
     grabPrice: row.grab_price == null ? undefined : numberValue(row.grab_price),
     shopeePrice: row.shopee_price == null ? undefined : numberValue(row.shopee_price),
@@ -560,6 +561,7 @@ function grabReconciliationRows(records: FinanceGrabReconciliationRecord[]) {
 export async function replaceFinanceCounterPrices(records: FinanceCounterPrice[]) {
   const rows = records.map((record) => ({
     name: record.name,
+    size: record.size || "",
     store_price: record.storePrice,
     grab_price: record.grabPrice ?? null,
     shopee_price: record.shopeePrice ?? null,
@@ -587,6 +589,7 @@ export async function loadFinanceCounterPrices(): Promise<FinanceCounterPrice[]>
   if (error) throw supabaseFailure(error, "Không thể tải bảng giá quầy");
   return (data || []).map((row) => ({
     name: String(row.name),
+    size: row.size ? String(row.size) : "",
     storePrice: numberValue(row.store_price),
     grabPrice: row.grab_price == null ? undefined : numberValue(row.grab_price),
     shopeePrice: row.shopee_price == null ? undefined : numberValue(row.shopee_price),

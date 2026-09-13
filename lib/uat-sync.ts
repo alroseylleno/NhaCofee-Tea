@@ -1,3 +1,4 @@
+import { loadFinanceCounterPrices } from "./finance-store";
 import { loadInventory } from "./inventory-store";
 import { loadCogsCatalog } from "./master-data-store";
 import { DEFAULT_STORE, type ImportedProductSource, type ProductMaster } from "./master-data";
@@ -23,7 +24,7 @@ export const UAT_STORAGE_KEYS = {
   inventoryMeta: "nha-ops-meta-local-uat-v1",
 } as const;
 
-export type UatSyncSummary = { products: number; recipeVersions: number; ingredients: number; lots: number; activeSessions: number };
+export type UatSyncSummary = { products: number; recipeVersions: number; ingredients: number; lots: number; activeSessions: number; counterPrices: number };
 
 /// The Product Master UAT loader rebuilds imported SKUs from the Finance
 /// snapshot and keeps only `manual` rows out of storage, so writing the master
@@ -36,7 +37,9 @@ function financeSnapshotFrom(products: ProductMaster[]): ImportedProductSource[]
 }
 
 export async function syncProductionToUat(): Promise<UatSyncSummary> {
-  const [catalog, inventory] = await Promise.all([loadCogsCatalog(), loadInventory()]);
+  // The price book comes along so the UAT sandbox can exercise the price sync
+  // too; without it the button has nothing to read and cannot be tested there.
+  const [catalog, inventory, counterPrices] = await Promise.all([loadCogsCatalog(), loadInventory(), loadFinanceCounterPrices().catch(() => [])]);
   // Receipt files are served from Supabase Storage behind signed URLs that
   // expire within the hour, so the UAT copy drops them instead of keeping a
   // link that will be dead the next time the sandbox is opened.
@@ -46,7 +49,7 @@ export async function syncProductionToUat(): Promise<UatSyncSummary> {
     catch { return {}; }
   })();
 
-  window.localStorage.setItem(UAT_STORAGE_KEYS.finance, JSON.stringify({ ...existingFinance, products: financeSnapshotFrom(catalog.products) }));
+  window.localStorage.setItem(UAT_STORAGE_KEYS.finance, JSON.stringify({ ...existingFinance, products: financeSnapshotFrom(catalog.products), counterPrices }));
   window.localStorage.setItem(UAT_STORAGE_KEYS.masterData, JSON.stringify({
     version: 5,
     stores: [DEFAULT_STORE],
@@ -71,5 +74,6 @@ export async function syncProductionToUat(): Promise<UatSyncSummary> {
     ingredients: catalog.ingredients.length,
     lots: lots.length,
     activeSessions: inventory.activeSessions.length,
+    counterPrices: counterPrices.length,
   };
 }

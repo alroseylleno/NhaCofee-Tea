@@ -36,6 +36,7 @@ import {
 } from "@/lib/master-data";
 import { deleteCloudProduct, loadCloudMasterData, saveCloudProduct, saveCloudRecipe } from "@/lib/master-data-store";
 import { applyUatWorkbookRecipes, workbookRecipeSummary } from "@/lib/uat-recipe-workbook";
+import { loadFinanceCounterPrices, type FinanceCounterPrice } from "@/lib/finance-store";
 import { syncProductionToUat } from "@/lib/uat-sync";
 import { supabase } from "@/lib/supabase";
 import styles from "./product-master.module.css";
@@ -44,6 +45,7 @@ type MasterTab = "overview" | "queue" | "products";
 type CatalogSort = "sku" | "cost" | "price" | "margin";
 type FinanceLocalState = {
   products?: ImportedProductSource[];
+  counterPrices?: FinanceCounterPrice[];
   imports?: Array<{ dataType: "revenue" | "products" | "service"; fileName: string; periodStart: string; periodEnd: string; rowCount: number; importedAt: string }>;
   importHistory?: Array<{ dataType: "revenue" | "products" | "service"; fileName: string; periodStart: string; periodEnd: string; rowCount: number; importedAt: string }>;
 };
@@ -238,6 +240,8 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
   // every group pushed the controls off screen.
   const [openCatalogCategories, setOpenCatalogCategories] = useState<string[]>([]);
   const [uatSyncing, setUatSyncing] = useState(false);
+  const [priceSyncing, setPriceSyncing] = useState(false);
+  const [priceSyncReport, setPriceSyncReport] = useState<{ filled: { sku: string; name: string; counter?: number; channels: string[] }[]; drift: { sku: string; name: string; current: number; book: number }[]; unmatched: { sku: string; name: string }[] } | undefined>();
   const [financeSnapshot, setFinanceSnapshot] = useState<FinanceLocalState>({});
   const [replacementSelection, setReplacementSelection] = useState<Record<string, string>>({});
   const [inlineReplacementKey, setInlineReplacementKey] = useState("");
@@ -773,7 +777,7 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
       if (authError) throw authError;
       const summary = await syncProductionToUat();
       await supabase.auth.signOut();
-      window.alert(`Đã chép về UAT:\n${summary.products} SKU · ${summary.recipeVersions} phiên bản công thức · ${summary.ingredients} NVL\n${summary.lots} lô Kho NVL · ${summary.activeSessions} phiên đang dùng\n\nTrang sẽ tải lại để nạp dữ liệu mới.`);
+      window.alert(`Đã chép về UAT:\n${summary.products} SKU · ${summary.recipeVersions} phiên bản công thức · ${summary.ingredients} NVL\n${summary.lots} lô Kho NVL · ${summary.activeSessions} phiên đang dùng · ${summary.counterPrices} dòng bảng giá\n\nTrang sẽ tải lại để nạp dữ liệu mới.`);
       window.location.reload();
     } catch (error) {
       await supabase.auth.signOut().catch(() => undefined);
@@ -801,6 +805,63 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
     setCatalogCategory((selected) => selected === category ? next : selected);
     setOpenCatalogCategories((open) => open.map((entry) => entry === category ? next : entry));
     setSaveNotice(`Đã đổi category "${category}" → "${next}" cho ${updated.length} SKU.`);
+  }
+
+  /// Đổ giá từ bảng giá SAPO (`finance_counter_prices`, do nút quét ở Đối soát ghi)
+  /// sang Product Master. CHỈ điền chỗ trống — giá quầy khi đang 0, giá sàn khi chưa có.
+  /// Chỗ đã có giá mà lệch bảng giá thì báo cáo chứ không đè, để một lần import sai
+  /// không xoá sạch giá đã tinh chỉnh tay.
+  async function syncPricesFromPriceBook() {
+    setPriceSyncing(true);
+    try {
+      const book = uatMode ? (readFinanceLocalState().counterPrices || []) : await loadFinanceCounterPrices();
+      if (!book.length) { window.alert("Chưa có bảng giá nào. Vào Tài chính → Đối soát bấm \"Quét thư mục local\" để nạp file Danh mục mặt hàng trước."); return; }
+      // Tên nào có dòng theo size thì BẮT BUỘC khớp đúng size, không được rơi sang
+      // size khác — nếu không SKU cỡ L sẽ ăn giá của cỡ M.
+      const sized = new Map<string, FinanceCounterPrice>();
+      const plain = new Map<string, FinanceCounterPrice>();
+      const sizedNames = new Set<string>();
+      for (const row of book) {
+        const key = normalizedText(row.name);
+        if (row.size) { sized.set(`${key}|${row.size.toUpperCase()}`, row); sizedNames.add(key); }
+        else plain.set(key, row);
+      }
+      const filled: NonNullable<typeof priceSyncReport>["filled"] = [];
+      const drift: NonNullable<typeof priceSyncReport>["drift"] = [];
+      const unmatched: NonNullable<typeof priceSyncReport>["unmatched"] = [];
+      const updates: ProductMaster[] = [];
+      for (const product of state.products) {
+        if ((product.productType || "sellable") !== "sellable") continue;
+        const key = normalizedText(product.name);
+        const size = ["S", "M", "L"].includes(product.variant.trim().toUpperCase()) ? product.variant.trim().toUpperCase() : "";
+        const row = size && sizedNames.has(key) ? sized.get(`${key}|${size}`) : plain.get(key) || sized.get(`${key}|${size}`);
+        if (!row) {
+          // Tên trong app không khớp tên nào trong bảng giá SAPO. Báo ra thay vì
+          // giấu, để Long biết đúng chỗ cần đặt lại tên cho hai bên khớp nhau.
+          if (!product.sellingPrice || !Object.keys(product.channelPrices || {}).length) unmatched.push({ sku: product.sku, name: product.name });
+          continue;
+        }
+        if (row.storePrice > 0 && product.sellingPrice > 0 && Math.abs(product.sellingPrice - row.storePrice) > 1) drift.push({ sku: product.sku, name: product.name, current: product.sellingPrice, book: row.storePrice });
+        const channels = { ...(product.channelPrices || {}) };
+        const added: string[] = [];
+        for (const [price, channel] of [[row.grabPrice, "grab"], [row.shopeePrice, "shopee"], [row.greenPrice, "greensm"]] as const) {
+          if (price && price > 0 && !channels[channel]) { channels[channel] = Math.round(price); added.push(channel === "greensm" ? "GSM" : channel === "grab" ? "Grab" : "Shopee"); }
+        }
+        const counter = product.sellingPrice > 0 ? undefined : row.storePrice > 0 ? Math.round(row.storePrice) : undefined;
+        if (counter === undefined && !added.length) continue;
+        updates.push({ ...product, sellingPrice: counter ?? product.sellingPrice, sellingPriceOverridden: counter !== undefined ? true : product.sellingPriceOverridden, channelPrices: Object.keys(channels).length ? channels : undefined, updatedAt: new Date().toISOString() });
+        filled.push({ sku: product.sku, name: product.name, counter, channels: added });
+      }
+      if (!updates.length) { setPriceSyncReport({ filled: [], drift, unmatched }); setSaveNotice(`Không có giá nào để điền thêm.${drift.length ? ` ${drift.length} SKU lệch bảng giá — xem bên dưới.` : ""}`); return; }
+      if (!window.confirm(`Điền giá cho ${updates.length} SKU từ bảng giá SAPO (${book.length} dòng)?\n\nChỉ điền chỗ trống: giá quầy khi đang 0, giá sàn khi chưa có.${drift.length ? `\n${drift.length} SKU có giá quầy lệch bảng giá sẽ KHÔNG bị đè, chỉ liệt kê ra.` : ""}`)) return;
+      try { if (!uatMode) for (const product of updates) await saveCloudProduct(product); }
+      catch (error) { window.alert(error instanceof Error ? error.message : "Không lưu được giá."); return; }
+      const byId = new Map(updates.map((product) => [product.id, product]));
+      setState((current) => ({ ...current, products: current.products.map((product) => byId.get(product.id) || product), auditEvents: [auditEvent("product", updates[0].id, "update", `Đồng bộ giá từ bảng giá SAPO cho ${updates.length} SKU`), ...current.auditEvents] }));
+      setPriceSyncReport({ filled, drift, unmatched });
+      setSaveNotice(`Đã điền giá cho ${updates.length} SKU.${drift.length ? ` ${drift.length} SKU lệch bảng giá — giữ nguyên, xem bên dưới.` : ""}`);
+    } catch (error) { window.alert(error instanceof Error ? error.message : "Không đọc được bảng giá."); }
+    finally { setPriceSyncing(false); }
   }
 
   async function createManualProduct(source?: ProductMaster) {
@@ -916,7 +977,7 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
       </>}
 
       {tab === "products" && <>
-        <div className={styles.pageIntro}><div><span>PRODUCT & COGS</span><h2>Quản lý sản phẩm</h2><p>Danh mục Finance được đồng bộ tự động; sản phẩm tạo mới, bản clone và công thức được lưu theo môi trường hiện tại.</p></div><div className={styles.introActions}>{uatMode && <button className={styles.secondaryAction} disabled={uatSyncing} onClick={() => void syncFromProduction()}>{uatSyncing ? "Đang đồng bộ..." : "⟱ Đồng bộ từ Production"}</button>}<button onClick={() => void createManualProduct()}>+ Tạo sản phẩm</button></div></div>
+        <div className={styles.pageIntro}><div><span>PRODUCT & COGS</span><h2>Quản lý sản phẩm</h2><p>Danh mục Finance được đồng bộ tự động; sản phẩm tạo mới, bản clone và công thức được lưu theo môi trường hiện tại.</p></div><div className={styles.introActions}>{uatMode && <button className={styles.secondaryAction} disabled={uatSyncing} onClick={() => void syncFromProduction()}>{uatSyncing ? "Đang đồng bộ..." : "⟱ Đồng bộ từ Production"}</button>}<button className={styles.secondaryAction} disabled={priceSyncing} onClick={() => void syncPricesFromPriceBook()}>{priceSyncing ? "Đang đồng bộ..." : "₫ Đồng bộ giá từ bảng giá SAPO"}</button><button onClick={() => void createManualProduct()}>+ Tạo sản phẩm</button></div></div>{priceSyncReport && <div className={styles.priceSyncReport}><div><b>Kết quả đồng bộ giá</b><button type="button" onClick={() => setPriceSyncReport(undefined)}>Đóng</button></div>{priceSyncReport.filled.length > 0 && <p>Đã điền {priceSyncReport.filled.length} SKU: {priceSyncReport.filled.slice(0, 8).map((entry) => `${entry.sku}${entry.counter ? ` quầy ${money(entry.counter)}` : ""}${entry.channels.length ? ` +${entry.channels.join("/")}` : ""}`).join(" · ")}{priceSyncReport.filled.length > 8 ? ` … và ${priceSyncReport.filled.length - 8} SKU nữa` : ""}</p>}{priceSyncReport.drift.length > 0 && <div className={styles.driftList}><b>{priceSyncReport.drift.length} SKU có giá quầy lệch bảng giá SAPO — KHÔNG bị đè, cần Long quyết</b>{priceSyncReport.drift.map((entry) => <span key={entry.sku}>{entry.sku} · {entry.name}<em>app {money(entry.current)} ≠ bảng giá {money(entry.book)} ({entry.book > entry.current ? "+" : ""}{money(entry.book - entry.current)})</em></span>)}</div>}{priceSyncReport.unmatched.length > 0 && <p><b>{priceSyncReport.unmatched.length} SKU thiếu giá nhưng không tìm thấy tên trong bảng giá SAPO:</b> {priceSyncReport.unmatched.slice(0, 12).map((entry) => entry.sku).join(" · ")}{priceSyncReport.unmatched.length > 12 ? ` … +${priceSyncReport.unmatched.length - 12}` : ""}</p>}{!priceSyncReport.filled.length && !priceSyncReport.drift.length && !priceSyncReport.unmatched.length && <p>Bảng giá không có gì mới để điền.</p>}</div>}
         <div className={styles.toolbar}><label className={styles.search}><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Tìm SKU, sản phẩm, category..." /></label></div>
         <div className="inventory-category-tabs" role="tablist" aria-label="Lọc sản phẩm theo category"><button type="button" role="tab" aria-selected={!catalogCategory} className={!catalogCategory ? "selected" : ""} onClick={() => setCatalogCategory("")}>Tất cả ({filteredProducts.length})</button>{catalogCategories.map((category) => <button type="button" role="tab" key={category} aria-selected={catalogCategory === category} className={catalogCategory === category ? "selected" : ""} onClick={() => { setCatalogCategory(category); setOpenCatalogCategories([category]); }}>{category} ({filteredProducts.filter((product) => (product.category.trim() || "Chưa phân loại") === category).length})</button>)}</div>
         <div className={styles.catalogToolbar}>

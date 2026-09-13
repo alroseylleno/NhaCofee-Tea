@@ -525,12 +525,22 @@ function parseCounterPriceRows(file: { name: string }, rows: unknown[][]): Parse
   if (headerRowIndex < 0) throw new Error(`${file.name}: không tìm thấy bảng giá mặt hàng.`);
   const headers = rows[headerRowIndex].map(normalizedHeader);
   const records: FinanceCounterPrice[] = [];
+  // SAPO merges the name cell across an item's price tiers, so every row after
+  // the first carries a BLANK name — skipping those dropped every size-L price
+  // and left đối soát valuing multi-size items at their smallest tier. Carry the
+  // last name down and keep the tier from `Tên giá`.
+  let carriedName = "";
   for (const row of rows.slice(headerRowIndex + 1)) {
     if (normalizedHeader(row[0]) === "tong") break;
-    const name = firstText(row, headers, ["ten mat hang (*)", "ten mat hang", "ten mat hang, combo"]);
+    const rowName = firstText(row, headers, ["ten mat hang (*)", "ten mat hang", "ten mat hang, combo"]);
+    if (rowName) carriedName = rowName;
+    const name = carriedName;
+    const tier = firstText(row, headers, ["ten gia", "loai gia"]).trim().toUpperCase();
+    const size = ["S", "M", "L"].includes(tier) ? tier : "";
     const storePrice = firstNumber(row, headers, ["gia ban tai nha hang"]);
     if (!name || storePrice <= 0) continue;
     records.push({
+      size,
       name,
       storePrice,
       grabPrice: firstNumber(row, headers, ["gia ban grabfood"]) || undefined,
@@ -1908,10 +1918,15 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   /// Menu name → counter price. Names are matched accent- and case-insensitively
   /// because the invoice export and the price book capitalise differently.
   const counterPriceBook = useMemo(() => {
+    // Invoice line items carry no size, so a multi-size item cannot be resolved
+    // from the basket alone. Pick deliberately — an untiered row first, then
+    // S, M, L — instead of letting row order decide it silently.
+    const rank = (entry: FinanceCounterPrice) => ["", "S", "M", "L"].indexOf(entry.size || "");
     const book = new Map<string, FinanceCounterPrice>();
     for (const entry of state.counterPrices) {
       const key = normalizedHeader(entry.name);
-      if (!book.has(key)) book.set(key, entry);
+      const current = book.get(key);
+      if (!current || rank(entry) < rank(current)) book.set(key, entry);
     }
     return book;
   }, [state.counterPrices]);
