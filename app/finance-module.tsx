@@ -1536,7 +1536,11 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       date.setUTCDate(date.getUTCDate() - ((date.getUTCDay() + 6) % 7));
       return date.toISOString().slice(0, 10);
     };
-    const grabReports = periodGrabReports.filter((report) => (report.platform || "grab") === "grab"
+    // The from–to fields OVERRIDE the page-level period filter. Without this the
+    // panel could only ever narrow inside the selected month, so asking for a
+    // range that crosses months silently returned nothing.
+    const source = adsFrom || adsTo ? state.grabDailyReports : periodGrabReports;
+    const grabReports = source.filter((report) => (report.platform || "grab") === "grab"
       && (!adsFrom || report.reportDate >= adsFrom) && (!adsTo || report.reportDate <= adsTo));
     const groups = new Map<string, { key: string; ads: number; orders: number; revenue: number; payout: number; days: Set<string> }>();
     grabReports.forEach((report) => {
@@ -1583,13 +1587,14 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         fillRate: capTotal ? Math.min(100, bucket.ads / capTotal * 100) : 0,
       };
     });
-  }, [periodGrabReports, adsGranularity, adsDailyCap, adsFrom, adsTo]);
+  }, [periodGrabReports, state.grabDailyReports, adsGranularity, adsDailyCap, adsFrom, adsTo]);
   // Real cost of goods per Grab order, priced from Product Master recipes — the
   // same cogsFromItems the order detail uses. Items with no recipe yet are
   // skipped rather than blocking the whole basket, so the figure is a floor that
   // tightens as recipes get filled in; the coverage ratio is surfaced in the UI.
   const adsCogs = useMemo(() => {
-    const grabOrders = state.platformOrders.filter((order) => inRange(order.orderDate, bounds)
+    const rangeOverrides = Boolean(adsFrom || adsTo);
+    const grabOrders = state.platformOrders.filter((order) => (rangeOverrides || inRange(order.orderDate, bounds))
       && (!adsFrom || order.orderDate >= adsFrom) && (!adsTo || order.orderDate <= adsTo)
       && marketplaceKey(`${order.channelName} ${order.paymentMethod || ""} ${order.deliveryPartner || ""}`) === "grab");
     let total = 0;
@@ -1635,9 +1640,9 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   // Quick ranges anchor on the newest Grab report, not on today: the settlement
   // mail lands a day late, so "last 7 days" from today would clip the newest bar.
   const adsAnchorDate = useMemo(() => {
-    const dates = periodGrabReports.filter((report) => (report.platform || "grab") === "grab").map((report) => report.reportDate);
+    const dates = state.grabDailyReports.filter((report) => (report.platform || "grab") === "grab").map((report) => report.reportDate);
     return dates.length ? dates.reduce((latest, date) => (date > latest ? date : latest)) : bounds.end;
-  }, [periodGrabReports, bounds.end]);
+  }, [state.grabDailyReports, bounds.end]);
   const adsQuickStart = (days: number | null) => {
     if (days === null) return "";
     const start = new Date(`${adsAnchorDate}T00:00:00Z`);
@@ -2731,7 +2736,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           <article className={`${styles.revenuePanel} ${styles.adsEfficiencyPanel}`}>
             <div className={styles.revenuePanelTitle}>
               <div><span>HIỆU QUẢ QUẢNG CÁO · CPO</span><strong>{adsTotals.orders ? money(adsTotals.avgCpo) : "Chờ báo cáo sàn"}</strong></div>
-              <small>{adsTotals.orders ? `${money(adsTotals.ads)} quảng cáo · ${adsTotals.orders.toLocaleString("vi-VN")} đơn Grab · đã tiêu ${percent(adsTotals.fillRate)} trần` : "quảng cáo chỉ do Grab tính"}</small>
+              <small>{adsTotals.orders ? `${money(adsTotals.ads)} quảng cáo · ${adsTotals.orders.toLocaleString("vi-VN")} đơn Grab · đã tiêu ${percent(adsTotals.fillRate)} trần` : "quảng cáo chỉ do Grab tính"}{(adsFrom || adsTo) && <b className={styles.adsOverrideFlag}>Khoảng riêng — bỏ qua bộ lọc {bounds.label}</b>}</small>
             </div>
             <div className={styles.adsControls}>
               <div className={styles.adsGranularity}>

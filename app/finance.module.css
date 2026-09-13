@@ -951,6 +951,7 @@
 .adsQuickRange button { padding: 4px 11px; border: 0; background: #fff; color: var(--muted); font: 600 10px Arial, sans-serif; cursor: pointer; }
 .adsQuickRange button + button { border-left: 1px solid var(--line); }
 .adsQuickOn { background: #edf3e8 !important; color: #1e4b3f !important; }
+.adsOverrideFlag { display: block; margin-top: 3px; color: #b9433a; font: 700 9px Arial, sans-serif; }
 .adsRange input[type="date"] { width: 128px; cursor: pointer; }
 
 .adsRangeClear { padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: #fff; color: var(--muted); font: 600 10px Arial, sans-serif; cursor: pointer; }
