@@ -1632,6 +1632,30 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     return Math.max(adsBreakEvenCpo, ...values, 1) * 1.15;
   }, [adsEfficiency, adsBreakEvenCpo]);
   const adsHovered = adsHover ? adsEfficiency.find((bucket) => bucket.key === adsHover) : undefined;
+  // Quick ranges anchor on the newest Grab report, not on today: the settlement
+  // mail lands a day late, so "last 7 days" from today would clip the newest bar.
+  const adsAnchorDate = useMemo(() => {
+    const dates = periodGrabReports.filter((report) => (report.platform || "grab") === "grab").map((report) => report.reportDate);
+    return dates.length ? dates.reduce((latest, date) => (date > latest ? date : latest)) : bounds.end;
+  }, [periodGrabReports, bounds.end]);
+  const adsQuickStart = (days: number | null) => {
+    if (days === null) return "";
+    const start = new Date(`${adsAnchorDate}T00:00:00Z`);
+    start.setUTCDate(start.getUTCDate() - (days - 1));
+    return start.toISOString().slice(0, 10);
+  };
+  const openDatePicker = (event: React.SyntheticEvent<HTMLInputElement>) => {
+    const input = event.currentTarget as HTMLInputElement & { showPicker?: () => void };
+    try { input.showPicker?.(); } catch { /* unsupported or not user-activated */ }
+  };
+  const applyAdsQuickRange = (days: number | null) => {
+    if (days === null) { setAdsFrom(""); setAdsTo(""); return; }
+    const end = new Date(`${adsAnchorDate}T00:00:00Z`);
+    const start = new Date(end);
+    start.setUTCDate(start.getUTCDate() - (days - 1));
+    setAdsFrom(start.toISOString().slice(0, 10));
+    setAdsTo(adsAnchorDate);
+  };
   const grabReportSapoBase = periodGrabReports.reduce((sum, report) => sum + report.totalExpectedSapo, 0);
   const grabMarketingPerOrder = grabReportOrderCount ? grabMarketingTotal / grabReportOrderCount : 0;
   const grabMarketingRate = grabReportSapoBase ? grabMarketingTotal / grabReportSapoBase * 100 : 0;
@@ -2716,9 +2740,15 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 ))}
               </div>
               <div className={styles.adsRange}>
-                <label><span>Từ</span><input type="date" value={adsFrom} max={adsTo || undefined} onChange={(event) => setAdsFrom(event.target.value)} /></label>
-                <label><span>Đến</span><input type="date" value={adsTo} min={adsFrom || undefined} onChange={(event) => setAdsTo(event.target.value)} /></label>
-                {(adsFrom || adsTo) && <button type="button" className={styles.adsRangeClear} onClick={() => { setAdsFrom(""); setAdsTo(""); }}>Bỏ lọc</button>}
+                <div className={styles.adsQuickRange}>
+                  {([[7, "7 ngày"], [14, "14 ngày"], [30, "30 ngày"], [null, "Toàn kỳ"]] as const).map(([days, label]) => (
+                    <button key={label} type="button" className={(days === null ? !adsFrom && !adsTo : adsFrom === adsQuickStart(days)) ? styles.adsQuickOn : undefined} onClick={() => applyAdsQuickRange(days)}>{label}</button>
+                  ))}
+                </div>
+                {/* Chrome only opens the calendar from the tiny icon, Safari has no
+                    picker at all — showPicker on click makes the whole field work. */}
+                <label><span>Từ</span><input type="date" value={adsFrom} max={adsTo || undefined} onClick={openDatePicker} onFocus={openDatePicker} onChange={(event) => setAdsFrom(event.target.value)} /></label>
+                <label><span>Đến</span><input type="date" value={adsTo} min={adsFrom || undefined} onClick={openDatePicker} onFocus={openDatePicker} onChange={(event) => setAdsTo(event.target.value)} /></label>
                 <label className={styles.adsCapField}><span>Trần/ngày</span><input type="number" min={0} step={10000} value={adsDailyCap} onChange={(event) => setAdsDailyCap(Math.max(0, Number(event.target.value) || 0))} /></label>
               </div>
             </div>

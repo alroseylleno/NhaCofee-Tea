@@ -946,7 +946,13 @@
 .adsRange label { display: inline-flex; gap: 6px; align-items: center; }
 .adsRange span { color: var(--muted); font: 9px Arial, sans-serif; letter-spacing: .06em; text-transform: uppercase; }
 .adsRange input { padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; font: 500 11px Arial, sans-serif; font-variant-numeric: tabular-nums; }
-.adsCapField input { width: 92px; text-align: right; }
+.adsCapField input { width: 92px; text-align: right; cursor: text; }
+.adsQuickRange { display: inline-flex; overflow: hidden; border: 1px solid var(--line); border-radius: 999px; }
+.adsQuickRange button { padding: 4px 11px; border: 0; background: #fff; color: var(--muted); font: 600 10px Arial, sans-serif; cursor: pointer; }
+.adsQuickRange button + button { border-left: 1px solid var(--line); }
+.adsQuickOn { background: #edf3e8 !important; color: #1e4b3f !important; }
+.adsRange input[type="date"] { width: 128px; cursor: pointer; }
+
 .adsRangeClear { padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: #fff; color: var(--muted); font: 600 10px Arial, sans-serif; cursor: pointer; }
 .adsChartBody { margin-top: 16px; }
 .adsCapRow, .adsAxisRow { display: flex; }
