@@ -94,11 +94,14 @@ export type SalesChannel = "counter" | OnlineSalesChannel;
 /// not from the platforms' published rate cards:
 ///   GTGT 3% + TNCN 1,5% = 4,5% on all three, commission on top of that.
 /// Blended rates are forbidden — each sàn is charged at its own commission.
+/// These rates cover commission and tax ONLY. Seller-funded promotions and
+/// platform advertising are billed separately (Grab bills ads per DAY, not per
+/// order), so a margin computed here is a ceiling, not the money finally kept.
 export const SALES_CHANNELS: { key: SalesChannel; label: string; netRate: number; note: string }[] = [
-  { key: "counter", label: "Quầy", netRate: 1, note: "Bán tại quầy · không hoa hồng, không thuế sàn" },
-  { key: "grab", label: "GrabFood", netRate: 1 - 0.24538 - 0.045, note: "Hoa hồng 24,538% + thuế 4,5% → về tay 71,0%" },
-  { key: "shopee", label: "ShopeeFood", netRate: 1 - 0.2855 - 0.045, note: "Hoa hồng 28,55% + thuế 4,5% → về tay 67,0%" },
-  { key: "greensm", label: "GreenSM", netRate: 1 - 0.045, note: "Hoa hồng 0% + thuế 4,5% → về tay 95,5%" },
+  { key: "counter", label: "Quầy", netRate: 1, note: "Không hoa hồng, không thuế sàn (chưa gồm CTKM)" },
+  { key: "grab", label: "GrabFood", netRate: 1 - 0.24538 - 0.045, note: "Hoa hồng 24,538% + thuế 4,5% (chưa gồm CTKM & MKT) → về tay 71,0%" },
+  { key: "shopee", label: "ShopeeFood", netRate: 1 - 0.2855 - 0.045, note: "Hoa hồng 28,55% + thuế 4,5% (chưa gồm CTKM & MKT) → về tay 67,0%" },
+  { key: "greensm", label: "GreenSM", netRate: 1 - 0.045, note: "Hoa hồng 0% + thuế 4,5% (chưa gồm CTKM & MKT) → về tay 95,5%" },
 ];
 
 export function normalizeChannelPrices(value: unknown): Partial<Record<OnlineSalesChannel, number>> | undefined {
