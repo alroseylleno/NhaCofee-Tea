@@ -899,6 +899,13 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const [expenseCategory, setExpenseCategory] = useState<ExpenseCategory>("fixed");
   const [reportView, setReportView] = useState<ReportView>("pnl");
   const [revenueSubTab, setRevenueSubTab] = useState<RevenueSubTab>("overview");
+  // Ads-efficiency dashboard: granularity + the daily budget ceiling the owner set in Grab Ads.
+  const [adsGranularity, setAdsGranularity] = useState<"daily" | "weekly" | "monthly">("daily");
+  const [adsDailyCap, setAdsDailyCap] = useState(200000);
+  // Empty means "use the whole selected period"; the inputs below narrow it further.
+  const [adsFrom, setAdsFrom] = useState("");
+  const [adsTo, setAdsTo] = useState("");
+  const [adsHover, setAdsHover] = useState<string | null>(null);
   const [showExpenseForm, setShowExpenseForm] = useState(false);
   const [savingExpense, setSavingExpense] = useState(false);
   const [importingExpenses, setImportingExpenses] = useState(false);
@@ -1520,6 +1527,111 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const periodGrabReports = useMemo(() => state.grabDailyReports.filter((report) => inRange(report.reportDate, bounds)).sort((left, right) => right.reportDate.localeCompare(left.reportDate)), [state.grabDailyReports, bounds]);
   const grabMarketingTotal = periodGrabReports.reduce((sum, report) => sum + report.totalMarketing, 0);
   const grabReportOrderCount = periodGrabReports.reduce((sum, report) => sum + report.orderCount, 0);
+  // Ads efficiency: only Grab bills day-level advertising, so CPO is measured on
+  // Grab reports alone. Marginal CPO compares each bucket with the previous one —
+  // that is the number that decides whether spending more is still worth it.
+  const adsEfficiency = useMemo(() => {
+    const mondayOf = (iso: string) => {
+      const date = new Date(`${iso}T00:00:00Z`);
+      date.setUTCDate(date.getUTCDate() - ((date.getUTCDay() + 6) % 7));
+      return date.toISOString().slice(0, 10);
+    };
+    const grabReports = periodGrabReports.filter((report) => (report.platform || "grab") === "grab"
+      && (!adsFrom || report.reportDate >= adsFrom) && (!adsTo || report.reportDate <= adsTo));
+    const groups = new Map<string, { key: string; ads: number; orders: number; revenue: number; payout: number; days: Set<string> }>();
+    grabReports.forEach((report) => {
+      const key = adsGranularity === "daily" ? report.reportDate : adsGranularity === "weekly" ? mondayOf(report.reportDate) : monthKey(report.reportDate);
+      const bucket = groups.get(key) || { key, ads: 0, orders: 0, revenue: 0, payout: 0, days: new Set<string>() };
+      bucket.ads += report.totalMarketing;
+      bucket.orders += report.orderCount;
+      bucket.revenue += report.totalOrderValue;
+      bucket.payout += report.totalPayout;
+      bucket.days.add(report.reportDate);
+      groups.set(key, bucket);
+    });
+    const daysInBucket = (key: string) => {
+      if (adsGranularity === "daily") return 1;
+      if (adsGranularity === "weekly") return 7;
+      const [year, month] = key.split("-").map(Number);
+      return new Date(Date.UTC(year, month, 0)).getUTCDate();
+    };
+    const ordered = [...groups.values()].sort((left, right) => left.key.localeCompare(right.key));
+    return ordered.map((bucket, index) => {
+      const previous = index > 0 ? ordered[index - 1] : undefined;
+      const deltaAds = previous ? bucket.ads - previous.ads : 0;
+      const deltaOrders = previous ? bucket.orders - previous.orders : 0;
+      // Marginal CPO works in BOTH directions: scaling up tells the cost of the
+      // orders gained, scaling down tells what the orders lost were costing. Both
+      // give a positive ratio. A negative ratio means spend and orders moved in
+      // opposite directions — no usable relationship, so leave it blank rather
+      // than print a number that looks precise and means nothing.
+      const marginalRatio = previous && Math.abs(deltaOrders) >= 0.5 ? deltaAds / deltaOrders : undefined;
+      const marginalCpo = marginalRatio !== undefined && Number.isFinite(marginalRatio) && marginalRatio > 0 ? marginalRatio : undefined;
+      const capTotal = adsDailyCap * daysInBucket(bucket.key);
+      return {
+        key: bucket.key,
+        label: adsGranularity === "monthly" ? bucket.key.slice(5) + "/" + bucket.key.slice(2, 4) : dateLabel(bucket.key).slice(0, 5),
+        fullLabel: adsGranularity === "daily" ? dateLabel(bucket.key) : adsGranularity === "weekly" ? `Tuần từ ${dateLabel(bucket.key)}` : `Tháng ${bucket.key}`,
+        ads: bucket.ads,
+        orders: bucket.orders,
+        revenue: bucket.revenue,
+        payout: bucket.payout,
+        activeDays: bucket.days.size,
+        avgCpo: bucket.orders ? bucket.ads / bucket.orders : undefined,
+        marginalCpo,
+        capTotal,
+        fillRate: capTotal ? Math.min(100, bucket.ads / capTotal * 100) : 0,
+      };
+    });
+  }, [periodGrabReports, adsGranularity, adsDailyCap, adsFrom, adsTo]);
+  // Real cost of goods per Grab order, priced from Product Master recipes — the
+  // same cogsFromItems the order detail uses. Items with no recipe yet are
+  // skipped rather than blocking the whole basket, so the figure is a floor that
+  // tightens as recipes get filled in; the coverage ratio is surfaced in the UI.
+  const adsCogs = useMemo(() => {
+    const grabOrders = state.platformOrders.filter((order) => inRange(order.orderDate, bounds)
+      && (!adsFrom || order.orderDate >= adsFrom) && (!adsTo || order.orderDate <= adsTo)
+      && marketplaceKey(`${order.channelName} ${order.paymentMethod || ""} ${order.deliveryPartner || ""}`) === "grab");
+    let total = 0;
+    let ordersPriced = 0;
+    let itemsPriced = 0;
+    let itemsSeen = 0;
+    grabOrders.forEach((order) => {
+      const basket = cogsFromItems(order);
+      if (!basket) return;
+      const itemCount = order.items?.length || 0;
+      itemsSeen += itemCount;
+      itemsPriced += itemCount - basket.missing.length;
+      if (basket.total > 0) { total += basket.total; ordersPriced += 1; }
+    });
+    return {
+      perOrder: ordersPriced ? total / ordersPriced : 0,
+      ordersPriced,
+      ordersSeen: grabOrders.length,
+      coverage: itemsSeen ? itemsPriced / itemsSeen * 100 : 0,
+    };
+  }, [state.platformOrders, bounds, adsFrom, adsTo, cogsBook]);
+  // Break-even marginal CPO = what one more order actually puts in the till:
+  // the settlement the sàn really transferred (before advertising) minus the
+  // basket's real cost of goods. No assumed commission rate, no flat COGS guess.
+  const adsBreakEvenCpo = useMemo(() => {
+    const totalOrders = adsEfficiency.reduce((sum, bucket) => sum + bucket.orders, 0);
+    const totalPayout = adsEfficiency.reduce((sum, bucket) => sum + bucket.payout, 0);
+    if (!totalOrders) return 0;
+    return totalPayout / totalOrders - adsCogs.perOrder;
+  }, [adsEfficiency, adsCogs]);
+  const adsTotals = useMemo(() => {
+    const ads = adsEfficiency.reduce((sum, bucket) => sum + bucket.ads, 0);
+    const orders = adsEfficiency.reduce((sum, bucket) => sum + bucket.orders, 0);
+    const payout = adsEfficiency.reduce((sum, bucket) => sum + bucket.payout, 0);
+    const cap = adsEfficiency.reduce((sum, bucket) => sum + bucket.capTotal, 0);
+    return { ads, orders, payout, cap, avgCpo: orders ? ads / orders : 0, avgOrderValue: orders ? payout / orders : 0, fillRate: cap ? Math.min(100, ads / cap * 100) : 0 };
+  }, [adsEfficiency]);
+  const adsChartMax = useMemo(() => {
+    const values = adsEfficiency.flatMap((bucket) => [bucket.avgCpo, bucket.marginalCpo]).filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    return Math.max(adsBreakEvenCpo, ...values, 1) * 1.15;
+  }, [adsEfficiency, adsBreakEvenCpo]);
+  const adsHovered = adsHover ? adsEfficiency.find((bucket) => bucket.key === adsHover) : undefined;
   const grabReportSapoBase = periodGrabReports.reduce((sum, report) => sum + report.totalExpectedSapo, 0);
   const grabMarketingPerOrder = grabReportOrderCount ? grabMarketingTotal / grabReportOrderCount : 0;
   const grabMarketingRate = grabReportSapoBase ? grabMarketingTotal / grabReportSapoBase * 100 : 0;
@@ -2588,26 +2700,75 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           <article><span>Giảm giá trung bình</span><strong>{settledEntries.length ? money(avgDiscount) : "-"}</strong><small>{settledEntries.length ? `${percent(avgListPrice ? avgDiscount / avgListPrice * 100 : 0)} giá bán · mỗi đơn` : "chờ báo cáo sàn"}</small></article>
         </div>
         <div className={styles.revenueInsightGrid}>
-          <article className={styles.revenuePanel}>
+          <article className={`${styles.revenuePanel} ${styles.fullSpanPanel}`}>
             <div className={styles.revenuePanelTitle}><div><span>DOANH THU THEO SÀN</span><strong>{channelPerformance.length ? `${channelPerformance.length} sàn đang bán` : "Chờ Danh sách hóa đơn"}</strong></div><small>Theo Nguồn đơn</small></div>
             {channelPerformance.length ? <div className={styles.categoryBars}>{channelPerformance.map((entry) => <div key={entry.name}><div><span><b>{entry.name}</b><small>{entry.successfulOrders.toLocaleString("vi-VN")} đơn · TB {money(entry.averageOrder)}{entry.cancelledOrders ? ` · ${entry.cancelledOrders} hủy` : ""}</small></span><strong>{money(entry.revenue)}</strong></div><div><i style={{ width: `${entry.revenue / maxPlatformChannelRevenue * 100}%` }} /></div></div>)}</div> : <div className={styles.panelEmpty}>Import file Danh sách hóa đơn trong bộ 4 file SAPO để xem cơ cấu GrabFood, ShopeeFood và Xanh/Green Food.</div>}
           </article>
-          <article className={`${styles.revenuePanel} ${styles.platformTrendPanel}`}>
-            <div className={styles.revenuePanelTitle}><div><span>NHỊP DOANH THU SÀN</span><strong>{platformDailyTrend.length ? `${platformDailyTrend.length} ngày có đơn` : "Chờ Danh sách hóa đơn"}</strong></div><small>{money(platformOrderRevenue)}</small></div>
-            {platformDailyTrend.length ? <div className={styles.miniBars}>{platformDailyTrend.map((entry) => <div className={styles.barColumn} key={entry.date} title={`${dateLabel(entry.date)} · ${entry.orders} đơn · ${money(entry.revenue)}`}><div className={styles.barTrack}><i style={{ height: `${Math.max(3, entry.revenue / maxPlatformDailyRevenue * 100)}%` }} /></div><span>{Number(entry.date.slice(8, 10))}</span></div>)}</div> : <div className={styles.panelEmpty}>Chưa có dữ liệu hóa đơn nền tảng trong kỳ đang chọn.</div>}
-            <p className={styles.metricDisclaimer}>Mỗi cột là một ngày có đơn sàn. Di chuột để xem số đơn và doanh thu SAPO của ngày đó.</p>
+          <article className={`${styles.revenuePanel} ${styles.adsEfficiencyPanel}`}>
+            <div className={styles.revenuePanelTitle}>
+              <div><span>HIỆU QUẢ QUẢNG CÁO · CPO</span><strong>{adsTotals.orders ? money(adsTotals.avgCpo) : "Chờ báo cáo sàn"}</strong></div>
+              <small>{adsTotals.orders ? `${money(adsTotals.ads)} quảng cáo · ${adsTotals.orders.toLocaleString("vi-VN")} đơn Grab · đã tiêu ${percent(adsTotals.fillRate)} trần` : "quảng cáo chỉ do Grab tính"}</small>
+            </div>
+            <div className={styles.adsControls}>
+              <div className={styles.adsGranularity}>
+                {([["daily", "Ngày"], ["weekly", "Tuần"], ["monthly", "Tháng"]] as const).map(([value, label]) => (
+                  <button key={value} type="button" className={adsGranularity === value ? styles.adsGranularityOn : undefined} onClick={() => setAdsGranularity(value)}>{label}</button>
+                ))}
+              </div>
+              <div className={styles.adsRange}>
+                <label><span>Từ</span><input type="date" value={adsFrom} max={adsTo || undefined} onChange={(event) => setAdsFrom(event.target.value)} /></label>
+                <label><span>Đến</span><input type="date" value={adsTo} min={adsFrom || undefined} onChange={(event) => setAdsTo(event.target.value)} /></label>
+                {(adsFrom || adsTo) && <button type="button" className={styles.adsRangeClear} onClick={() => { setAdsFrom(""); setAdsTo(""); }}>Bỏ lọc</button>}
+                <label className={styles.adsCapField}><span>Trần/ngày</span><input type="number" min={0} step={10000} value={adsDailyCap} onChange={(event) => setAdsDailyCap(Math.max(0, Number(event.target.value) || 0))} /></label>
+              </div>
+            </div>
+            {adsEfficiency.length ? <>
+              <div className={styles.adsChartBody} onMouseLeave={() => setAdsHover(null)}>
+                <div className={styles.adsCapRow}>{adsEfficiency.map((bucket) => <span key={bucket.key}>{Math.round(bucket.capTotal / 1000).toLocaleString("vi-VN")}k</span>)}</div>
+                <div className={styles.adsPlot}>
+                  <div className={styles.adsBars}>{adsEfficiency.map((bucket) => (
+                    <div key={bucket.key} className={`${styles.adsBarCol}${adsHover === bucket.key ? ` ${styles.adsBarColOn}` : ""}`} onMouseEnter={() => setAdsHover(bucket.key)}>
+                      <div className={styles.adsBarTrack}><i style={{ height: `${bucket.fillRate}%` }} /></div>
+                    </div>
+                  ))}</div>
+                  <svg className={styles.adsLines} viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                    {adsBreakEvenCpo > 0 && adsBreakEvenCpo < adsChartMax && (
+                      <line x1="0" y1={100 - adsBreakEvenCpo / adsChartMax * 100} x2="100" y2={100 - adsBreakEvenCpo / adsChartMax * 100} className={styles.adsBreakEvenLine} />
+                    )}
+                    {(["avgCpo", "marginalCpo"] as const).map((field) => {
+                      const points = adsEfficiency.map((bucket, index) => ({ value: bucket[field], x: (index + 0.5) / adsEfficiency.length * 100 }))
+                        .filter((point): point is { value: number; x: number } => typeof point.value === "number");
+                      if (!points.length) return null;
+                      const d = points.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(2)} ${(100 - point.value / adsChartMax * 100).toFixed(2)}`).join(" ");
+                      return <g key={field}>
+                        {points.length > 1 && <path d={d} className={field === "avgCpo" ? styles.adsLineAvg : styles.adsLineMarginal} />}
+                        {points.map((point) => <circle key={point.x} cx={point.x} cy={100 - point.value / adsChartMax * 100} r="1.1" className={field === "avgCpo" ? styles.adsDotOnAvg : styles.adsDotOnMarginal} />)}
+                      </g>;
+                    })}
+                  </svg>
+                  {adsHovered && <div className={styles.adsTooltip} style={{ left: `${Math.min(88, Math.max(12, (adsEfficiency.indexOf(adsHovered) + 0.5) / adsEfficiency.length * 100))}%` }}>
+                    <b>{adsHovered.fullLabel}</b>
+                    <div><i className={styles.adsDotBar} /><span>Đã tiêu quảng cáo</span><em>{money(adsHovered.ads)} / {money(adsHovered.capTotal)} · {percent(adsHovered.fillRate)}</em></div>
+                    <div><i className={styles.adsDotAvg} /><span>CPO trung bình</span><em>{adsHovered.avgCpo === undefined ? "-" : money(adsHovered.avgCpo)}</em></div>
+                    <div><i className={styles.adsDotMarginal} /><span>CPO biên</span><em>{adsHovered.marginalCpo === undefined ? "không đo được" : money(adsHovered.marginalCpo)}</em></div>
+                    <div><i className={styles.adsDotBreakEven} /><span>Ngưỡng hoà vốn</span><em>{money(adsBreakEvenCpo)}</em></div>
+                    <small>{adsHovered.orders.toLocaleString("vi-VN")} đơn · quyết toán {money(adsHovered.payout)}{adsGranularity === "daily" ? "" : ` · ${adsHovered.activeDays} ngày có báo cáo`}</small>
+                  </div>}
+                </div>
+                <div className={styles.adsAxisRow}>{adsEfficiency.map((bucket) => <span key={bucket.key}>{bucket.label}</span>)}</div>
+                <div className={styles.adsChartScale}><span>Trục CPO: 0 – {money(adsChartMax)}</span><span>Cột = trần quảng cáo, phần đậm = đã tiêu</span></div>
+              </div>
+              <div className={styles.adsLegend}>
+                <span><i className={styles.adsDotBar} />Đã tiêu / trần</span>
+                <span><i className={styles.adsDotAvg} />CPO trung bình</span>
+                <span><i className={styles.adsDotMarginal} />CPO biên</span>
+                {adsBreakEvenCpo > 0 && <span><i className={styles.adsDotBreakEven} />Ngưỡng hoà vốn {money(adsBreakEvenCpo)}</span>}
+              </div>
+            </> : <div className={styles.panelEmpty}>Chưa có báo cáo Grab nào trong khoảng đã chọn. Quét thư mục hoặc nới khoảng thời gian.</div>}
+            <p className={styles.metricDisclaimer}>CPO trung bình = chi quảng cáo ÷ số đơn. CPO biên = (chi kỳ này − chi kỳ trước) ÷ (đơn kỳ này − đơn kỳ trước) — con số quyết định có nên tăng ngân sách hay không; còn lãi chừng nào nó nằm dưới ngưỡng hoà vốn. Ngưỡng hoà vốn = tiền sàn thực chuyển về mỗi đơn (quyết toán {money(adsTotals.avgOrderValue)}/đơn, trước quảng cáo) trừ giá vốn thật của giỏ hàng {money(adsCogs.perOrder)}/đơn, lấy từ công thức ở tab Sản phẩm ({adsCogs.ordersPriced}/{adsCogs.ordersSeen} đơn có giá vốn · {percent(adsCogs.coverage)} số món đã có công thức; món chưa có công thức được bỏ qua nên giá vốn này là mức sàn, sẽ sát hơn khi bạn nhập đủ công thức). Cột nền là trần quảng cáo bạn đặt trong Grab Ads — báo cáo quyết toán không chứa con số này nên phải khai ở ô Trần/ngày. Chỉ tính đơn và quảng cáo Grab; ShopeeFood và GreenSM không tính phí quảng cáo theo ngày.</p>
           </article>
         </div>
         <div className={styles.revenueInsightGrid}>
-          <article className={`${styles.revenuePanel} ${styles.platformTakeCard}`}>
-            <div className={styles.revenuePanelTitle}><div><span>PHÍ NỀN TẢNG / GIAO HÀNG</span><strong>{money(reportedPartnerFees)}</strong></div><small>{percent(platformTakeRate)} {deliveryRevenue ? "doanh thu giao hàng" : "doanh thu thực"}</small></div>
-            <div className={styles.platformTakeBody}>
-              <div className={styles.platformTakeRing} style={{ background: `conic-gradient(#e87d5c 0 ${Math.min(100, platformTakeRate)}%, #e8ede5 ${Math.min(100, platformTakeRate)}% 100%)` }}><i><strong>{percent(platformTakeRate)}</strong><small>bị giữ lại</small></i></div>
-              <div className={styles.platformTakeStats}><div><span>{deliveryRevenue ? "DT giao hàng/nền tảng" : "DT thực làm mẫu số"}</span><b>{money(platformTakeBase)}</b></div><div><span>Doanh thu sau nhóm phí</span><b>{money(revenueAfterPlatformFees)}</b></div>{grabService && <div><span>Riêng Grab Food</span><b>{money(grabService.revenue)}</b></div>}<div><span>Ngày phát sinh phí</span><b>{revenueDataset.length ? `${platformFeeDays}/${revenueDataset.length}` : "-"}</b></div><div><span>Phí đối tác / tiền hàng</span><b>{percent(partnerCommissionRate)}</b></div></div>
-            </div>
-            <div className={styles.platformFeeList}>{platformFeeComponents.map((entry) => <div key={entry.label}><div><span>{entry.label}<small>{percent(entry.shareOfFees)} tổng phí · {percent(entry.shareOfRevenue)} doanh thu</small></span><b>{money(entry.value)}</b></div><div><i style={{ width: `${entry.value / maxPlatformFeeComponent * 100}%` }} /></div></div>)}</div>
-            <p className={styles.metricDisclaimer}>{deliveryRevenue ? "Tỷ lệ phí dùng doanh thu của các hình thức giao hàng/nền tảng làm mẫu số." : "Chưa có file Hình thức phục vụ nên tạm dùng toàn bộ doanh thu thực làm mẫu số."} Các cột phí trong báo cáo Sapo đang gộp nhiều đối tác, vì vậy không quy toàn bộ phí cho riêng Grab.</p>
-          </article>
           <article className={`${styles.revenuePanel} ${styles.marketplaceFeeCard}`}>
             <div className={styles.revenuePanelTitle}><div><span>PHÍ SÀN THEO NỀN TẢNG</span><strong>{marketplaceReconciledReported ? `${percent(marketplaceBlendedFeeRate)} bình quân` : "Chưa có đối soát"}</strong></div><small>{money(marketplaceMeasuredFee)} phí đo được</small></div>
             <div className={styles.marketplaceFeeList}>{marketplaceFeeByChannel.map((entry) => <div className={styles.marketplaceFeeRow} key={entry.key}>
@@ -2630,28 +2791,6 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                     </>}
             </div>)}</div>
             <p className={styles.metricDisclaimer}>Phí sàn không có trong file hóa đơn SAPO — cột Phí dịch vụ và Phí GH của đơn sàn đều bằng 0. Con số ở đây đo bằng chính đối soát: SAPO ghi nhận trừ tiền thực nhận. Đối soát càng nhiều đơn thì tỷ lệ càng đúng.</p>
-          </article>
-        </div>
-        <div className={styles.revenueInsightGrid}>
-          <article className={styles.revenuePanel}>
-            <div className={styles.revenuePanelTitle}><div><span>CHÊNH LỆCH SAPO ↔ THỰC NHẬN SÀN</span><strong>{reconciledEntries.length ? percent(gapRateAverage) : "Chờ đối soát"}</strong></div><small>tỉ lệ lệch trung bình</small></div>
-            {reconciliationWeekly.length ? <>
-              <div className={styles.marketplaceFeeStats}>
-                <div><span>Tỉ lệ lệch TB</span><b>{percent(gapRateAverage)}</b></div>
-                <div><span>SAPO ghi nhận</span><b>{money(reportedRevenue)}</b></div>
-                <div><span>Thực nhận</span><b>{money(receivedRevenue)}</b></div>
-                <div><span>Chênh lệch</span><b className={styles.negativeCell}>−{money(reportedRevenue - receivedRevenue)}</b></div>
-              </div>
-              <div className={styles.weekStack}>{reconciliationWeekly.map((week) => <div key={week.week}>
-                <div className={styles.weekStackHead}><span>Tuần {dateLabel(week.week).slice(0, 5)}</span><b>{percent(week.gapRate)} lệch</b></div>
-                <div className={styles.weekStackBar} title={`SAPO ${money(week.reported)} · thực nhận ${money(week.received)} · ${week.orders} đơn`}>
-                  <i className={styles.segKept} style={{ width: `${Math.max(0, Math.min(100, week.receivedRate))}%` }}><em>{percent(week.receivedRate)}</em></i>
-                  <i className={styles.segGap} style={{ width: `${Math.max(0, Math.min(100, week.gapRate))}%` }} />
-                </div>
-              </div>)}</div>
-              <div className={styles.weekLegend}><span><i className={styles.segKept} />Thực nhận</span><span><i className={styles.segGap} />Sàn giữ lại</span></div>
-            </> : <div className={styles.panelEmpty}>Chưa có đơn nào được đối soát trong kỳ. Upload báo cáo sàn để thấy tỉ lệ lệch theo tuần.</div>}
-            <p className={styles.metricDisclaimer}>Mỗi cột là một tuần, chia theo tỉ lệ trên số SAPO ghi nhận: phần xanh là tiền thực nhận về, phần đỏ là toàn bộ phí và thuế sàn giữ lại. Chưa gồm chi phí quảng cáo vì Grab trừ khoản đó theo ngày.</p>
           </article>
           <article className={styles.revenuePanel}>
             <div className={styles.revenuePanelTitle}><div><span>CHI PHÍ MARKETING GRAB</span><strong>{periodGrabReports.length ? money(grabMarketingTotal) : "Chờ báo cáo PDF"}</strong></div><small>{periodGrabReports.filter((report) => (report.platform || "grab") === "grab").length.toLocaleString("vi-VN")} ngày có báo cáo</small></div>

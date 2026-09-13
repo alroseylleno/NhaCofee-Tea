@@ -934,3 +934,52 @@
   .targetPercent { justify-self: start; }
   .kpiGrid { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* --- Ads efficiency (CPO) dashboard — bars = budget ceiling, lines = CPO --- */
+.adsEfficiencyPanel { grid-column: 1 / -1; }
+.adsControls { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; justify-content: space-between; margin-top: 12px; }
+.adsGranularity { display: inline-flex; overflow: hidden; border: 1px solid var(--line); border-radius: 999px; }
+.adsGranularity button { padding: 5px 14px; border: 0; background: #fff; color: var(--muted); font: 600 11px Arial, sans-serif; cursor: pointer; }
+.adsGranularity button + button { border-left: 1px solid var(--line); }
+.adsGranularityOn { background: #1e4b3f !important; color: #fff !important; }
+.adsRange { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.adsRange label { display: inline-flex; gap: 6px; align-items: center; }
+.adsRange span { color: var(--muted); font: 9px Arial, sans-serif; letter-spacing: .06em; text-transform: uppercase; }
+.adsRange input { padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; font: 500 11px Arial, sans-serif; font-variant-numeric: tabular-nums; }
+.adsCapField input { width: 92px; text-align: right; }
+.adsRangeClear { padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: #fff; color: var(--muted); font: 600 10px Arial, sans-serif; cursor: pointer; }
+.adsChartBody { margin-top: 16px; }
+.adsCapRow, .adsAxisRow { display: flex; }
+.adsCapRow span, .adsAxisRow span { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--muted); font: 9px Arial, sans-serif; font-variant-numeric: tabular-nums; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.adsCapRow span { font-weight: 700; color: #8d8a80; }
+.adsAxisRow { margin-top: 6px; }
+.adsPlot { position: relative; height: 170px; }
+.adsBars { display: flex; height: 100%; }
+.adsBarCol { display: flex; flex: 1 1 0; min-width: 0; padding: 0 2px; align-items: flex-end; }
+.adsBarTrack { position: relative; width: 100%; height: 100%; overflow: hidden; border-radius: 5px 5px 0 0; background: #edf3e8; }
+.adsBarTrack i { position: absolute; bottom: 0; left: 0; width: 100%; background: linear-gradient(#9dbb9d, #cfe0cd); }
+.adsBarColOn .adsBarTrack { background: #e2ebdd; }
+.adsBarColOn .adsBarTrack i { background: linear-gradient(#7fa57f, #b6ceb3); }
+.adsLines { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.adsLineAvg { fill: none; stroke: #1e4b3f; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.adsLineMarginal { fill: none; stroke: #e87d5c; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-dasharray: 5 4; }
+.adsBreakEvenLine { stroke: #b9433a; stroke-width: 1.5; vector-effect: non-scaling-stroke; stroke-dasharray: 3 4; opacity: .8; }
+.adsDotOnAvg { fill: #1e4b3f; vector-effect: non-scaling-stroke; }
+.adsDotOnMarginal { fill: #e87d5c; vector-effect: non-scaling-stroke; }
+.adsTooltip { position: absolute; top: calc(100% + 26px); z-index: 5; width: 250px; padding: 9px 11px; transform: translateX(-50%); border: 1px solid var(--line); border-radius: 10px; background: #fff; box-shadow: 0 6px 18px #17312b22; pointer-events: none; }
+.adsTooltip b { display: block; margin-bottom: 6px; font: 700 11px Arial, sans-serif; }
+.adsTooltip > div { display: flex; gap: 6px; align-items: center; margin-top: 3px; }
+.adsTooltip > div span { flex: 1 1 auto; color: var(--muted); font: 10px Arial, sans-serif; }
+.adsTooltip > div em { font: 700 10px Arial, sans-serif; font-style: normal; font-variant-numeric: tabular-nums; }
+.adsTooltip small { display: block; margin-top: 7px; padding-top: 6px; border-top: 1px solid var(--line); color: var(--muted); font: 9px Arial, sans-serif; }
+.adsChartScale { display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; margin-top: 8px; color: var(--muted); font: 9px Arial, sans-serif; }
+.adsLegend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; color: var(--muted); font: 10px Arial, sans-serif; }
+.adsLegend span { display: inline-flex; gap: 6px; align-items: center; }
+.adsLegend i, .adsTooltip i { flex: 0 0 auto; width: 14px; height: 3px; border-radius: 2px; }
+.adsDotAvg { background: #1e4b3f; }
+.adsDotMarginal { background: #e87d5c; }
+.adsDotBreakEven { background: #b9433a; opacity: .8; }
+.adsDotBar { background: #9dbb9d; height: 9px !important; border-radius: 2px; }
+
+/* Panel left alone in an insight grid after a neighbour was removed. */
+.fullSpanPanel { grid-column: 1 / -1; }
