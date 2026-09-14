@@ -1583,6 +1583,10 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       // than print a number that looks precise and means nothing.
       const marginalRatio = previous && Math.abs(deltaOrders) >= 0.5 ? deltaAds / deltaOrders : undefined;
       const marginalCpo = marginalRatio !== undefined && Number.isFinite(marginalRatio) && marginalRatio > 0 ? marginalRatio : undefined;
+      // Spending more and getting no extra orders is not missing data — it is the
+      // saturation point, and it is the most actionable reading on this chart.
+      // Blanking it the same way as "no comparable change" hid that entirely.
+      const saturated = Boolean(previous && deltaAds > 0 && deltaOrders <= 0);
       const capTotal = adsDailyCap * daysInBucket(bucket.key);
       return {
         key: bucket.key,
@@ -1595,6 +1599,9 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         activeDays: bucket.days.size,
         avgCpo: bucket.orders ? bucket.ads / bucket.orders : undefined,
         marginalCpo,
+        saturated,
+        deltaAds,
+        deltaOrders,
         capTotal,
         fillRate: capTotal ? Math.min(100, bucket.ads / capTotal * 100) : 0,
       };
@@ -2792,12 +2799,18 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                         {points.map((point) => <circle key={point.x} cx={point.x} cy={100 - point.value / adsChartMax * 100} r="1.1" className={field === "avgCpo" ? styles.adsDotOnAvg : styles.adsDotOnMarginal} />)}
                       </g>;
                     })}
+                    {adsEfficiency.map((bucket, index) => bucket.saturated ? (
+                      <g key={`sat-${bucket.key}`}>
+                        <line x1={(index + 0.5) / adsEfficiency.length * 100} y1="0" x2={(index + 0.5) / adsEfficiency.length * 100} y2="100" className={styles.adsSaturatedMark} />
+                        <circle cx={(index + 0.5) / adsEfficiency.length * 100} cy="3" r="1.6" className={styles.adsSaturatedDot} />
+                      </g>
+                    ) : null)}
                   </svg>
                   {adsHovered && <div className={styles.adsTooltip} style={{ left: `${Math.min(88, Math.max(12, (adsEfficiency.indexOf(adsHovered) + 0.5) / adsEfficiency.length * 100))}%` }}>
                     <b>{adsHovered.fullLabel}</b>
                     <div><i className={styles.adsDotBar} /><span>Đã tiêu quảng cáo</span><em>{money(adsHovered.ads)} / {money(adsHovered.capTotal)} · {percent(adsHovered.fillRate)}</em></div>
                     <div><i className={styles.adsDotAvg} /><span>CPO trung bình</span><em>{adsHovered.avgCpo === undefined ? "-" : money(adsHovered.avgCpo)}</em></div>
-                    <div><i className={styles.adsDotMarginal} /><span>CPO biên</span><em>{adsHovered.marginalCpo === undefined ? "không đo được" : money(adsHovered.marginalCpo)}</em></div>
+                    <div><i className={styles.adsDotMarginal} /><span>CPO biên</span><em className={adsHovered.saturated ? styles.adsSaturatedValue : ""}>{adsHovered.marginalCpo !== undefined ? money(adsHovered.marginalCpo) : adsHovered.saturated ? `bão hoà · +${money(adsHovered.deltaAds)}, ${adsHovered.deltaOrders > 0 ? "+" : ""}${adsHovered.deltaOrders} đơn` : "không đo được"}</em></div>
                     <div><i className={styles.adsDotBreakEven} /><span>Ngưỡng hoà vốn</span><em>{money(adsBreakEvenCpo)}</em></div>
                     <small>{adsHovered.orders.toLocaleString("vi-VN")} đơn · quyết toán {money(adsHovered.payout)}{adsGranularity === "daily" ? "" : ` · ${adsHovered.activeDays} ngày có báo cáo`}</small>
                   </div>}
@@ -2809,10 +2822,11 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 <span><i className={styles.adsDotBar} />Đã tiêu / trần</span>
                 <span><i className={styles.adsDotAvg} />CPO trung bình</span>
                 <span><i className={styles.adsDotMarginal} />CPO biên</span>
+                <span><i className={styles.adsDotSaturated} />Bão hoà · tiêu thêm không ra đơn</span>
                 {adsBreakEvenCpo > 0 && <span><i className={styles.adsDotBreakEven} />Ngưỡng hoà vốn {money(adsBreakEvenCpo)}</span>}
               </div>
             </> : <div className={styles.panelEmpty}>Chưa có báo cáo Grab nào trong khoảng đã chọn. Quét thư mục hoặc nới khoảng thời gian.</div>}
-            <p className={styles.metricDisclaimer}>CPO trung bình = chi quảng cáo ÷ số đơn. CPO biên = (chi kỳ này − chi kỳ trước) ÷ (đơn kỳ này − đơn kỳ trước) — con số quyết định có nên tăng ngân sách hay không; còn lãi chừng nào nó nằm dưới ngưỡng hoà vốn. Ngưỡng hoà vốn = tiền sàn thực chuyển về mỗi đơn (quyết toán {money(adsTotals.avgOrderValue)}/đơn, trước quảng cáo) trừ giá vốn thật của giỏ hàng {money(adsCogs.perOrder)}/đơn, lấy từ công thức ở tab Sản phẩm ({adsCogs.ordersPriced}/{adsCogs.ordersSeen} đơn có giá vốn · {percent(adsCogs.coverage)} số món đã có công thức; món chưa có công thức được bỏ qua nên giá vốn này là mức sàn, sẽ sát hơn khi bạn nhập đủ công thức). Cột nền là trần quảng cáo bạn đặt trong Grab Ads — báo cáo quyết toán không chứa con số này nên phải khai ở ô Trần/ngày. Chỉ tính các dòng quảng cáo thật trong bảng Marketing — Automatic/Manual Keywords, mã ADS-xxx và Image Ads; phí dịch vụ co-fund (Đồng tài trợ đa tầng), GrabNgonRẻ và Thúc Đẩy Doanh Số bị loại vì là chi phí khuyến mãi, không phải quảng cáo. ShopeeFood và GreenSM không tính phí quảng cáo theo ngày nên không góp mặt.</p>
+            <p className={styles.metricDisclaimer}>CPO trung bình = chi quảng cáo ÷ số đơn. CPO biên = (chi kỳ này − chi kỳ trước) ÷ (đơn kỳ này − đơn kỳ trước); khi chi tăng mà đơn không tăng thì không có số nào chia được, kỳ đó được đánh dấu BÃO HOÀ kèm số tiền đã đốt thêm — con số quyết định có nên tăng ngân sách hay không; còn lãi chừng nào nó nằm dưới ngưỡng hoà vốn. Ngưỡng hoà vốn = tiền sàn thực chuyển về mỗi đơn (quyết toán {money(adsTotals.avgOrderValue)}/đơn, trước quảng cáo) trừ giá vốn thật của giỏ hàng {money(adsCogs.perOrder)}/đơn, lấy từ công thức ở tab Sản phẩm ({adsCogs.ordersPriced}/{adsCogs.ordersSeen} đơn có giá vốn · {percent(adsCogs.coverage)} số món đã có công thức; món chưa có công thức được bỏ qua nên giá vốn này là mức sàn, sẽ sát hơn khi bạn nhập đủ công thức). Cột nền là trần quảng cáo bạn đặt trong Grab Ads — báo cáo quyết toán không chứa con số này nên phải khai ở ô Trần/ngày. Chỉ tính các dòng quảng cáo thật trong bảng Marketing — Automatic/Manual Keywords, mã ADS-xxx và Image Ads; phí dịch vụ co-fund (Đồng tài trợ đa tầng), GrabNgonRẻ và Thúc Đẩy Doanh Số bị loại vì là chi phí khuyến mãi, không phải quảng cáo. ShopeeFood và GreenSM không tính phí quảng cáo theo ngày nên không góp mặt.</p>
           </article>
         </div>
         <div className={styles.revenueInsightGrid}>

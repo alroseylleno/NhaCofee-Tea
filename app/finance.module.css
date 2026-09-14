@@ -990,3 +990,9 @@
 
 /* Panel left alone in an insight grid after a neighbour was removed. */
 .fullSpanPanel { grid-column: 1 / -1; }
+
+/* Bão hoà: chi tăng mà đơn không tăng — CPO biên là vô cực, không vẽ điểm được. */
+.adsSaturatedMark { stroke: #c2410c; stroke-width: .5; stroke-dasharray: 2 2; opacity: .55; vector-effect: non-scaling-stroke; }
+.adsSaturatedDot { fill: #c2410c; }
+.adsDotSaturated { display: inline-block; width: 9px; height: 9px; margin-right: 5px; border-radius: 50%; background: #c2410c; vertical-align: -1px; }
+.adsSaturatedValue { color: #c2410c; font-weight: 800; }
