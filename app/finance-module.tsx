@@ -2903,22 +2903,25 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 <span>{journey.settlement ? money(journey.grabPayout) : "—"}</span>
                 <span>{money(reconciliation.reportedAmount)}</span>
                 <strong>{money(reconciliation.receivedAmount)}</strong>
-                <span className={journey.versusCounter === undefined ? "" : journey.versusCounter >= 0 ? styles.positiveCell : styles.negativeCell}>
-                  {journey.versusCounter === undefined ? "—" : <>{journey.versusCounter >= 0 ? "+" : "−"}{money(Math.abs(journey.versusCounter))}<small>{journey.versusCounter >= 0 ? "+" : "−"}{percent(Math.abs(journey.versusCounterRate))}</small></>}
+                <span className={journey.netVersusCounter === undefined ? "" : journey.netVersusCounter >= 0 ? styles.positiveCell : styles.negativeCell}>
+                  {journey.netVersusCounter === undefined ? "—" : <>{journey.netVersusCounter >= 0 ? "+" : "−"}{money(Math.abs(journey.netVersusCounter))}<small>{journey.netVersusCounter >= 0 ? "+" : "−"}{percent(Math.abs(journey.netVersusCounterRate))}</small></>}
                 </span>
                 {(() => {
                   const basketCogs = cogsFromItems(state.platformOrders.find((order) => order.id === reconciliation.platformOrderId));
                   if (!basketCogs?.covered) return <span title={basketCogs?.missing.length ? `Thiếu giá vốn: ${basketCogs.missing.join(", ")}` : "Chưa có công thức/giá vốn cho đơn này"}>—</span>;
-                  const gain = reconciliation.receivedAmount - basketCogs.total;
-                  return <span className={gain >= 0 ? styles.positiveCell : styles.negativeCell} title={`Giá vốn giỏ hàng ${money(basketCogs.total)}`}>
-                    {gain >= 0 ? "+" : "−"}{money(Math.abs(gain))}<small>{reconciliation.receivedAmount > 0 ? `biên ${percent(gain / reconciliation.receivedAmount * 100)}` : "—"}</small>
+                  // Same basis as "So với quầy": what is left AFTER the day's
+                  // marketing allocation — ads are a real cost of the order even
+                  // though Grab bills them day-level.
+                  const gain = journey.netAfterMarketing - basketCogs.total;
+                  return <span className={gain >= 0 ? styles.positiveCell : styles.negativeCell} title={`Giá vốn giỏ hàng ${money(basketCogs.total)} · còn lại sau MKT ${money(journey.netAfterMarketing)}`}>
+                    {gain >= 0 ? "+" : "−"}{money(Math.abs(gain))}<small>{journey.netAfterMarketing > 0 ? `biên ${percent(gain / journey.netAfterMarketing * 100)}` : "—"}</small>
                   </span>;
                 })()}
                 <button type="button" aria-label="Xóa đối soát" onClick={() => void deleteGrabReconciliation(reconciliation.id)}>×</button>
               </div>;
             })}
           </div></div> : <div className={styles.panelEmpty}>Không có đơn nào trong bộ lọc này.</div>}
-          <p className={styles.metricDisclaimer}>Bấm mã đơn để xem đường đi của tiền hoặc đối soát tay. Đơn chưa đối soát thường vì <b>chưa có báo cáo của sàn cho ngày đó</b> — Grab gửi PDF hằng ngày, ShopeeFood/GreenSM chỉ gửi mail ngày có đơn. <b>So với quầy</b> đối chiếu tiền thực nhận với giá bán tại quầy của cùng giỏ hàng.</p>
+          <p className={styles.metricDisclaimer}>Bấm mã đơn để xem đường đi của tiền hoặc đối soát tay. Đơn chưa đối soát thường vì <b>chưa có báo cáo của sàn cho ngày đó</b> — Grab gửi PDF hằng ngày, ShopeeFood/GreenSM chỉ gửi mail ngày có đơn. <b>So với quầy</b> và <b>So với giá vốn</b> đối chiếu số CÒN LẠI SAU MARKETING (thực nhận trừ quảng cáo phân bổ của ngày) với giá quầy / giá vốn của cùng giỏ hàng — quảng cáo là chi phí thật của đơn dù Grab tính theo ngày; phần phân bổ là chia đều ước tính.</p>
         </article>
         {otherChannelOrders.length > 0 && <article className={styles.revenuePanel}>
           <div className={styles.revenuePanelTitle}><div><span>KÊNH KHÁC · KHÔNG PHẢI SÀN</span><strong>{money(otherChannelRevenue)}</strong></div><small>{successfulOtherChannelOrders.length.toLocaleString("vi-VN")} đơn · TB {money(otherChannelAverageOrder)}</small></div>
@@ -3027,19 +3030,18 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 <small>{Math.abs(j.sapoGap) < 1 ? "khớp thực nhận sàn" : `lệch ${j.sapoGap >= 0 ? "+" : "−"}${money(Math.abs(j.sapoGap))} · ${percent(Math.abs(j.sapoGapRate))} so thực nhận sàn`}</small>
               </div>
               {(() => {
-                // Same basis as the list column: actual received cash versus the
-                // counter price — not the after-marketing allocation, which mixes
-                // an estimated day-level split into a per-order comparison.
-                const receivedLive = parseAmount(grabForm.receivedAmount);
-                const vsCounter = j.counterPrice == null ? undefined : receivedLive - j.counterPrice;
+                // Same basis as the list columns: what is left after the day's
+                // marketing allocation, live from the form field.
+                const netLive = parseAmount(grabForm.receivedAmount) - j.marketing;
+                const vsCounter = j.counterPrice == null ? undefined : netLive - j.counterPrice;
                 return <div className={vsCounter === undefined ? "" : vsCounter >= 0 ? styles.checkOk : styles.checkWarn}>
                   <span>So với giá quầy</span><b>{vsCounter === undefined ? "—" : `${vsCounter >= 0 ? "+" : "−"}${money(Math.abs(vsCounter))}`}</b>
-                  <small>{j.counterPrice == null ? "nhập giá quầy bên dưới" : `${j.counterPrice ? percent(Math.abs(vsCounter! / j.counterPrice * 100)) : "—"} · thực nhận ${money(receivedLive)} · quầy ${money(j.counterPrice)}`}</small>
+                  <small>{j.counterPrice == null ? "nhập giá quầy bên dưới" : `${j.counterPrice ? percent(Math.abs(vsCounter! / j.counterPrice * 100)) : "—"} · còn lại sau MKT ${money(netLive)} · quầy ${money(j.counterPrice)}`}</small>
                 </div>;
               })()}
               {(() => {
                 const basketCogs = cogsFromItems(selectedGrabOrder);
-                const received = parseAmount(grabForm.receivedAmount);
+                const received = parseAmount(grabForm.receivedAmount) - j.marketing;
                 if (!basketCogs?.covered) {
                   return <div className={styles.checkWarn}>
                     <span>So với giá vốn</span><b>—</b>
@@ -3049,7 +3051,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 const gain = received - basketCogs.total;
                 return <div className={gain >= 0 ? styles.checkOk : styles.checkWarn}>
                   <span>So với giá vốn</span><b>{gain >= 0 ? "+" : "−"}{money(Math.abs(gain))}</b>
-                  <small>giá vốn {money(basketCogs.total)}{received > 0 ? ` · biên ${percent(gain / received * 100)} thực nhận` : ""}</small>
+                  <small>giá vốn {money(basketCogs.total)}{received > 0 ? ` · biên ${percent(gain / received * 100)} trên còn lại sau MKT` : ""}</small>
                 </div>;
               })()}
             </div>
