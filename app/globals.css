@@ -250,3 +250,5 @@
 .detail-month-group + .detail-month-group { margin-top: 10px; }
 .detail-month-group > div:first-child { display: flex; justify-content: space-between; gap: 10px; color: #315b45; font: 11px Arial, sans-serif; }
 .detail-month-group > div:first-child span { color: var(--muted); font-size: 9px; }
+.unit-warning { display: block; margin-top: 6px; padding: 8px 9px; border-radius: 8px; color: #8a4a23; background: #fdf1e0; font: 11px/1.45 Arial, sans-serif; }
+.unit-warning b { font-weight: 700; }
