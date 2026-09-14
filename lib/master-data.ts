@@ -233,7 +233,7 @@ export const DEFAULT_STORE: StoreMaster = {
 
 export const MASS_UNITS = ["mg", "g", "kg"] as const;
 export const VOLUME_UNITS = ["ml", "l", "oz"] as const;
-export const COUNT_UNITS = ["cái", "tờ", "viên", "phần", "gói", "túi", "hộp", "chai", "lon", "trái", "miếng", "lát", "muỗng", "vá"] as const;
+export const COUNT_UNITS = ["cái", "tờ", "viên", "phần", "gói", "túi", "hộp", "chai", "lon", "trái", "miếng", "lát", "muỗng", "vá", "ly", "tem"] as const;
 export const ALL_RECIPE_UNITS = [...MASS_UNITS, ...VOLUME_UNITS, ...COUNT_UNITS];
 const MASTER_STATUSES: MasterStatus[] = ["unmapped", "draft", "ready", "active", "inactive"];
 
@@ -256,6 +256,8 @@ const unitFactors: Record<string, { family: UnitFamily; factor: number; base: st
   trai: { family: "count", factor: 1, base: "cái" },
   mieng: { family: "count", factor: 1, base: "cái" },
   lat: { family: "count", factor: 1, base: "cái" },
+  ly: { family: "count", factor: 1, base: "cái" },
+  tem: { family: "count", factor: 1, base: "cái" },
   muong: { family: "count", factor: 1, base: "cái" },
   va: { family: "count", factor: 1, base: "cái" },
 };
