@@ -1530,6 +1530,18 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   // Ads efficiency: only Grab bills day-level advertising, so CPO is measured on
   // Grab reports alone. Marginal CPO compares each bucket with the previous one —
   // that is the number that decides whether spending more is still worth it.
+  // Only true search-ad lines count toward CPO. The PDF's Marketing table also
+  // bills co-fund service fees (Đồng tài trợ...), GrabNgonRẻ day-level lumps and
+  // Thúc Đẩy Doanh Số — real costs, but not advertising: mixing them in made a
+  // promo-heavy day read as an expensive ads day.
+  const keywordAdsSpend = (report: FinanceGrabDailyReportRecord) => {
+    if (!report.marketingLines?.length) return report.totalMarketing; // legacy rows without line detail
+    return report.marketingLines.reduce((sum, line) => {
+      const name = line.description.toLowerCase();
+      const isAd = name.includes("keyword") || name.includes("image ads") || /^ads[-\s]?\d/.test(name.trim());
+      return isAd ? sum + Math.abs(line.total) : sum;
+    }, 0);
+  };
   const adsEfficiency = useMemo(() => {
     const mondayOf = (iso: string) => {
       const date = new Date(`${iso}T00:00:00Z`);
@@ -1546,7 +1558,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     grabReports.forEach((report) => {
       const key = adsGranularity === "daily" ? report.reportDate : adsGranularity === "weekly" ? mondayOf(report.reportDate) : monthKey(report.reportDate);
       const bucket = groups.get(key) || { key, ads: 0, orders: 0, revenue: 0, payout: 0, days: new Set<string>() };
-      bucket.ads += report.totalMarketing;
+      bucket.ads += keywordAdsSpend(report);
       bucket.orders += report.orderCount;
       bucket.revenue += report.totalOrderValue;
       bucket.payout += report.totalPayout;
@@ -2800,7 +2812,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 {adsBreakEvenCpo > 0 && <span><i className={styles.adsDotBreakEven} />Ngưỡng hoà vốn {money(adsBreakEvenCpo)}</span>}
               </div>
             </> : <div className={styles.panelEmpty}>Chưa có báo cáo Grab nào trong khoảng đã chọn. Quét thư mục hoặc nới khoảng thời gian.</div>}
-            <p className={styles.metricDisclaimer}>CPO trung bình = chi quảng cáo ÷ số đơn. CPO biên = (chi kỳ này − chi kỳ trước) ÷ (đơn kỳ này − đơn kỳ trước) — con số quyết định có nên tăng ngân sách hay không; còn lãi chừng nào nó nằm dưới ngưỡng hoà vốn. Ngưỡng hoà vốn = tiền sàn thực chuyển về mỗi đơn (quyết toán {money(adsTotals.avgOrderValue)}/đơn, trước quảng cáo) trừ giá vốn thật của giỏ hàng {money(adsCogs.perOrder)}/đơn, lấy từ công thức ở tab Sản phẩm ({adsCogs.ordersPriced}/{adsCogs.ordersSeen} đơn có giá vốn · {percent(adsCogs.coverage)} số món đã có công thức; món chưa có công thức được bỏ qua nên giá vốn này là mức sàn, sẽ sát hơn khi bạn nhập đủ công thức). Cột nền là trần quảng cáo bạn đặt trong Grab Ads — báo cáo quyết toán không chứa con số này nên phải khai ở ô Trần/ngày. Chỉ tính đơn và quảng cáo Grab; ShopeeFood và GreenSM không tính phí quảng cáo theo ngày.</p>
+            <p className={styles.metricDisclaimer}>CPO trung bình = chi quảng cáo ÷ số đơn. CPO biên = (chi kỳ này − chi kỳ trước) ÷ (đơn kỳ này − đơn kỳ trước) — con số quyết định có nên tăng ngân sách hay không; còn lãi chừng nào nó nằm dưới ngưỡng hoà vốn. Ngưỡng hoà vốn = tiền sàn thực chuyển về mỗi đơn (quyết toán {money(adsTotals.avgOrderValue)}/đơn, trước quảng cáo) trừ giá vốn thật của giỏ hàng {money(adsCogs.perOrder)}/đơn, lấy từ công thức ở tab Sản phẩm ({adsCogs.ordersPriced}/{adsCogs.ordersSeen} đơn có giá vốn · {percent(adsCogs.coverage)} số món đã có công thức; món chưa có công thức được bỏ qua nên giá vốn này là mức sàn, sẽ sát hơn khi bạn nhập đủ công thức). Cột nền là trần quảng cáo bạn đặt trong Grab Ads — báo cáo quyết toán không chứa con số này nên phải khai ở ô Trần/ngày. Chỉ tính các dòng quảng cáo thật trong bảng Marketing — Automatic/Manual Keywords, mã ADS-xxx và Image Ads; phí dịch vụ co-fund (Đồng tài trợ đa tầng), GrabNgonRẻ và Thúc Đẩy Doanh Số bị loại vì là chi phí khuyến mãi, không phải quảng cáo. ShopeeFood và GreenSM không tính phí quảng cáo theo ngày nên không góp mặt.</p>
           </article>
         </div>
         <div className={styles.revenueInsightGrid}>
@@ -3014,10 +3026,17 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 <span>SAPO ghi nhận</span><b>{money(base.reportedAmount)}</b>
                 <small>{Math.abs(j.sapoGap) < 1 ? "khớp thực nhận sàn" : `lệch ${j.sapoGap >= 0 ? "+" : "−"}${money(Math.abs(j.sapoGap))} · ${percent(Math.abs(j.sapoGapRate))} so thực nhận sàn`}</small>
               </div>
-              <div className={j.netVersusCounter === undefined ? "" : j.netVersusCounter >= 0 ? styles.checkOk : styles.checkWarn}>
-                <span>So với giá quầy</span><b>{j.counterPrice == null ? "—" : `${j.netVersusCounter! >= 0 ? "+" : "−"}${money(Math.abs(j.netVersusCounter!))}`}</b>
-                <small>{j.counterPrice == null ? "nhập giá quầy bên dưới" : `${percent(Math.abs(j.netVersusCounterRate))} · quầy ${money(j.counterPrice)}`}</small>
-              </div>
+              {(() => {
+                // Same basis as the list column: actual received cash versus the
+                // counter price — not the after-marketing allocation, which mixes
+                // an estimated day-level split into a per-order comparison.
+                const receivedLive = parseAmount(grabForm.receivedAmount);
+                const vsCounter = j.counterPrice == null ? undefined : receivedLive - j.counterPrice;
+                return <div className={vsCounter === undefined ? "" : vsCounter >= 0 ? styles.checkOk : styles.checkWarn}>
+                  <span>So với giá quầy</span><b>{vsCounter === undefined ? "—" : `${vsCounter >= 0 ? "+" : "−"}${money(Math.abs(vsCounter))}`}</b>
+                  <small>{j.counterPrice == null ? "nhập giá quầy bên dưới" : `${j.counterPrice ? percent(Math.abs(vsCounter! / j.counterPrice * 100)) : "—"} · thực nhận ${money(receivedLive)} · quầy ${money(j.counterPrice)}`}</small>
+                </div>;
+              })()}
               {(() => {
                 const basketCogs = cogsFromItems(selectedGrabOrder);
                 const received = parseAmount(grabForm.receivedAmount);
