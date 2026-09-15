@@ -308,7 +308,11 @@ function specificationBase(specification: string, purchaseUnit: string, conversi
     const definition = unitDefinition(conversion.unit)!;
     return { baseUnit: definition.base, baseQuantity: conversion.amount * definition.factor };
   }
-  const match = specification.trim().match(/^([\d.,]+)\s*(mg|g|kg|ml|l|oz|cái|tờ|viên|phần|gói|túi|hộp|chai|lon|trái|miếng|muỗng|vá)\b/i);
+  // Dựng pattern từ chính ALL_RECIPE_UNITS thay vì chép tay: danh sách chép tay
+  // này từng thiếu `lát`/`ly`/`tem` dù bảng quy đổi đã có, nên một lô chỉ ghi
+  // định lượng (không có quy đổi) bị rơi về đơn vị mua và mất đơn vị thật.
+  // Xếp dài trước ngắn để `ml` không bị `l` nuốt mất.
+  const match = specification.trim().match(new RegExp(`^([\\d.,]+)\\s*(${[...ALL_RECIPE_UNITS].sort((left, right) => right.length - left.length).map((unit) => unit.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")).join("|")})(?![\\p{L}])`, "iu"));
   if (match) {
     const amount = Number(match[1].replace(",", "."));
     const unit = normalizedText(match[2]);
@@ -509,6 +513,13 @@ export function productValidationErrors(product: ProductMaster, versions: Recipe
     if (item.customName) {
       if (!item.customCost || item.customCost <= 0) errors.push(`${item.customName}: mục Khác chưa có giá vốn để tính`);
       continue;
+    }
+    // Quy đổi của một NVL có thể đổi khi nhập lô mới (ví dụ ml -> g). Công thức
+    // cũ giữ nguyên đơn vị cũ và im lặng ngừng tính được giá vốn nếu hai đơn vị
+    // khác hệ. Nói ra thay vì để món tự rơi về "Chưa đủ" không rõ lý do.
+    const source = ingredients.find((entry) => entry.id === item.ingredientId);
+    if (source?.conversionUnit && normalizedText(item.unit) !== normalizedText(source.conversionUnit)) {
+      errors.push(`${source.name}: công thức ghi ${item.unit} nhưng Kho NVL quy đổi theo ${source.conversionUnit}`);
     }
     const ingredient = ingredients.find((entry) => entry.id === item.ingredientId);
     if (!ingredient) errors.push("Công thức tham chiếu nguyên liệu không tồn tại");
