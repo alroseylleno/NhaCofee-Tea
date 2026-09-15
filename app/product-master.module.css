@@ -537,3 +537,7 @@
 .driftList b { color: var(--red); }
 .driftList span { display: flex; justify-content: space-between; gap: 10px; color: var(--ink); font: 700 9px Arial, sans-serif; }
 .driftList em { flex: 0 0 auto; color: var(--red); font: 800 9px Arial, sans-serif; font-style: normal; }
+
+.toggleActiveButton { display: grid; gap: 2px; place-items: center; padding: 6px 7px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); background: #fff; font: 700 11px Arial, sans-serif; }
+.toggleActiveButton span { font: 800 7px Arial, sans-serif; letter-spacing: .04em; }
+.toggleActiveButton:hover { border-color: var(--pine); color: var(--pine); }

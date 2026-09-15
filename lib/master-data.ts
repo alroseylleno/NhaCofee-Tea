@@ -402,7 +402,8 @@ export function mergeProductDrafts(current: ProductMaster[], imported: ImportedP
       category: existing.categoryOverridden ? existing.category : source.category.trim() || "Chưa phân loại",
       variant: source.variant?.trim() || "",
       sellingPrice: existing.sellingPriceOverridden ? existing.sellingPrice : Math.max(0, Math.round(observedPrice || 0)),
-      status: "active",
+      // Ngưng hoạt động là quyết định của người dùng — Finance không được lật lại.
+      status: existing.status === "inactive" ? "inactive" : "active",
       source: "import",
       updatedAt: new Date().toISOString(),
     });
@@ -530,7 +531,7 @@ export function normalizeMasterDataState(value: unknown): MasterDataState {
   const stored = value as Partial<MasterDataState> & { recipes?: Array<ProductRecipeItem & { productId?: string }> };
   const now = new Date().toISOString();
   const normalizeStatus = (status: unknown): MasterStatus => MASTER_STATUSES.includes(status as MasterStatus) ? status as MasterStatus : "draft";
-  const products = Array.isArray(stored.products) ? stored.products.map((product) => ({ ...product, variant: typeof product.variant === "string" ? product.variant : "", sellingPriceOverridden: Boolean(product.sellingPriceOverridden), nameOverridden: Boolean(product.nameOverridden), categoryOverridden: Boolean(product.categoryOverridden), channelPrices: normalizeChannelPrices(product.channelPrices), productType: product.productType === "prepared_component" || product.productType === "packaging" ? product.productType : normalizedText(product.category || "") === "bao bi" ? "packaging" as const : "sellable" as const, status: "active" as MasterStatus })) : [];
+  const products = Array.isArray(stored.products) ? stored.products.map((product) => ({ ...product, variant: typeof product.variant === "string" ? product.variant : "", sellingPriceOverridden: Boolean(product.sellingPriceOverridden), nameOverridden: Boolean(product.nameOverridden), categoryOverridden: Boolean(product.categoryOverridden), channelPrices: normalizeChannelPrices(product.channelPrices), productType: product.productType === "prepared_component" || product.productType === "packaging" ? product.productType : normalizedText(product.category || "") === "bao bi" ? "packaging" as const : "sellable" as const, status: product.status === "inactive" ? "inactive" as MasterStatus : "active" as MasterStatus })) : [];
   const ingredients = Array.isArray(stored.ingredients) ? stored.ingredients.map((ingredient) => ({ ...ingredient, conversionUnit: typeof ingredient.conversionUnit === "string" && unitDefinition(ingredient.conversionUnit) ? ingredient.conversionUnit : undefined, aliases: Array.isArray(ingredient.aliases) ? ingredient.aliases : [], standardWastePercent: Number(ingredient.standardWastePercent) || 0, stockQuantityBase: Number(ingredient.stockQuantityBase) || 0, stockLotCount: Number(ingredient.stockLotCount) || 0, status: normalizeStatus(ingredient.status) })) : [];
   let recipeVersions = Array.isArray(stored.recipeVersions) ? stored.recipeVersions : [];
   if (!recipeVersions.length && Array.isArray(stored.recipes)) {
