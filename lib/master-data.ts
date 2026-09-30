@@ -1,7 +1,7 @@
 export type MasterStatus = "unmapped" | "draft" | "ready" | "active" | "inactive";
 export type UnitFamily = "mass" | "volume" | "count";
 export type RecipeVersionStatus = "draft" | "active" | "archived";
-export type ProductType = "sellable" | "prepared_component" | "packaging";
+export type ProductType = "sellable" | "prepared_component" | "packaging" | "combo";
 
 export type StoreMaster = {
   id: string;
@@ -146,6 +146,62 @@ export function averageChannelPricing(product: ProductMaster, cost: number | und
   return { averagePrice, averageNet, averageMargin, channelCount: priced.length };
 }
 
+export const COMBO_MEMBER_UNIT = "phần";
+
+/// Members of a combo, in saved order. A combo keeps them in `items` — it has no
+/// ingredients of its own — so every item on a combo product IS a member row,
+/// including an orphan whose SKU was deleted (`product` undefined).
+export function comboMembers(product: ProductMaster, versions: RecipeVersion[], products: ProductMaster[]) {
+  if (product.productType !== "combo") return [];
+  const version = activeRecipeVersion(product.id, versions);
+  return (version?.items || []).map((item) => ({
+    item,
+    quantity: Math.max(0, item.quantity) || 0,
+    product: item.comboProductId ? products.find((entry) => entry.id === item.comboProductId) : undefined,
+    label: item.comboProductName || "Món đã bị xoá",
+  }));
+}
+
+/// Giá gộp: tổng giá niêm yết của các món thành viên, tính riêng cho từng kênh.
+/// A channel is left UNDEFINED as soon as one member has no price there — a
+/// partial sum would quietly list a combo below the price of its own contents.
+/// `missing` names the members responsible so the UI can say why.
+export function comboAutoPricing(product: ProductMaster, products: ProductMaster[], versions: RecipeVersion[]) {
+  const members = comboMembers(product, versions, products);
+  const prices: Partial<Record<SalesChannel, number>> = {};
+  const missing: Partial<Record<SalesChannel, string[]>> = {};
+  if (!members.length) return { prices, missing, memberCount: 0 };
+  for (const channel of SALES_CHANNELS) {
+    let total = 0;
+    const gaps: string[] = [];
+    for (const member of members) {
+      const price = member.product ? channelPrice(member.product, channel.key) : undefined;
+      if (price === undefined || member.quantity <= 0) gaps.push(member.product?.name || member.label);
+      else total += price * member.quantity;
+    }
+    if (gaps.length) missing[channel.key] = [...new Set(gaps)];
+    else prices[channel.key] = Math.round(total);
+  }
+  return { prices, missing, memberCount: members.length };
+}
+
+/// Rewrites every combo that has NOT been priced by hand so its listed prices are
+/// the live sum of its members. Run on every load and after every mutation: the
+/// alternative is persisting the sum once and letting it rot the next time a
+/// member is repriced, which is the one thing "tự cộng" must not do.
+/// A combo priced by hand (`sellingPriceOverridden`) keeps its own numbers.
+export function applyComboPricing(products: ProductMaster[], versions: RecipeVersion[]) {
+  if (!products.some((product) => product.productType === "combo")) return products;
+  return products.map((product) => {
+    if (product.productType !== "combo" || product.sellingPriceOverridden) return product;
+    const { prices } = comboAutoPricing(product, products, versions);
+    const channelPrices = normalizeChannelPrices({ grab: prices.grab, shopee: prices.shopee, greensm: prices.greensm });
+    const sellingPrice = prices.counter ?? 0;
+    if (sellingPrice === product.sellingPrice && JSON.stringify(channelPrices || {}) === JSON.stringify(product.channelPrices || {})) return product;
+    return { ...product, sellingPrice, channelPrices };
+  });
+}
+
 export type ProductRecipeItem = {
   id: string;
   ingredientId: string;
@@ -160,6 +216,16 @@ export type ProductRecipeItem = {
   // A prepared component keeps a reference to its source formula version.
   preparedProductId?: string;
   preparedRecipeVersionId?: string;
+  /// A combo member points at another sellable SKU and `quantity` counts how
+  /// many of it the combo contains. Deliberately NOT pinned to a recipe version
+  /// the way a prepared component is: a combo must follow the member's current
+  /// price and current giá vốn, otherwise the "tự cộng" promise goes stale the
+  /// first time a member is repriced.
+  comboProductId?: string;
+  /// Name snapshot so a combo whose member was deleted can still say WHICH món
+  /// disappeared. `comboProductId` goes null on delete (see the migration), and
+  /// a nameless orphan row would only be able to report "một món đã bị xoá".
+  comboProductName?: string;
 };
 
 export type RecipeVersion = {
@@ -452,13 +518,37 @@ function preparedRecipeItemCost(
   return batchCost === undefined ? undefined : batchCost * requiredOutput / version.outputQuantity * (1 + Math.max(0, item.wastePercent) / 100);
 }
 
+/// Giá vốn của một dòng combo = giá vốn HIỆN TẠI của món thành viên × số phần.
+/// The member's own packaging is already inside its recipe cost, which is why a
+/// combo carries no packaging line of its own — adding one would double-count
+/// the ly/nắp/ống hút that each member already pays for.
+function comboRecipeItemCost(
+  item: ProductRecipeItem,
+  ingredients: IngredientMaster[],
+  products: ProductMaster[],
+  versions: RecipeVersion[],
+  visited: Set<string>,
+) {
+  if (!item.comboProductId || !(item.quantity > 0)) return undefined;
+  const member = products.find((entry) => entry.id === item.comboProductId);
+  if (!member) return undefined;
+  const version = activeRecipeVersion(member.id, versions);
+  if (!version || visited.has(version.id)) return undefined;
+  const nextVisited = new Set(visited);
+  nextVisited.add(version.id);
+  const cost = recipeVersionCost(version, ingredients, member.packagingCost, products, versions, nextVisited);
+  return cost === undefined ? undefined : cost * item.quantity;
+}
+
 export function recipeItemsCost(items: ProductRecipeItem[] | undefined, ingredients: IngredientMaster[], products: ProductMaster[] = [], versions: RecipeVersion[] = [], visited = new Set<string>()) {
   if (!items?.length) return 0;
   let total = 0;
   for (const item of items) {
-    const cost = item.preparedProductId
-      ? preparedRecipeItemCost(item, ingredients, products, versions, visited)
-      : recipeItemCost(item, ingredients.find((ingredient) => ingredient.id === item.ingredientId));
+    const cost = item.comboProductId
+      ? comboRecipeItemCost(item, ingredients, products, versions, visited)
+      : item.preparedProductId
+        ? preparedRecipeItemCost(item, ingredients, products, versions, visited)
+        : recipeItemCost(item, ingredients.find((ingredient) => ingredient.id === item.ingredientId));
     if (cost === undefined) return undefined;
     total += cost;
   }
@@ -489,6 +579,36 @@ export function preparedComponentUnitCost(product: ProductMaster, products: Prod
   return batchCost === undefined ? undefined : batchCost / version.outputQuantity;
 }
 
+/// A combo is validated against its members, not against Kho NVL: it has no
+/// ingredients, no packaging and no unit conversion of its own.
+function comboValidationErrors(product: ProductMaster, versions: RecipeVersion[], ingredients: IngredientMaster[], products: ProductMaster[]) {
+  const errors: string[] = [];
+  const members = comboMembers(product, versions, products);
+  // Một ly cũng là combo hợp lệ: combo sàn "1 ly + 2 topping" chỉ cố định ly nền,
+  // còn topping khách tự chọn nằm trong chuỗi lựa chọn của dòng hoá đơn và được
+  // `lib/san-cogs.ts` cộng giá vốn theo đúng món khách chọn.
+  if (!members.length) errors.push("Combo phải có ít nhất 1 món");
+  for (const member of members) {
+    if (!member.product) { errors.push(`${member.label}: món đã bị xoá khỏi danh mục`); continue; }
+    if (member.quantity <= 0) { errors.push(`${member.product.name}: số phần phải lớn hơn 0`); continue; }
+    if (member.product.status === "inactive") errors.push(`${member.product.name}: món đang ngưng hoạt động`);
+    if (member.product.productType === "combo") errors.push(`${member.product.name}: không được lồng combo vào combo`);
+    else if (member.product.productType !== "sellable") errors.push(`${member.product.name}: chỉ được chọn thành phẩm bán`);
+    if (theoreticalProductCostWithComponents(member.product, products, versions, ingredients) === undefined) errors.push(`${member.product.name}: chưa tính được giá vốn`);
+  }
+  if (!members.length) return errors;
+  // Giá gộp thiếu ở một kênh nghĩa là món thành viên chưa niêm yết ở kênh đó —
+  // nói tên món ra, vì đó là chỗ phải sửa, chứ không phải ô giá của combo.
+  const { missing } = comboAutoPricing(product, products, versions);
+  if (!product.sellingPriceOverridden) {
+    for (const channel of SALES_CHANNELS) {
+      const gaps = missing[channel.key];
+      if (gaps?.length) errors.push(`Chưa gộp được giá ${channel.label}: ${gaps.join(", ")} chưa niêm yết`);
+    }
+  } else if (product.sellingPrice <= 0) errors.push("Thiếu giá bán");
+  return errors;
+}
+
 export function productValidationErrors(product: ProductMaster, versions: RecipeVersion[], ingredients: IngredientMaster[], products: ProductMaster[] = []) {
   const errors: string[] = [];
   const activeRecipe = activeRecipeVersion(product.id, versions);
@@ -496,6 +616,7 @@ export function productValidationErrors(product: ProductMaster, versions: Recipe
   if (!product.sku.trim()) errors.push("Thiếu mã SKU");
   if (!product.name.trim()) errors.push("Thiếu tên sản phẩm");
   if (!product.category.trim() || product.category === "Chưa phân loại") errors.push("Thiếu category chuẩn");
+  if (product.productType === "combo") return [...new Set([...errors, ...comboValidationErrors(product, versions, ingredients, products)])];
   if (product.productType !== "prepared_component" && product.sellingPrice <= 0) errors.push("Thiếu giá bán");
   if (!recipe?.items.length) errors.push("Chưa có công thức");
   if (product.productType === "prepared_component" && (!recipe?.outputQuantity || !recipe.outputUnit)) errors.push("Công thức nền chưa có sản lượng đầu ra");
@@ -542,7 +663,7 @@ export function normalizeMasterDataState(value: unknown): MasterDataState {
   const stored = value as Partial<MasterDataState> & { recipes?: Array<ProductRecipeItem & { productId?: string }> };
   const now = new Date().toISOString();
   const normalizeStatus = (status: unknown): MasterStatus => MASTER_STATUSES.includes(status as MasterStatus) ? status as MasterStatus : "draft";
-  const products = Array.isArray(stored.products) ? stored.products.map((product) => ({ ...product, variant: typeof product.variant === "string" ? product.variant : "", sellingPriceOverridden: Boolean(product.sellingPriceOverridden), nameOverridden: Boolean(product.nameOverridden), categoryOverridden: Boolean(product.categoryOverridden), channelPrices: normalizeChannelPrices(product.channelPrices), productType: product.productType === "prepared_component" || product.productType === "packaging" ? product.productType : normalizedText(product.category || "") === "bao bi" ? "packaging" as const : "sellable" as const, status: product.status === "inactive" ? "inactive" as MasterStatus : "active" as MasterStatus })) : [];
+  const products = Array.isArray(stored.products) ? stored.products.map((product) => ({ ...product, variant: typeof product.variant === "string" ? product.variant : "", sellingPriceOverridden: Boolean(product.sellingPriceOverridden), nameOverridden: Boolean(product.nameOverridden), categoryOverridden: Boolean(product.categoryOverridden), channelPrices: normalizeChannelPrices(product.channelPrices), productType: product.productType === "prepared_component" || product.productType === "packaging" || product.productType === "combo" ? product.productType : normalizedText(product.category || "") === "bao bi" ? "packaging" as const : "sellable" as const, status: product.status === "inactive" ? "inactive" as MasterStatus : "active" as MasterStatus })) : [];
   const ingredients = Array.isArray(stored.ingredients) ? stored.ingredients.map((ingredient) => ({ ...ingredient, conversionUnit: typeof ingredient.conversionUnit === "string" && unitDefinition(ingredient.conversionUnit) ? ingredient.conversionUnit : undefined, aliases: Array.isArray(ingredient.aliases) ? ingredient.aliases : [], standardWastePercent: Number(ingredient.standardWastePercent) || 0, stockQuantityBase: Number(ingredient.stockQuantityBase) || 0, stockLotCount: Number(ingredient.stockLotCount) || 0, status: normalizeStatus(ingredient.status) })) : [];
   let recipeVersions = Array.isArray(stored.recipeVersions) ? stored.recipeVersions : [];
   if (!recipeVersions.length && Array.isArray(stored.recipes)) {
@@ -564,7 +685,7 @@ export function normalizeMasterDataState(value: unknown): MasterDataState {
     version: 5,
     stores: Array.isArray(stored.stores) && stored.stores.length ? stored.stores : [DEFAULT_STORE],
     ingredients,
-    products,
+    products: applyComboPricing(products, recipeVersions),
     recipeVersions,
     costSnapshots: Array.isArray(stored.costSnapshots) ? stored.costSnapshots : [],
     auditEvents: Array.isArray(stored.auditEvents) ? stored.auditEvents : [],

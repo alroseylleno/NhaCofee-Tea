@@ -509,6 +509,19 @@
 .channelPriceRow input { min-width: 0; padding: 8px 9px; border: 1px solid #d8dfd2; border-radius: 8px; background: #fff; color: var(--ink); font: 700 11px Arial, sans-serif; text-align: right; }
 .channelPriceRow > span:not(:first-child) { color: var(--muted); font: 700 10px Arial, sans-serif; }
 .channelPriceRow > strong { font: 700 11px Arial, sans-serif; }
+
+/* Combo */
+.comboPriceMode { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 11px; padding: 10px 11px; border: 1px solid #cfe0d2; border-radius: 10px; background: #f4f9f3; }
+.comboPriceMode > span { display: grid; gap: 3px; min-width: 0; }
+.comboPriceMode b { font: 800 10px Arial, sans-serif; }
+.comboPriceMode small { color: var(--muted); font: 8px/1.4 Arial, sans-serif; }
+.comboPriceMode button { flex: 0 0 auto; padding: 8px 10px; border: 1px solid var(--pine); border-radius: 8px; color: var(--pine); background: #fff; font: 800 8px Arial, sans-serif; white-space: nowrap; }
+.channelPriceRow input[readonly] { border-style: dashed; color: var(--muted); background: #f7f7f2; }
+.comboQuantity { display: grid; gap: 3px; justify-items: end; color: var(--muted); font: 800 8px Arial, sans-serif; }
+.comboQuantity input { width: 58px; padding: 7px 8px; border: 1px solid #d8dfd2; border-radius: 8px; color: var(--ink); background: #fff; font: 700 10px Arial, sans-serif; text-align: right; }
+.comboQuantity input[readonly] { border-style: dashed; background: #f7f7f2; }
+.recipeRow.recipeRowMissing { border-color: #e5bbae; background: #fff8f5; }
+.comboBadge { display: inline-block; margin-left: 6px; padding: 2px 6px; border-radius: 999px; color: #fff; background: var(--pine); font: 800 7px Arial, sans-serif; font-style: normal; letter-spacing: .06em; vertical-align: middle; }
 .channelPriceAverage { margin-top: 9px; padding: 10px 2px 2px; border-top: 1px solid var(--line); font: 700 11px Arial, sans-serif; }
 .channelPriceAverage span:first-child { color: #34705a; font: 800 8px Arial, sans-serif; letter-spacing: .09em; }
 .channelPriceAverage strong { color: var(--pine); font: 700 13px Arial, sans-serif; }

@@ -9,6 +9,7 @@ import {
   type ProductMaster,
   type ProductRecipeItem,
   type RecipeVersion,
+  applyComboPricing,
   emptyMasterDataState,
   mergeInventoryDrafts,
   normalizeChannelPrices,
@@ -28,10 +29,10 @@ function toIngredient(row: Record<string, unknown>): IngredientMaster {
   return { id: String(row.id), storeId: String(row.store_id), code: String(row.code), name: String(row.name), aliases: aliases(row.aliases), category: String(row.category), brand: String(row.brand), baseUnit: String(row.base_unit), conversionUnit: conversionUnit(row.conversion_unit), purchaseUnit: String(row.purchase_unit), latestPurchasePrice: number(row.latest_purchase_price), latestPurchasePricePerBaseUnit: number(row.latest_purchase_price_per_base_unit), standardWastePercent: number(row.standard_waste_percent), latestPurchasedOn: row.latest_purchased_on ? String(row.latest_purchased_on) : undefined, oldestInStockPurchasedOn: row.oldest_in_stock_purchased_on ? String(row.oldest_in_stock_purchased_on) : undefined, sourceInventoryLotId: row.source_inventory_receipt_id ? String(row.source_inventory_receipt_id) : undefined, stockQuantityBase: number(row.stock_quantity_base), stockLotCount: number(row.stock_lot_count), sourceKey: String(row.source_key), status: row.status === "inactive" ? "inactive" : "active", updatedAt: String(row.updated_at || new Date().toISOString()) };
 }
 function toProduct(row: Record<string, unknown>): ProductMaster {
-  return { id: String(row.id), storeId: String(row.store_id), sku: String(row.sku), name: String(row.name), category: String(row.category), variant: String(row.variant || ""), sellingPrice: number(row.selling_price), sellingPriceOverridden: Boolean(row.selling_price_overridden), packagingCost: number(row.packaging_cost), status: row.status === "inactive" ? "inactive" : "active", source: row.source === "manual" ? "manual" : "import", channelPrices: normalizeChannelPrices(row.channel_prices), nameOverridden: Boolean(row.name_overridden), categoryOverridden: Boolean(row.category_overridden), productType: row.product_type === "prepared_component" || row.product_type === "packaging" ? row.product_type : "sellable", updatedAt: String(row.updated_at || new Date().toISOString()) };
+  return { id: String(row.id), storeId: String(row.store_id), sku: String(row.sku), name: String(row.name), category: String(row.category), variant: String(row.variant || ""), sellingPrice: number(row.selling_price), sellingPriceOverridden: Boolean(row.selling_price_overridden), packagingCost: number(row.packaging_cost), status: row.status === "inactive" ? "inactive" : "active", source: row.source === "manual" ? "manual" : "import", channelPrices: normalizeChannelPrices(row.channel_prices), nameOverridden: Boolean(row.name_overridden), categoryOverridden: Boolean(row.category_overridden), productType: row.product_type === "prepared_component" || row.product_type === "packaging" || row.product_type === "combo" ? row.product_type : "sellable", updatedAt: String(row.updated_at || new Date().toISOString()) };
 }
 function toRecipeItem(row: Record<string, unknown>): ProductRecipeItem {
-  return { id: String(row.id), ingredientId: row.ingredient_id ? String(row.ingredient_id) : "", quantity: number(row.quantity), unit: String(row.unit), wastePercent: number(row.waste_percent), customName: row.custom_name ? String(row.custom_name) : undefined, customBrand: row.custom_brand ? String(row.custom_brand) : undefined, customCategory: row.custom_category ? String(row.custom_category) : undefined, customCost: row.custom_cost ? number(row.custom_cost) : undefined, preparedProductId: row.prepared_product_id ? String(row.prepared_product_id) : undefined, preparedRecipeVersionId: row.prepared_recipe_version_id ? String(row.prepared_recipe_version_id) : undefined };
+  return { id: String(row.id), ingredientId: row.ingredient_id ? String(row.ingredient_id) : "", quantity: number(row.quantity), unit: String(row.unit), wastePercent: number(row.waste_percent), customName: row.custom_name ? String(row.custom_name) : undefined, customBrand: row.custom_brand ? String(row.custom_brand) : undefined, customCategory: row.custom_category ? String(row.custom_category) : undefined, customCost: row.custom_cost ? number(row.custom_cost) : undefined, preparedProductId: row.prepared_product_id ? String(row.prepared_product_id) : undefined, preparedRecipeVersionId: row.prepared_recipe_version_id ? String(row.prepared_recipe_version_id) : undefined, comboProductId: row.combo_product_id ? String(row.combo_product_id) : undefined, comboProductName: row.combo_product_name ? String(row.combo_product_name) : undefined };
 }
 function financeSource(row: FinanceProductRecord): ImportedProductSource { return { sku: row.sku, name: row.name, category: row.category, variant: row.variant, unit: row.unit, sellingPrice: row.sellingPrice, quantity: row.quantity, totalAmount: row.totalAmount }; }
 
@@ -82,7 +83,10 @@ export async function loadCloudMasterData(inventoryLots: InventorySourceLot[]): 
   const auditEvents: AuditEvent[] = (eventsResult.data || []).map((row) => ({ id: row.id, entityType: row.entity_type, entityId: row.entity_id, action: row.action, detail: row.detail, createdAt: row.created_at }));
   const products = (freshProducts.data || []).map((row) => toProduct(row));
   const productIds = new Set(products.map((product) => product.id));
-  return { state: { ...emptyMasterDataState(), stores: [{ ...DEFAULT_STORE, id: storeId }], ingredients: mergeInventoryDrafts((freshIngredients.data || []).map((row) => toIngredient(row)), inventoryLots), products, recipeVersions: recipeVersions.filter((version) => productIds.has(version.productId)), auditEvents }, ...finance };
+  const ownedVersions = recipeVersions.filter((version) => productIds.has(version.productId));
+  // Giá combo được gộp lại ngay khi đọc, không đọc số đã lưu: một món thành viên
+  // đổi giá thì combo phải đổi theo, chứ không chờ tới lần lưu combo kế tiếp.
+  return { state: { ...emptyMasterDataState(), stores: [{ ...DEFAULT_STORE, id: storeId }], ingredients: mergeInventoryDrafts((freshIngredients.data || []).map((row) => toIngredient(row)), inventoryLots), products: applyComboPricing(products, ownedVersions), recipeVersions: ownedVersions, auditEvents }, ...finance };
 }
 
 /// Read-only slice of the Product Master catalog for callers that only need
@@ -106,7 +110,7 @@ export async function loadCogsCatalog(): Promise<{ products: ProductMaster[]; re
     const recipeItems = (row.product_recipe_items || []) as Record<string, unknown>[];
     return { id: row.id, productId: row.product_id, version: number(row.version), effectiveFrom: row.effective_from, effectiveTo: row.effective_to || undefined, status: row.status, createdAt: row.created_at, outputQuantity: row.output_quantity ? number(row.output_quantity) : undefined, outputUnit: row.output_unit ? String(row.output_unit) : undefined, items: recipeItems.filter((item) => item.component_type !== "packaging").map(toRecipeItem), packagingItems: recipeItems.filter((item) => item.component_type === "packaging").map(toRecipeItem) };
   }).filter((version) => productIds.has(version.productId));
-  return { products, recipeVersions, ingredients: (ingredientsResult.data || []).map((row) => toIngredient(row)) };
+  return { products: applyComboPricing(products, recipeVersions), recipeVersions, ingredients: (ingredientsResult.data || []).map((row) => toIngredient(row)) };
 }
 
 export async function saveCloudProduct(product: ProductMaster) {
@@ -121,7 +125,7 @@ export async function saveCloudRecipe(version: RecipeVersion, _storeId: string, 
     ...version.items.map((item) => ({ item, componentType: "ingredient" })),
     ...(version.packagingItems || []).map((item) => ({ item, componentType: "packaging" })),
   ];
-  const items = componentRows.map(({ item, componentType }) => ({ id: item.id, ingredient_id: item.ingredientId || null, component_type: item.preparedProductId ? "prepared" : componentType, custom_name: item.customName || null, custom_brand: item.customBrand || null, custom_category: item.customCategory || null, custom_cost: item.customCost || null, prepared_product_id: item.preparedProductId || null, prepared_recipe_version_id: item.preparedRecipeVersionId || null, quantity: item.quantity, unit: item.unit, waste_percent: item.wastePercent }));
+  const items = componentRows.map(({ item, componentType }) => ({ id: item.id, ingredient_id: item.ingredientId || null, component_type: item.comboProductId || item.comboProductName ? "combo" : item.preparedProductId ? "prepared" : componentType, custom_name: item.customName || null, custom_brand: item.customBrand || null, custom_category: item.customCategory || null, custom_cost: item.customCost || null, prepared_product_id: item.preparedProductId || null, prepared_recipe_version_id: item.preparedRecipeVersionId || null, combo_product_id: item.comboProductId || null, combo_product_name: item.comboProductName || null, quantity: item.quantity, unit: item.unit, waste_percent: item.wastePercent }));
   const { error } = await client.rpc("save_product_recipe_version", { p_version_id: version.id, p_product_id: version.productId, p_version: version.version, p_effective_from: version.effectiveFrom, p_previous_version_id: previousVersionId || null, p_output_quantity: version.outputQuantity || null, p_output_unit: version.outputUnit || null, p_items: items });
   if (error) throw error;
 }

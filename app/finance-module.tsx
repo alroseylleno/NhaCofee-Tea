@@ -25,8 +25,9 @@ import {
   type FinanceServiceRecord,
 } from "@/lib/finance-store";
 import { extractGrabPdfText, parseGrabReportText, parseGreenRevenueRows, parseShopeeIncomeCsv, type ParsedGrabReport } from "@/lib/grab-report";
-import { theoreticalProductCostWithComponents, type IngredientMaster, type ProductMaster as MasterProduct, type RecipeVersion } from "@/lib/master-data";
+import { type IngredientMaster, type ProductMaster as MasterProduct, type RecipeVersion } from "@/lib/master-data";
 import { loadCogsCatalog } from "@/lib/master-data-store";
+import { buildSanCogsBook, emptySanCogsBook, sanLineUnitCogs, type SanCogsBook } from "@/lib/san-cogs";
 import { isSupabaseConfigured } from "@/lib/supabase";
 import styles from "./finance.module.css";
 
@@ -915,38 +916,23 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const [importingGrabReport, setImportingGrabReport] = useState(false);
   const [reconciliationFilter, setReconciliationFilter] = useState<"all" | "pending" | "done">("all");
   const [reconciliationPlatform, setReconciliationPlatform] = useState<"all" | "grab" | "shopee" | "greensm">("all");
-  /// normalizedHeader(product name) → theoretical COGS of one unit. Built from
-  /// Product Master (UAT: its browser storage; Prod: a read-only Supabase
-  /// slice). Sàn listings carry no size, so variant M — the size the sàn menu
-  /// is priced from — wins; without an M the cheapest variant stands in.
-  const [cogsBook, setCogsBook] = useState<Map<string, number>>(new Map());
+  /// Theoretical COGS of a sàn invoice line, built from Product Master (UAT: its
+  /// browser storage; Prod: a read-only Supabase slice). See `lib/san-cogs.ts`:
+  /// the line's own option string adds the toppings and size-L upgrade the
+  /// customer paid for, which the item name alone does not show.
+  const [cogsBook, setCogsBook] = useState<SanCogsBook>(emptySanCogsBook());
   useEffect(() => {
     let cancelled = false;
-    const build = (products: MasterProduct[], versions: RecipeVersion[], ingredients: IngredientMaster[]) => {
-      const best = new Map<string, { cost: number; sellingPrice: number; isM: boolean }>();
-      for (const product of products) {
-        if (product.productType && product.productType !== "sellable") continue;
-        const cost = theoreticalProductCostWithComponents(product, products, versions, ingredients);
-        if (cost === undefined || cost <= 0) continue;
-        const key = normalizedHeader(product.name);
-        const isM = normalizedHeader(product.variant || "") === "m";
-        const current = best.get(key);
-        if (!current || (isM && !current.isM) || (isM === current.isM && product.sellingPrice > 0 && (current.sellingPrice <= 0 || product.sellingPrice < current.sellingPrice))) {
-          best.set(key, { cost, sellingPrice: product.sellingPrice, isM });
-        }
-      }
-      return new Map([...best.entries()].map(([key, value]) => [key, value.cost] as const));
-    };
     (async () => {
       try {
         if (uatMode) {
           const raw = window.localStorage.getItem("nha-ops-master-data-uat-v5");
           if (!raw) return;
           const stored = JSON.parse(raw) as { products?: MasterProduct[]; recipeVersions?: RecipeVersion[]; ingredients?: IngredientMaster[] };
-          if (!cancelled) setCogsBook(build(stored.products || [], stored.recipeVersions || [], stored.ingredients || []));
+          if (!cancelled) setCogsBook(buildSanCogsBook(stored.products || [], stored.recipeVersions || [], stored.ingredients || []));
         } else if (isSupabaseConfigured) {
           const catalog = await loadCogsCatalog();
-          if (!cancelled) setCogsBook(build(catalog.products, catalog.recipeVersions, catalog.ingredients));
+          if (!cancelled) setCogsBook(buildSanCogsBook(catalog.products, catalog.recipeVersions, catalog.ingredients));
         }
       } catch {
         // No catalog just means the "so với giá vốn" column shows "—".
@@ -2110,11 +2096,11 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   /// counterPriceFromItems, priced from Product Master recipes instead of the
   /// SAPO price book. Only a fully covered basket returns a usable total.
   function cogsFromItems(order: PlatformOrderRecord | undefined) {
-    if (!order?.items?.length || !cogsBook.size) return undefined;
+    if (!order?.items?.length || !cogsBook.base.size) return undefined;
     let total = 0;
     const missing: string[] = [];
     for (const item of order.items) {
-      const unitCost = cogsBook.get(normalizedHeader(item.name));
+      const unitCost = sanLineUnitCogs(cogsBook, item.name, item.option);
       if (unitCost === undefined) { missing.push(item.name); continue; }
       total += unitCost * (item.quantity || 1);
     }
@@ -2992,7 +2978,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 <div className={styles.basketList}>
                   {selectedGrabOrder.items.map((item, index) => {
                     const priced = counterPriceBook.get(normalizedHeader(item.name));
-                    const unitCogs = cogsBook.get(normalizedHeader(item.name));
+                    const unitCogs = sanLineUnitCogs(cogsBook, item.name, item.option);
                     return <div key={`${item.name}-${index}`}>
                       <span><b>{item.quantity} × {item.name}</b>{item.option && <small>{item.option}</small>}</span>
                       <em>{money(item.amount)}</em>
@@ -3059,7 +3045,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 if (!basketCogs?.covered) {
                   return <div className={styles.checkWarn}>
                     <span>So với giá vốn</span><b>—</b>
-                    <small>{basketCogs?.missing.length ? `thiếu giá vốn ${basketCogs.missing.length} món: ${basketCogs.missing.slice(0, 3).join(", ")}${basketCogs.missing.length > 3 ? "…" : ""}` : cogsBook.size ? "chưa có chi tiết món" : "chưa nạp công thức ở tab Sản phẩm"}</small>
+                    <small>{basketCogs?.missing.length ? `thiếu giá vốn ${basketCogs.missing.length} món: ${basketCogs.missing.slice(0, 3).join(", ")}${basketCogs.missing.length > 3 ? "…" : ""}` : cogsBook.base.size ? "chưa có chi tiết món" : "chưa nạp công thức ở tab Sản phẩm"}</small>
                   </div>;
                 }
                 const gain = received - basketCogs.total;
