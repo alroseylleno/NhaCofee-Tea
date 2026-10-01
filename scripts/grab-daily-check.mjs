@@ -151,6 +151,28 @@ function runSapoChain() {
   return { ran: true, ok: fetched.status === 0, note: fetched.status === 0 ? `SAPO: export + tải ${count} file mới.` : "Export SAPO xong nhưng chưa vớt được mail." };
 }
 
+/// Grab Merchant marketing raw data (Campaign · promo · keyword) for funnel
+/// analysis. Each file is a rolling-window snapshot, so one run a day is
+/// enough: later ticks and "Thử lại" skip it once today's three files exist.
+async function runGrabRawChain() {
+  const dir = path.join(projectRoot, "..", "..", "Report", "Grab RAW data");
+  const prefix = `${todayKey()}_`;
+  const have = await Promise.all(["Campaign", "promo", "keyword"].map(async (folder) => {
+    try { return (await readdir(path.join(dir, folder))).some((name) => name.startsWith(prefix)); } catch { return false; }
+  }));
+  if (have.every(Boolean)) return { ran: false, ok: true, note: "Grab RAW: đã đủ 3 file hôm nay." };
+  const result = spawnSync(process.execPath, [path.join(here, "export-grab-merchant.mjs")], {
+    cwd: projectRoot,
+    encoding: "utf8",
+    timeout: 8 * 60_000,
+  });
+  const output = `${result.stdout || ""}${result.stderr || ""}`;
+  if (result.status === 0) return { ran: true, ok: true, note: "Grab RAW: tải đủ 3 file." };
+  if (/phiên đã hết hạn|Chưa đăng nhập/.test(output)) return { ran: true, ok: false, note: "Grab RAW: phiên Grab Merchant hết hạn — mở Terminal ở nha-ops, chạy: npm run grab:raw -- --login (đăng nhập OTP)." };
+  const done = (output.match(/^✓/gm) || []).length;
+  return { ran: true, ok: false, note: result.signal ? "Grab RAW: chạy quá 8 phút nên bị dừng — bấm Thử lại." : `Grab RAW: chỉ tải được ${done}/3 file — xem .grab-state/grab-raw-error-*.png.` };
+}
+
 async function appIsUp() {
   try {
     const response = await fetch(APP_URL, { signal: AbortSignal.timeout(2000) });
@@ -258,6 +280,7 @@ async function main() {
     // appears with every report already sitting on disk.
     const sapo = argv.includes("--skip-sapo") ? { ran: false, ok: true, note: "" } : runSapoChain();
     const fetched = fetchReports();
+    const grabRaw = argv.includes("--skip-grab-raw") ? { ran: false, ok: true, note: "" } : await runGrabRawChain();
     const counted = await countReports();
 
     let headline;
@@ -270,8 +293,9 @@ async function main() {
       headline = "Không có báo cáo sàn mới.";
     }
     if (sapo.ran || sapo.note) headline += ` ${sapo.note}`;
+    if (grabRaw.note) headline += ` ${grabRaw.note}`;
 
-    const failed = !fetched.ok || (sapo.ran && !sapo.ok);
+    const failed = !fetched.ok || (sapo.ran && !sapo.ok) || !grabRaw.ok;
     const delta = counted.total - before;
     const message = `${failed ? "⚠ CÓ BƯỚC THẤT BẠI\n\n" : ""}${headline}\n\nThư mục: ${counted.detail}${delta > 0 ? ` (+${delta})` : ""}.\n\nĐối soát ngày ${key} xong chưa?`;
     console.log(message.replace(/\n+/g, " | "));
@@ -294,7 +318,7 @@ async function main() {
       return;
     }
     if (choice === "Thử lại") {
-      notify("Đối soát sàn", "Đang chạy lại chuỗi export SAPO + tải mail…");
+      notify("Đối soát sàn", "Đang chạy lại chuỗi export SAPO + tải mail + Grab RAW…");
       console.log("Chọn: Thử lại — chạy lại chuỗi.");
       outcome = await runChainOnce();
       continue;
