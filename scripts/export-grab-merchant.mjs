@@ -2,14 +2,15 @@
 // Tải dữ liệu thô Quản Lý Tiếp Thị của Grab Merchant về `Report/Grab RAW data/`,
 // đúng hành trình Long bấm tay:
 //
-//   Chiến dịch  : 180 ngày gần nhất (*) → Tải về → Tải về → CSV + Bao gồm tất cả các cột có sẵn → Campaign/
+//   Chiến dịch  : "6 tháng qua" = 183 ngày gần nhất (*) → Tải về → Tải về → CSV + Bao gồm tất cả các cột có sẵn → Campaign/
 //   Khuyến mãi  : 12 tháng qua → Áp dụng → Tải về → PNG (Tóm tắt chỉ số + Biểu đồ)      → promo/
 //   Từ khoá     : 3 tháng qua  → Áp dụng → Tải về → CSV + Bao gồm tất cả các cột có sẵn → keyword/
 //
-// (*) Long bấm "12 tháng qua", nhưng "Bao gồm tất cả các cột" kéo theo cột Hàng
-//     giờ và Grab khoá nút tải ("dữ liệu hàng giờ giới hạn trong 6 tháng"). Quảng
-//     cáo của quán bắt đầu 08/07/2026 nên 180 ngày vẫn chứa toàn bộ lịch sử ads
-//     tới đầu 01/2027; khoảng này đặt qua tham số `st`/`et` của chính trang Grab.
+// (*) Long chọn "6 tháng qua", nhưng bảng chọn ngày của Grab không có mục đó
+//     (chỉ 7/14/30 ngày, 3/12 tháng, Từ đầu tháng, Tùy chỉnh), và "Bao gồm tất
+//     cả các cột" kéo theo cột Hàng giờ nên Grab khoá nút tải quá 6 tháng. Đo
+//     01/10/2026: 183 ngày MỞ, 184 ngày (đúng 6 tháng lịch 01/04→01/10) KHOÁ.
+//     Khoảng này đặt qua tham số `st`/`et` của chính trang Grab.
 //
 //   npm run grab:raw                 # chạy ngầm (headless)
 //   npm run grab:raw -- --headed     # hiện cửa sổ để xem nó bấm, khi gỡ lỗi
@@ -35,7 +36,7 @@ const MERCHANT = "https://merchant.grab.com";
 const FALLBACK_ADVERTISER_ID = "547376854891398048";
 
 const REPORTS = [
-  { key: "campaigns", label: "Chiến dịch", folder: "Campaign", days: 180, format: "CSV", allColumns: true },
+  { key: "campaigns", label: "Chiến dịch", folder: "Campaign", days: 183, format: "CSV", allColumns: true },
   { key: "promo", label: "Khuyến mãi", folder: "promo", range: "12 tháng qua", format: "PNG", checkboxes: ["Tóm tắt chỉ số", "Biểu đồ với chế độ xem hiện tại"] },
   { key: "keywords", label: "Từ khoá", folder: "keyword", range: "3 tháng qua", format: "CSV", allColumns: true },
 ];
