@@ -15,7 +15,8 @@
     "sapo:prod": "node scripts/fetch-sapo-reports.mjs --target prod",
     "cogs:export": "node scripts/export-supabase-cogs.mjs",
     "sapo:export": "node scripts/export-sapo-reports.mjs",
-    "sapo:daily": "node scripts/export-sapo-reports.mjs && node scripts/fetch-sapo-reports.mjs --wait 300"
+    "sapo:daily": "node scripts/export-sapo-reports.mjs && node scripts/fetch-sapo-reports.mjs --wait 300",
+    "grab:raw": "node scripts/export-grab-merchant.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.7",
