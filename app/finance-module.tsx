@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   deleteFinanceGrabReconciliation,
   loadFinanceImports,
@@ -129,7 +129,7 @@ function readWorkbookQuietly<T>(read: () => T): T {
   }
 }
 
-const RECONCILIATION_BUILD = "R28";
+const RECONCILIATION_BUILD = "R29";
 
 /// How confidently a PDF row was tied to a SAPO order. "amount-only" means only
 /// the pre-discount value lined up, so the pairing deserves a second look.
@@ -197,7 +197,6 @@ function amountInput(value: string) { const digits = value.replace(/\D/g, ""); r
 function dateAt(year: number, month: number, day: number) { return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`; }
 function daysInMonth(year: number, month: number) { return new Date(Date.UTC(year, month, 0)).getUTCDate(); }
 function addDaysISO(value: string, days: number) { const date = new Date(`${value}T00:00:00Z`); date.setUTCDate(date.getUTCDate() + days); return date.toISOString().slice(0, 10); }
-function monthDiff(start: string, end: string) { const [sy, sm] = start.slice(0, 7).split("-").map(Number); const [ey, em] = end.slice(0, 7).split("-").map(Number); return (ey - sy) * 12 + em - sm; }
 function selectableMonthOptions(startMonth: string, endMonth: string) {
   const [startYear, startMonthNumber] = startMonth.split("-").map(Number);
   const [endYear, endMonthNumber] = endMonth.split("-").map(Number);
@@ -891,6 +890,13 @@ function depreciationForAsset(asset: ExpenseRecord, bounds: PeriodBounds) {
   return monthly * months;
 }
 
+// Owned from in-service (or purchase) date; book value = cost − all depreciation up to `date`.
+function assetOwnedOn(asset: ExpenseRecord) { return asset.inServiceOn || asset.incurredOn; }
+function assetBookValue(asset: ExpenseRecord, date: string) {
+  if (assetOwnedOn(asset) > date) return 0;
+  return asset.amount - depreciationForAsset(asset, { start: "0000-01-01", end: date } as PeriodBounds);
+}
+
 export default function FinanceModule({ inventoryLots, inventorySessions, onOpenInventoryLot, uatMode }: { inventoryLots: FinanceInventoryLot[]; inventorySessions: FinanceInventorySession[]; onOpenInventoryLot: (id: string) => void; uatMode: boolean }) {
   const today = todayISO();
   const storageKey = uatMode ? FINANCE_UAT_STORAGE_KEY : FINANCE_STORAGE_KEY;
@@ -920,6 +926,10 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const [importingGrabReport, setImportingGrabReport] = useState(false);
   const [reconciliationFilter, setReconciliationFilter] = useState<"all" | "pending" | "done">("all");
   const [reconciliationPlatform, setReconciliationPlatform] = useState<"all" | "grab" | "shopee" | "greensm">("all");
+  const [expandedReconciliationDays, setExpandedReconciliationDays] = useState<Set<string>>(() => new Set());
+  const [reconciliationLossOnly, setReconciliationLossOnly] = useState(false);
+  const [reconciliationItemFilter, setReconciliationItemFilter] = useState<{ key: string; name: string } | undefined>();
+  const [reconciliationDaySort, setReconciliationDaySort] = useState<{ key: "date" | "counter" | "cogs"; dir: "asc" | "desc" }>({ key: "date", dir: "desc" });
   /// Theoretical COGS of a sàn invoice line, built from Product Master (UAT: its
   /// browser storage; Prod: a read-only Supabase slice). See `lib/san-cogs.ts`:
   /// the line's own option string adds the toppings and size-L upgrade the
@@ -1318,15 +1328,15 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   /// Every sàn order in the period paired with its reconciliation, so the panel
   /// can show done and pending side by side. Pending rows carry the reason they
   /// cannot be settled yet — the usual cause is simply a missing Grab PDF.
-  const reconciliationRowsView = useMemo(() => {
+  function buildReconciliationRows(orderOptions: PlatformOrderRecord[], reconciliations: GrabReconciliationRecord[], range?: typeof bounds) {
     const reportDays = new Set(state.grabDailyReports.map((report) => `${report.platform || "grab"}:${report.reportDate}`));
     const byOrderId = new Map<string, GrabReconciliationRecord>();
     const byCodeDate = new Map<string, GrabReconciliationRecord>();
-    for (const entry of grabReconciliationRows) {
+    for (const entry of reconciliations) {
       if (entry.platformOrderId) byOrderId.set(entry.platformOrderId, entry);
       byCodeDate.set(`${entry.orderDate}:${entry.orderCode.toLocaleLowerCase("vi")}`, entry);
     }
-    const rows = grabOrderOptions.map((order) => {
+    const rows = orderOptions.map((order) => {
       const reconciliation = byOrderId.get(order.id) || byCodeDate.get(`${order.orderDate}:${order.orderCode.toLocaleLowerCase("vi")}`);
       const channel = marketplaceKey(`${order.channelName} ${order.paymentMethod || ""} ${order.deliveryPartner || ""}`);
       const platformKey = reconciliation?.settlement?.platform || reconciliation?.platform || channel;
@@ -1343,7 +1353,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     // re-imported under a different id) would otherwise vanish from every view,
     // making "Đã đối soát" under-report silently.
     const shown = new Set(rows.map((row) => row.reconciliation?.id).filter(Boolean));
-    const orphans = grabReconciliationRows.filter((entry) => !shown.has(entry.id)).map((entry) => ({
+    const orphans = reconciliations.filter((entry) => !shown.has(entry.id)).map((entry) => ({
       platformKey: entry.settlement?.platform || entry.platform || "grab",
       order: state.platformOrders.find((order) => order.id === entry.platformOrderId) || {
         id: entry.id, orderCode: entry.orderCode, orderDate: entry.orderDate, channelName: "Grab",
@@ -1358,12 +1368,22 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     // list, so without this a record from another month can ride in.
     const unique = new Map<string, typeof rows[number]>();
     for (const row of [...rows, ...orphans]) {
-      if (!inRange(row.order.orderDate, bounds)) continue;
+      if (range && !inRange(row.order.orderDate, range)) continue;
       const key = row.order.id || `${row.order.orderDate}:${row.order.orderCode}`;
       if (!unique.has(key)) unique.set(key, row);
     }
     return [...unique.values()].sort((left, right) => right.order.orderDate.localeCompare(left.order.orderDate) || left.order.orderCode.localeCompare(right.order.orderCode, "vi"));
-  }, [grabOrderOptions, grabReconciliationRows, state.grabDailyReports, state.platformOrders, bounds]);
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const reconciliationRowsView = useMemo(() => buildReconciliationRows(grabOrderOptions, grabReconciliationRows, bounds), [grabOrderOptions, grabReconciliationRows, state.grabDailyReports, state.platformOrders, bounds]);
+  /// The same rows with no period: a món picked from the all-history loss
+  /// dashboard must show its losing orders wherever they fall, not only the
+  /// ones inside the selected month.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const allTimeReconciliationRows = useMemo(() => buildReconciliationRows(
+    state.platformOrders.filter((entry) => isMarketplacePlatformOrder(entry) && !/huy|cancel/.test(normalizedHeader(entry.status))),
+    state.grabReconciliations,
+  ), [state.platformOrders, state.grabReconciliations, state.grabDailyReports]);
   /// Months that actually contain sàn orders. The global period picker defaults
   /// to the current month, which is routinely empty because the SAPO export lags
   /// behind — without this the panel just looks broken.
@@ -1435,7 +1455,6 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
 
   const reconciliationDoneCount = reconciliationRowsView.filter((row) => row.reconciliation).length;
   const reconciliationPendingCount = reconciliationRowsView.length - reconciliationDoneCount;
-  const visibleReconciliationRows = reconciliationRowsView.filter((row) => (reconciliationFilter === "all" || (reconciliationFilter === "done") === Boolean(row.reconciliation)) && (reconciliationPlatform === "all" || row.platformKey === reconciliationPlatform));
 
   const marketplaceFeeByChannel = useMemo(() => {
     const reconciliationByKey = new Map<string, GrabReconciliationRecord>();
@@ -2592,11 +2611,19 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     { code: "D", label: "Hao hụt", value: -inventoryWaste, tone: "cost", details: inventoryDetails("waste"), groups: inventoryGroups("waste"), itemCount: inventoryDetails("waste").length },
     { code: "E", formula: "E = A + B − C − D", label: "Tồn cuối kỳ", value: closingInventory, tone: "grand", details: [], groups: inventoryReportGroups(closingInventoryEntries), itemCount: closingInventoryEntries.length },
   ];
-  const assetValueDetails: PnlDetail[] = assetExpenses.map((asset) => ({ label: asset.name, date: asset.inServiceOn || asset.incurredOn, amount: asset.amount }));
-  const assetDepreciationDetails: PnlDetail[] = assetExpenses.map((asset) => ({ label: asset.name, date: bounds.end, amount: -depreciationForAsset(asset, bounds) }));
+  // Roll-forward like the inventory report: a purchase price appears once, in the
+  // period the asset was bought; every later period only carries its book value.
+  const assetOpeningDate = addDaysISO(bounds.start, -1);
+  const assetsOpening = assetExpenses.filter((asset) => assetOwnedOn(asset) < bounds.start).map((asset) => ({ asset, amount: assetBookValue(asset, assetOpeningDate) })).filter((entry) => entry.amount > 0);
+  const assetsAdded = assetExpenses.filter((asset) => inRange(assetOwnedOn(asset), bounds));
+  const assetsDepreciating = assetExpenses.map((asset) => ({ asset, amount: depreciationForAsset(asset, bounds) })).filter((entry) => entry.amount > 0);
+  const assetsClosing = assetExpenses.map((asset) => ({ asset, amount: assetBookValue(asset, bounds.end) })).filter((entry) => entry.amount > 0);
+  const assetReportGroups = (entries: Array<{ asset: ExpenseRecord; amount: number }>, date: (asset: ExpenseRecord) => string, sign = 1) => groupDetailsBy(entries, (entry) => entry.asset.subcategory || "Khác", (entry) => ({ label: entry.asset.name, date: date(entry.asset), amount: entry.amount * sign }));
   const assetRows: PnlRow[] = [
-    { code: "A", label: "Tài sản đang quản lý", value: assetExpenses.reduce((sum, asset) => sum + asset.amount, 0), tone: "total", details: assetValueDetails, groups: groupDetailsBy(assetExpenses, (asset) => asset.subcategory || "Khác", (asset) => ({ label: asset.name, date: asset.inServiceOn || asset.incurredOn, amount: asset.amount })), itemCount: assetExpenses.length },
-    { code: "B", label: "Khấu hao trong kỳ", value: -depreciation, tone: "cost", details: assetDepreciationDetails, groups: groupDetailsBy(assetExpenses, (asset) => asset.subcategory || "Khác", (asset) => ({ label: asset.name, date: bounds.end, amount: -depreciationForAsset(asset, bounds) })), itemCount: assetExpenses.length },
+    { code: "A", label: "Giá trị còn lại đầu kỳ", value: assetsOpening.reduce((sum, entry) => sum + entry.amount, 0), tone: "total", details: [], groups: assetReportGroups(assetsOpening, assetOwnedOn), itemCount: assetsOpening.length },
+    { code: "B", label: "Tài sản mua mới trong kỳ", value: assetsAdded.reduce((sum, asset) => sum + asset.amount, 0), tone: "income", details: [], groups: assetReportGroups(assetsAdded.map((asset) => ({ asset, amount: asset.amount })), assetOwnedOn), itemCount: assetsAdded.length },
+    { code: "C", label: "Khấu hao trong kỳ", value: -depreciation, tone: "cost", details: [], groups: assetReportGroups(assetsDepreciating, () => bounds.end, -1), itemCount: assetsDepreciating.length },
+    { code: "D", formula: "D = A + B − C", label: "Giá trị còn lại cuối kỳ", value: assetsClosing.reduce((sum, entry) => sum + entry.amount, 0), tone: "grand", details: [], groups: assetReportGroups(assetsClosing, assetOwnedOn), itemCount: assetsClosing.length },
   ];
   const pnlCostMix = [
     { label: "NVL", value: inventoryCogs + inventoryWaste },
@@ -2614,15 +2641,155 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const maxCashComponent = Math.max(...cashComponents.map((entry) => entry.value), 1);
   const closingCategoryValues = [...closingInventoryEntries.reduce<Map<string, number>>((groups, entry) => groups.set(entry.lot.category || "KHÁC", (groups.get(entry.lot.category || "KHÁC") || 0) + entry.amount), new Map()).entries()].map(([label, value]) => ({ label, value })).sort((left, right) => right.value - left.value).slice(0, 6);
   const maxClosingCategory = Math.max(...closingCategoryValues.map((entry) => entry.value), 1);
-  const assetOriginalValue = assetExpenses.reduce((sum, asset) => sum + asset.amount, 0);
-  const assetRemainingValue = assetExpenses.reduce((sum, asset) => {
-    const monthly = Math.max(0, asset.amount - (asset.salvageValue || 0)) / (asset.usefulLifeMonths || 1);
-    const elapsed = Math.min(asset.usefulLifeMonths || 0, Math.max(0, monthDiff(asset.inServiceOn || asset.incurredOn, bounds.end) + 1));
-    return sum + Math.max(asset.salvageValue || 0, asset.amount - monthly * elapsed);
-  }, 0);
+  const assetsOwned = assetExpenses.filter((asset) => assetOwnedOn(asset) <= bounds.end);
+  const assetOriginalValue = assetsOwned.reduce((sum, asset) => sum + asset.amount, 0);
+  const assetRemainingValue = assetsOwned.reduce((sum, asset) => sum + assetBookValue(asset, bounds.end), 0);
   const assetAccumulatedValue = Math.max(0, assetOriginalValue - assetRemainingValue);
-  const assetCategoryValues = [...assetExpenses.reduce<Map<string, number>>((groups, asset) => groups.set(asset.subcategory || "Khác", (groups.get(asset.subcategory || "Khác") || 0) + asset.amount), new Map()).entries()].map(([label, value]) => ({ label, value })).sort((left, right) => right.value - left.value);
+  const assetCategoryValues = [...assetsOwned.reduce<Map<string, number>>((groups, asset) => groups.set(asset.subcategory || "Khác", (groups.get(asset.subcategory || "Khác") || 0) + asset.amount), new Map()).entries()].map(([label, value]) => ({ label, value })).sort((left, right) => right.value - left.value);
   const maxAssetCategory = Math.max(...assetCategoryValues.map((entry) => entry.value), 1);
+
+  /// Every món that has EVER lost money against COGS on a sàn order, across
+  /// the whole reconciliation history (not the selected period). The order's
+  /// money left after the day's ads (same basis as the "So với giá vốn" column)
+  /// is split across its lines by each line's share of the basket, then the
+  /// line's own COGS is subtracted; a negative line is a losing line. Lines
+  /// without a recipe are skipped and named, never priced at zero.
+  const itemLossHistory = (() => {
+    const ordersById = new Map(state.platformOrders.map((order) => [order.id, order]));
+    const items = new Map<string, { key: string; name: string; lossCups: number; lossAmount: number; lastLoss: string; lossIds: Set<string> }>();
+    const uncovered = new Set<string>();
+    for (const reconciliation of state.grabReconciliations) {
+      const order = reconciliation.platformOrderId ? ordersById.get(reconciliation.platformOrderId) : undefined;
+      if (!order?.items?.length) continue;
+      const net = reconciliationJourney(reconciliation).netAfterMarketing;
+      const basket = order.items.reduce((sum, item) => sum + Math.max(0, item.amount || 0), 0);
+      if (!basket) continue;
+      for (const item of order.items) {
+        const unitCost = sanLineUnitCogs(cogsBook, item.name, item.option);
+        if (unitCost === undefined) { uncovered.add(item.name); continue; }
+        const quantity = item.quantity || 1;
+        const result = net * Math.max(0, item.amount || 0) / basket - unitCost * quantity;
+        if (result >= 0) continue;
+        const key = normalizedHeader(item.name);
+        const current = items.get(key) || { key, name: item.name, lossCups: 0, lossAmount: 0, lastLoss: "", lossIds: new Set<string>() };
+        current.lossCups += quantity;
+        current.lossAmount += -result;
+        if (order.orderDate > current.lastLoss) current.lastLoss = order.orderDate;
+        current.lossIds.add(reconciliation.id);
+        items.set(key, current);
+      }
+    }
+    const rows = [...items.values()].sort((left, right) => right.lossAmount - left.lossAmount);
+    return {
+      rows,
+      cups: rows.reduce((sum, item) => sum + item.lossCups, 0),
+      amount: rows.reduce((sum, item) => sum + item.lossAmount, 0),
+      uncovered: [...uncovered],
+    };
+  })();
+  /// The order table is grouped by day. Each day header reads what actually
+  /// landed in the pocket two ways: "PDF" is the sàn's own day total (payout −
+  /// the day's ads, i.e. Grab's "Tổng thu nhập"); "đối soát" is the sum of the
+  /// day's reconciled orders minus the SAME day-level ads — never the per-order
+  /// allocations, whose divisor includes unmatched orders. So the two only
+  /// differ when a PDF order is unmatched or a received amount was edited by
+  /// hand. Day totals follow the platform chips but NOT the done/pending chips —
+  /// hiding pending orders must not turn a matching day red.
+  const reconciliationDayGroups = (() => {
+    type Row = typeof reconciliationRowsView[number] & { counterValue?: number; cogsValue?: number };
+    const platformOf = (report: FinanceGrabDailyReportRecord) => report.platform || "grab";
+    const days = new Map<string, {
+      date: string; orders: number; byPlatform: Record<"grab" | "shopee" | "greensm", number>;
+      reconciled: number; reconciledReceived: number; pdfReports: number; pdfPayout: number; marketing: number;
+      counter: number; counterOrders: number; cogs: number; cogsOrders: number; rows: Row[];
+    }>();
+    const dayOf = (date: string) => {
+      let current = days.get(date);
+      if (!current) {
+        current = { date, orders: 0, byPlatform: { grab: 0, shopee: 0, greensm: 0 }, reconciled: 0, reconciledReceived: 0, pdfReports: 0, pdfPayout: 0, marketing: 0, counter: 0, counterOrders: 0, cogs: 0, cogsOrders: 0, rows: [] };
+        days.set(date, current);
+      }
+      return current;
+    };
+    // Picking a món from the loss dashboard drops the period: its losing orders
+    // span the whole history. Day totals still come from EVERY order of the day,
+    // so a day header never turns red just because only one order is shown.
+    const pickedLossIds = reconciliationItemFilter ? itemLossHistory.rows.find((item) => item.key === reconciliationItemFilter.key)?.lossIds || new Set<string>() : undefined;
+    const pickedDays = pickedLossIds ? new Set(allTimeReconciliationRows.filter((row) => row.reconciliation && pickedLossIds.has(row.reconciliation.id)).map((row) => row.order.orderDate)) : undefined;
+    const sourceRows = pickedDays ? allTimeReconciliationRows.filter((row) => pickedDays.has(row.order.orderDate)) : reconciliationRowsView;
+    for (const row of sourceRows) {
+      if (reconciliationPlatform !== "all" && row.platformKey !== reconciliationPlatform) continue;
+      const day = dayOf(row.order.orderDate);
+      day.orders += 1;
+      if (row.platformKey === "grab" || row.platformKey === "shopee" || row.platformKey === "greensm") day.byPlatform[row.platformKey] += 1;
+      const entry: Row = { ...row };
+      if (row.reconciliation) {
+        day.reconciled += 1;
+        day.reconciledReceived += row.reconciliation.receivedAmount;
+        const journey = reconciliationJourney(row.reconciliation);
+        if (journey.netVersusCounter !== undefined) { entry.counterValue = journey.netVersusCounter; day.counter += journey.netVersusCounter; day.counterOrders += 1; }
+        const basketCogs = cogsFromItems(state.platformOrders.find((order) => order.id === row.reconciliation!.platformOrderId));
+        if (basketCogs?.covered) { entry.cogsValue = journey.netAfterMarketing - basketCogs.total; day.cogs += entry.cogsValue; day.cogsOrders += 1; }
+      }
+      const statusOk = reconciliationFilter === "all" || (reconciliationFilter === "done") === Boolean(row.reconciliation);
+      const lossOk = !reconciliationLossOnly || (entry.cogsValue !== undefined && entry.cogsValue < 0);
+      const itemOk = !pickedLossIds || Boolean(row.reconciliation && pickedLossIds.has(row.reconciliation.id));
+      if (statusOk && lossOk && itemOk) day.rows.push(entry);
+    }
+    for (const report of state.grabDailyReports) {
+      if (!pickedDays && !inRange(report.reportDate, bounds)) continue;
+      if (reconciliationPlatform !== "all" && platformOf(report) !== reconciliationPlatform) continue;
+      const day = days.get(report.reportDate);
+      // A report for a day with no SAPO order in view has nothing to expand.
+      if (!day) continue;
+      day.pdfReports += 1;
+      day.pdfPayout += report.totalPayout;
+      day.marketing += report.totalMarketing;
+    }
+    const { key, dir } = reconciliationDaySort;
+    const sign = dir === "asc" ? 1 : -1;
+    // Rows without a value always sink to the bottom, whatever the direction.
+    const byValue = (a: number | undefined, b: number | undefined) => a === undefined || b === undefined ? (a === undefined ? (b === undefined ? 0 : 1) : -1) : sign * (a - b);
+    const groups = [...days.values()].filter((day) => day.rows.length).map((day) => {
+      const pdfNet = day.pdfReports ? day.pdfPayout - day.marketing : undefined;
+      const reconciledNet = day.reconciled ? day.reconciledReceived - day.marketing : undefined;
+      const gap = pdfNet !== undefined && reconciledNet !== undefined ? reconciledNet - pdfNet : undefined;
+      if (key !== "date") day.rows.sort((left, right) => byValue(key === "counter" ? left.counterValue : left.cogsValue, key === "counter" ? right.counterValue : right.cogsValue));
+      return {
+        ...day, pdfNet, reconciledNet, gap,
+        status: pdfNet === undefined ? "nopdf" as const : gap !== undefined && Math.abs(gap) < 1 ? "match" as const : "mismatch" as const,
+        counterValue: day.counterOrders ? day.counter : undefined,
+        cogsValue: day.cogsOrders ? day.cogs : undefined,
+      };
+    });
+    return groups.sort((left, right) => key === "date"
+      ? sign * left.date.localeCompare(right.date)
+      : byValue(key === "counter" ? left.counterValue : left.cogsValue, key === "counter" ? right.counterValue : right.cogsValue) || right.date.localeCompare(left.date));
+  })();
+  /// What the sàn actually transferred in the period, straight from the three
+  /// sàn's report emails: payout minus the day's ads ("Tổng thu nhập"). Unlike
+  /// summing reconciled orders it also counts orders SAPO never recorded.
+  const sanReportReceived = (() => {
+    const byPlatform = { grab: 0, shopee: 0, greensm: 0 } as Record<string, number>;
+    let marketing = 0;
+    for (const report of periodGrabReports) {
+      const key = report.platform || "grab";
+      byPlatform[key] = (byPlatform[key] || 0) + report.totalPayout - report.totalMarketing;
+      marketing += report.totalMarketing;
+    }
+    const missingDays = [...new Set(reconciliationRowsView.filter((row) => !row.reconciliation && row.reason?.startsWith("Chưa có báo cáo")).map((row) => `${MARKETPLACE_LABELS[row.platformKey] || row.platformKey} ${dateLabel(row.order.orderDate)}`))];
+    return { total: Object.values(byPlatform).reduce((sum, value) => sum + value, 0), byPlatform, marketing, reports: periodGrabReports.length, missingDays };
+  })();
+  function toggleReconciliationDaySort(key: "counter" | "cogs") {
+    setReconciliationDaySort((current) => current.key !== key ? { key, dir: "asc" } : current.dir === "asc" ? { key, dir: "desc" } : { key: "date", dir: "desc" });
+  }
+  function toggleReconciliationDay(date: string) {
+    setExpandedReconciliationDays((current) => {
+      const next = new Set(current);
+      if (next.has(date)) next.delete(date); else next.add(date);
+      return next;
+    });
+  }
 
   return <div className={styles.finance}>
     <header className={styles.financeHero}>
@@ -2732,7 +2899,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         <div className={styles.revenueKpis}>
           <article className={styles.primaryRevenueKpi}><span>DOANH THU SÀN GHI NHẬN</span><strong>{settledEntries.length ? money(platformRecordedRevenue) : "-"}</strong><small>{settledEntries.length ? `${platformRecordedChannels.covered.join(", ")} · ${settledEntries.length.toLocaleString("vi-VN")} đơn${platformRecordedChannels.missing.length ? ` · chưa có báo cáo ${platformRecordedChannels.missing.join(", ")}` : ""}` : "chờ báo cáo từ sàn"}</small></article>
           <article className={styles.primaryRevenueKpi}><span>DOANH THU SÀN · SAPO</span><strong>{money(platformOrderRevenue)}</strong><small>{successfulPlatformOrders.length.toLocaleString("vi-VN")} đơn sàn thành công · {channelPerformance.length.toLocaleString("vi-VN")} sàn</small></article>
-          <article className={styles.primaryRevenueKpi}><span>DOANH THU SÀN · THỰC NHẬN</span><strong>{money(receivedRevenue)}</strong><small>{reconciledEntries.length ? `${percent(reportedRevenue ? receivedRevenue / reportedRevenue * 100 : 0)} số SAPO · ${reconciledEntries.length.toLocaleString("vi-VN")} đơn đã đối soát` : "chưa đối soát đơn nào"}</small></article>
+          <article className={styles.primaryRevenueKpi} title={sanReportReceived.missingDays.length ? `Chưa có báo cáo: ${sanReportReceived.missingDays.join(", ")}` : "Đủ báo cáo cho mọi ngày có đơn sàn"}><span>DOANH THU SÀN · THỰC NHẬN</span><strong>{sanReportReceived.reports ? money(sanReportReceived.total) : "-"}</strong><small>{sanReportReceived.reports ? `Theo email sàn · Grab ${money(sanReportReceived.byPlatform.grab || 0)} · Shopee ${money(sanReportReceived.byPlatform.shopee || 0)} · GreenSM ${money(sanReportReceived.byPlatform.greensm || 0)} · đã trừ QC ${money(sanReportReceived.marketing)}${sanReportReceived.missingDays.length ? ` · thiếu ${sanReportReceived.missingDays.length} báo cáo` : ""}` : "chờ báo cáo từ sàn"}</small></article>
           <article><span>Trung bình/đơn</span><strong>{money(platformAverageOrder)}</strong><small>theo Danh sách hóa đơn</small></article>
           <article><span>Giảm giá sàn</span><strong>{money(platformDiscountAmount)}</strong><small>{percent(platformDiscountRate)} tiền hàng</small></article>
           <article><span>Phí sàn trung bình</span><strong>{settledEntries.length ? money(avgPlatformFee) : "-"}</strong><small>{settledEntries.length ? `${percent(avgListPrice ? avgPlatformFee / avgListPrice * 100 : 0)} giá bán · mỗi đơn` : "chờ báo cáo sàn"}</small></article>
@@ -2862,6 +3029,21 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
             <p className={styles.metricDisclaimer}>Grab tính phí quảng cáo theo ngày cho cả cửa hàng, không gắn với đơn nào — nên bảng này chỉ nhìn ở mức chiến dịch và ngày. Phần chia về từng đơn nằm trong chi tiết đơn.</p>
           </article>
         </div>
+        <article className={styles.revenuePanel}>
+          <div className={styles.revenuePanelTitle}><div><span>MÓN ĐÃ TỪNG LỖ SO VỚI GIÁ VỐN · TOÀN BỘ LỊCH SỬ</span><strong>{itemLossHistory.rows.length ? `${itemLossHistory.rows.length} món · ${itemLossHistory.cups.toLocaleString("vi-VN")} ly lỗ · lỗ ${money(itemLossHistory.amount)}` : "Chưa có món nào lỗ so với giá vốn"}</strong></div><small>bấm một món để lọc đơn ở bảng đối soát</small></div>
+          {itemLossHistory.rows.length > 0 && <div className={styles.itemLossTable}>
+            <div className={styles.itemLossHead}><span>Món</span><span>Số ly lỗ</span><span>Tiền lỗ</span><span>Lỗ TB / ly</span><span>Lần lỗ gần nhất</span></div>
+            {itemLossHistory.rows.map((item) => <button type="button" key={item.key} className={`${styles.itemLossRow} ${reconciliationItemFilter?.key === item.key ? styles.selected : ""}`} onClick={() => setReconciliationItemFilter(reconciliationItemFilter?.key === item.key ? undefined : { key: item.key, name: item.name })}>
+              <span><b>{item.name}</b></span>
+              <span><b>{item.lossCups.toLocaleString("vi-VN")}</b></span>
+              <span className={styles.negativeCell}><b>−{money(item.lossAmount)}</b></span>
+              <span className={styles.negativeCell}>−{money(item.lossAmount / item.lossCups)}</span>
+              <span>{dateLabel(item.lastLoss)}</span>
+            </button>)}
+            <div className={`${styles.itemLossRow} ${styles.itemLossTotal}`}><span><b>Tổng {itemLossHistory.rows.length} món</b></span><span><b>{itemLossHistory.cups.toLocaleString("vi-VN")}</b></span><span className={styles.negativeCell}><b>−{money(itemLossHistory.amount)}</b></span><span className={styles.negativeCell}>−{money(itemLossHistory.amount / itemLossHistory.cups)}</span><span /></div>
+          </div>}
+          <p className={styles.metricDisclaimer}>Tính trên MỌI đơn sàn đã đối soát từ trước tới nay, không theo kỳ đang chọn. Mỗi đơn: tiền CÒN LẠI SAU MARKETING (thực nhận trừ quảng cáo phân bổ của ngày — cùng cơ sở với cột So với giá vốn) được chia cho từng món theo tỷ lệ tiền dòng trong giỏ, rồi trừ giá vốn của món đó (ly nền + size + topping khách chọn); món nào ra âm là một lần lỗ. Bấm một món để bảng đối soát bên dưới hiện mọi đơn LỖ có món đó, ở mọi tháng; bấm lại hoặc ✕ để quay về tháng đang chọn.{itemLossHistory.uncovered.length ? <> Chưa có giá vốn, không tính: <b>{itemLossHistory.uncovered.join(", ")}</b>.</> : null}</p>
+        </article>
         <article className={`${styles.revenuePanel} ${styles.grabReconciliationPanel}`}>
           <div className={styles.revenuePanelTitle}><div><span>ĐỐI SOÁT ĐƠN SÀN · {RECONCILIATION_BUILD} · {bounds.label}</span><strong>{reconciliationDoneCount.toLocaleString("vi-VN")}/{reconciliationRowsView.length.toLocaleString("vi-VN")} đơn đã đối soát</strong></div><small>{percent(reconciliationRowsView.length ? reconciliationDoneCount / reconciliationRowsView.length * 100 : 0)} coverage</small></div>
           <div className={styles.grabIngestRow}>
@@ -2880,16 +3062,47 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
             {([["all", "Tất cả", reconciliationRowsView.length], ["pending", "Chưa đối soát", reconciliationPendingCount], ["done", "Đã đối soát", reconciliationDoneCount]] as const).map(([value, label, count]) => (
               <button type="button" key={value} className={reconciliationFilter === value ? styles.selected : ""} onClick={() => setReconciliationFilter(value)}>{label}<b>{count.toLocaleString("vi-VN")}</b></button>
             ))}
+            <button type="button" className={reconciliationLossOnly ? `${styles.selected} ${styles.lossChip}` : styles.lossChip} onClick={() => setReconciliationLossOnly((current) => !current)}>Đơn lỗ so với giá vốn<b>{reconciliationDayGroups.reduce((sum, day) => sum + day.rows.filter((row) => row.cogsValue !== undefined && row.cogsValue < 0).length, 0).toLocaleString("vi-VN")}</b></button>
+            {reconciliationItemFilter && <button type="button" className={`${styles.selected} ${styles.lossChip}`} title="Bỏ lọc món, quay về tháng đang chọn" onClick={() => setReconciliationItemFilter(undefined)}>Đơn lỗ có món {reconciliationItemFilter.name} · mọi tháng<b>×</b></button>}
           </div>
           <div className={styles.reconciliationFilters}>
             {([["all", "Mọi sàn"], ["grab", "GrabFood"], ["shopee", "ShopeeFood"], ["greensm", "GreenSM"]] as const).map(([value, label]) => (
               <button type="button" key={value} className={reconciliationPlatform === value ? styles.selected : ""} onClick={() => setReconciliationPlatform(value)}>{label}<b>{(value === "all" ? reconciliationRowsView.length : reconciliationRowsView.filter((row) => row.platformKey === value).length).toLocaleString("vi-VN")}</b></button>
             ))}
           </div>
-          <div className={styles.filterSummary}>[{RECONCILIATION_BUILD}] kỳ {bounds.start}→{bounds.end} · SAPO {state.platformOrders.length} đơn ({new Set(state.platformOrders.map((entry) => entry.id)).size} id duy nhất) · ngoài kỳ lọt vào: {reconciliationRowsView.filter((row) => !inRange(row.order.orderDate, bounds)).length} · Đang hiện <b>{visibleReconciliationRows.length.toLocaleString("vi-VN")}</b> / {reconciliationRowsView.length.toLocaleString("vi-VN")} đơn · {reconciliationFilter === "all" ? "tất cả" : reconciliationFilter === "done" ? "đã đối soát" : "chưa đối soát"} · {bounds.label}</div>
-          {visibleReconciliationRows.length ? <div className={styles.reconciliationTableWrap}><div className={styles.reconciliationTable}>
-            <div className={styles.reconciliationTableHead}><span>Đơn</span><span>Doanh thu sàn</span><span>Sàn ghi nhận sau trừ</span><span>SAPO ghi nhận</span><span>Thực nhận</span><span>So với quầy</span><span>So với giá vốn</span><span /></div>
-            {visibleReconciliationRows.map(({ order, reconciliation, reason }) => {
+          <div className={styles.filterSummary}>[{RECONCILIATION_BUILD}] kỳ {bounds.start}→{bounds.end} · SAPO {state.platformOrders.length} đơn ({new Set(state.platformOrders.map((entry) => entry.id)).size} id duy nhất) · ngoài kỳ lọt vào: {reconciliationRowsView.filter((row) => !inRange(row.order.orderDate, bounds)).length} · Đang hiện <b>{reconciliationDayGroups.reduce((sum, day) => sum + day.rows.length, 0).toLocaleString("vi-VN")}</b>{reconciliationItemFilter ? "" : ` / ${reconciliationRowsView.length.toLocaleString("vi-VN")}`} đơn · {reconciliationFilter === "all" ? "tất cả" : reconciliationFilter === "done" ? "đã đối soát" : "chưa đối soát"}{reconciliationLossOnly ? " · chỉ đơn lỗ so với giá vốn" : ""}{reconciliationItemFilter ? ` · đơn lỗ có món ${reconciliationItemFilter.name} · TOÀN BỘ LỊCH SỬ (bỏ qua kỳ)` : ` · ${bounds.label}`}</div>
+          {reconciliationDayGroups.length ? <div className={styles.reconciliationTableWrap}><div className={styles.reconciliationTable}>
+            <div className={styles.reconciliationTableHead}><span>Đơn</span><span>Doanh thu sàn</span><span>Sàn ghi nhận sau trừ</span><span>SAPO ghi nhận</span><span>Thực nhận</span>
+              {([["counter", "So với quầy"], ["cogs", "So với giá vốn"]] as const).map(([key, label]) => (
+                <button type="button" key={key} className={styles.reconciliationSortHead} title="Bấm: thấp → cao · bấm lần nữa: cao → thấp · lần ba: về theo ngày" onClick={() => toggleReconciliationDaySort(key)}>{label}<i>{reconciliationDaySort.key === key ? (reconciliationDaySort.dir === "asc" ? "▲" : "▼") : "↕"}</i></button>
+              ))}
+              <button type="button" className={styles.reconciliationSortHead} title={expandedReconciliationDays.size ? "Thu gọn tất cả ngày" : "Mở tất cả ngày"} onClick={() => setExpandedReconciliationDays(expandedReconciliationDays.size ? new Set() : new Set(reconciliationDayGroups.map((day) => day.date)))}><i>{expandedReconciliationDays.size ? "⊟" : "⊞"}</i></button>
+            </div>
+            {reconciliationDayGroups.map((day) => {
+              const open = expandedReconciliationDays.has(day.date);
+              return <Fragment key={day.date}>
+                <div className={`${styles.reconciliationTableRow} ${styles.reconciliationDayRow} ${open ? styles.open : ""}`} role="button" tabIndex={0} aria-expanded={open} onClick={() => toggleReconciliationDay(day.date)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleReconciliationDay(day.date); } }}>
+                  <span className={styles.reconciliationDayCell}><b><i>{open ? "▾" : "▸"}</i>{dateLabel(day.date)}</b><small>{day.reconciled}/{day.orders} đã đối soát</small></span>
+                  <span className={styles.reconciliationDayCounts}>
+                    <b>{day.orders.toLocaleString("vi-VN")} đơn</b>
+                    <small>XanhSM <b>{day.byPlatform.greensm}</b> · Grab <b>{day.byPlatform.grab}</b> · Shopee <b>{day.byPlatform.shopee}</b></small>
+                  </span>
+                  <span className={styles.reconciliationDayMoney} title={day.pdfReports ? `Chi trả ${money(day.pdfPayout)} − quảng cáo ${money(day.marketing)}` : "Chưa có báo cáo sàn cho ngày này"}><small>Thực nhận (PDF)</small><b>{day.pdfNet === undefined ? "—" : money(day.pdfNet)}</b></span>
+                  <span className={styles.reconciliationDayMoney} title={day.reconciled ? `Thực nhận ${day.reconciled} đơn ${money(day.reconciledReceived)} − quảng cáo ngày ${money(day.marketing)}` : "Chưa đối soát đơn nào"}><small>Thực nhận (đối soát)</small><b>{day.reconciledNet === undefined ? "—" : money(day.reconciledNet)}</b></span>
+                  <span>{day.status === "nopdf"
+                    ? <em className={styles.matchMissing}>Chưa có PDF</em>
+                    : day.status === "match"
+                      ? <em className={styles.matchOk}>KHỚP</em>
+                      : <em className={styles.matchBad}>KHỚP<small>{day.gap === undefined ? "chưa đối soát" : `lệch ${day.gap >= 0 ? "+" : "−"}${money(Math.abs(day.gap))}`}</small></em>}</span>
+                  <span className={day.counterValue === undefined ? "" : day.counterValue >= 0 ? styles.positiveCell : styles.negativeCell}>
+                    {day.counterValue === undefined ? "—" : <>{day.counterValue >= 0 ? "+" : "−"}{money(Math.abs(day.counterValue))}<small>{day.counterOrders}/{day.orders} đơn</small></>}
+                  </span>
+                  <span className={day.cogsValue === undefined ? "" : day.cogsValue >= 0 ? styles.positiveCell : styles.negativeCell}>
+                    {day.cogsValue === undefined ? "—" : <>{day.cogsValue >= 0 ? "+" : "−"}{money(Math.abs(day.cogsValue))}<small>{day.cogsOrders}/{day.orders} đơn</small></>}
+                  </span>
+                  <span />
+                </div>
+                {open && day.rows.map(({ order, reconciliation, reason }) => {
               if (!reconciliation) {
                 return <div className={`${styles.reconciliationTableRow} ${styles.pendingRow}`} key={order.id}>
                   <button type="button" onClick={() => openPlatformReconciliation(order)}><b>{order.orderCode}</b><small>{dateLabel(order.orderDate)} · {order.channelName}</small></button>
@@ -2925,8 +3138,11 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 })()}
                 <button type="button" aria-label="Xóa đối soát" onClick={() => void deleteGrabReconciliation(reconciliation.id)}>×</button>
               </div>;
+                })}
+              </Fragment>;
             })}
           </div></div> : <div className={styles.panelEmpty}>Không có đơn nào trong bộ lọc này.</div>}
+          <p className={styles.metricDisclaimer}>Bảng gộp theo ngày — bấm dòng ngày để xổ ra / thu lại các đơn, nút ⊞ ở góc phải tiêu đề mở hoặc thu tất cả. <b>Thực nhận (PDF)</b> = tổng chi trả trong báo cáo sàn của ngày trừ quảng cáo ngày (dòng Tổng thu nhập, tiền VỀ TÚI); <b>Thực nhận (đối soát)</b> = cộng tiền thực nhận các đơn đã đối soát trừ CÙNG khoản quảng cáo đó. Hai số chỉ lệch khi PDF có đơn chưa ghép được với SAPO, hoặc tiền thực nhận bị sửa tay. Bấm tiêu đề <b>So với quầy</b> / <b>So với giá vốn</b> để sắp xếp ngày (và đơn trong ngày) từ thấp đến cao.</p>
           <p className={styles.metricDisclaimer}>Bấm mã đơn để xem đường đi của tiền hoặc đối soát tay. Đơn chưa đối soát thường vì <b>chưa có báo cáo của sàn cho ngày đó</b> — Grab gửi PDF hằng ngày, ShopeeFood/GreenSM chỉ gửi mail ngày có đơn. <b>So với quầy</b> và <b>So với giá vốn</b> đối chiếu số CÒN LẠI SAU MARKETING (thực nhận trừ quảng cáo phân bổ của ngày) với giá quầy / giá vốn của cùng giỏ hàng — quảng cáo là chi phí thật của đơn dù Grab tính theo ngày; phần phân bổ là chia đều ước tính.</p>
         </article>
         {otherChannelOrders.length > 0 && <article className={styles.revenuePanel}>
@@ -3093,7 +3309,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       {reportView === "pnl" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article className={styles.visualPrimary}><span>DOANH THU THUẦN</span><strong>{money(netRevenue)}</strong><small>{revenueDetails.length} dòng doanh thu</small></article><article><span>LỢI NHUẬN GỘP</span><strong>{money(grossProfit)}</strong><small>{percent(grossMargin)} gross margin</small></article><article className={operatingProfit < 0 ? styles.visualRisk : ""}><span>LỢI NHUẬN HOẠT ĐỘNG</span><strong>{money(operatingProfit)}</strong><small>{netRevenue ? percent(operatingProfit / netRevenue * 100) : "-"} doanh thu</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>CƠ CẤU CHI PHÍ</span><h3>Chi phí đang tập trung ở đâu?</h3></div><b>{money(totalPeriodExpense)}</b></div><div className={styles.visualBars}>{pnlCostMix.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxPnlCost * 100}%` }} /></i><small>{totalPeriodExpense ? percent(entry.value / totalPeriodExpense * 100) : "0%"} tổng chi phí</small></div>)}</div></article></section>}
       {reportView === "cash" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article className={styles.visualPrimary}><span>TIỀN VÀO</span><strong>{money(cashIn)}</strong><small>{cashInDetails.length} dòng thu</small></article><article><span>TIỀN RA</span><strong>{money(cashOut)}</strong><small>{cashOutDetails.length} dòng chi</small></article><article className={netCash < 0 ? styles.visualRisk : ""}><span>DÒNG TIỀN THUẦN</span><strong>{money(netCash)}</strong><small>{cashIn ? percent(netCash / cashIn * 100) : "-"} tiền vào</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>TIỀN RA THEO NHÓM</span><h3>Dòng tiền đang đi vào đâu?</h3></div><b>{money(cashOut)}</b></div><div className={styles.visualBars}>{cashComponents.length ? cashComponents.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxCashComponent * 100}%` }} /></i><small>{cashOut ? percent(entry.value / cashOut * 100) : "0%"} tiền ra</small></div>) : <p>Chưa có dòng tiền ra trong kỳ.</p>}</div></article></section>}
       {reportView === "inventory" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article><span>TỒN ĐẦU KỲ</span><strong>{money(openingInventory)}</strong><small>{openingInventoryEntries.length} lô</small></article><article className={styles.visualPrimary}><span>TỒN CUỐI KỲ</span><strong>{money(closingInventory)}</strong><small>{closingInventoryEntries.length} lô còn giá trị</small></article><article><span>ĐÃ XUẤT / HAO HỤT</span><strong>{money(inventoryIssued)}</strong><small>Hao hụt {money(inventoryWaste)}</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>CƠ CẤU TỒN CUỐI KỲ</span><h3>Category giữ nhiều giá trị nhất</h3></div><b>{closingCategoryValues.length} category</b></div><div className={styles.visualBars}>{closingCategoryValues.length ? closingCategoryValues.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxClosingCategory * 100}%` }} /></i><small>{closingInventory ? percent(entry.value / closingInventory * 100) : "0%"} tồn cuối kỳ</small></div>) : <p>Chưa có tồn kho cuối kỳ.</p>}</div></article></section>}
-      {reportView === "assets" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article className={styles.visualPrimary}><span>NGUYÊN GIÁ</span><strong>{money(assetOriginalValue)}</strong><small>{assetExpenses.length} tài sản</small></article><article><span>ĐÃ KHẤU HAO</span><strong>{money(assetAccumulatedValue)}</strong><small>{assetOriginalValue ? percent(assetAccumulatedValue / assetOriginalValue * 100) : "0%"} nguyên giá</small></article><article><span>GIÁ TRỊ CÒN LẠI</span><strong>{money(assetRemainingValue)}</strong><small>Khấu hao kỳ {money(depreciation)}</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>CƠ CẤU TÀI SẢN</span><h3>Nguyên giá theo nhóm tài sản</h3></div><b>{assetCategoryValues.length} nhóm</b></div><div className={styles.visualBars}>{assetCategoryValues.length ? assetCategoryValues.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxAssetCategory * 100}%` }} /></i><small>{assetOriginalValue ? percent(entry.value / assetOriginalValue * 100) : "0%"} nguyên giá</small></div>) : <p>Chưa có tài sản trong kỳ.</p>}</div><div className={styles.assetValueTrack}><span>Giá trị còn lại</span><i><b style={{ width: `${assetOriginalValue ? assetRemainingValue / assetOriginalValue * 100 : 0}%` }} /></i><strong>{assetOriginalValue ? percent(assetRemainingValue / assetOriginalValue * 100) : "0%"}</strong></div></article></section>}
+      {reportView === "assets" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article className={styles.visualPrimary}><span>NGUYÊN GIÁ</span><strong>{money(assetOriginalValue)}</strong><small>{assetsOwned.length} tài sản</small></article><article><span>ĐÃ KHẤU HAO</span><strong>{money(assetAccumulatedValue)}</strong><small>{assetOriginalValue ? percent(assetAccumulatedValue / assetOriginalValue * 100) : "0%"} nguyên giá</small></article><article><span>GIÁ TRỊ CÒN LẠI</span><strong>{money(assetRemainingValue)}</strong><small>Khấu hao kỳ {money(depreciation)}</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>CƠ CẤU TÀI SẢN</span><h3>Nguyên giá theo nhóm tài sản</h3></div><b>{assetCategoryValues.length} nhóm</b></div><div className={styles.visualBars}>{assetCategoryValues.length ? assetCategoryValues.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxAssetCategory * 100}%` }} /></i><small>{assetOriginalValue ? percent(entry.value / assetOriginalValue * 100) : "0%"} nguyên giá</small></div>) : <p>Chưa có tài sản trong kỳ.</p>}</div><div className={styles.assetValueTrack}><span>Giá trị còn lại</span><i><b style={{ width: `${assetOriginalValue ? assetRemainingValue / assetOriginalValue * 100 : 0}%` }} /></i><strong>{assetOriginalValue ? percent(assetRemainingValue / assetOriginalValue * 100) : "0%"}</strong></div></article></section>}
       {reportView === "pnl" && (() => {
         // The A → A' bridge: what the sàn booked versus what actually lands,
         // itemised by the same components the P&L charges. A' here is derived
