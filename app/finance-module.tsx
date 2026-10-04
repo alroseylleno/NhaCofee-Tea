@@ -1686,7 +1686,9 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
 
   const expenseCategorySections = (Object.keys(categoryLabels) as ExpenseCategory[]).map((category) => {
     const manualEntries = category === "investment"
-      ? activeExpenses.filter((expense) => expense.category === category && expense.incurredOn <= bounds.end).map((expense) => ({ expense, date: expense.incurredOn, amount: expense.amount }))
+      // An asset's period charge is its depreciation (A / useful life per month), not the
+      // purchase price; assets bought this period stay listed so they can still be edited.
+      ? activeExpenses.filter((expense) => expense.category === category).map((expense) => ({ expense, date: expense.incurredOn, amount: depreciationForAsset(expense, bounds) })).filter((entry) => entry.amount > 0 || inRange(entry.date, bounds))
       : manualOccurrences.filter(({ expense }) => expense.category === category);
     const manualGroups = new Map<string, typeof manualEntries>();
     for (const occurrence of manualEntries) {
@@ -2659,7 +2661,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
             <div className={styles.expenseGroupItems}>{entries.map((entry) => <button type="button" className={`${styles.compactExpenseCard} ${entry.kind === "waste" ? styles.wasteCard : ""}`} key={entry.id} onClick={() => onOpenInventoryLot(entry.lot.id)}><span>{entry.lot.name} · {entry.kind === "waste" ? "Hao hụt" : "Xuất dùng"} {dateLabel(entry.date)}</span><b>{money(entry.amount)}</b></button>)}</div>
           </details>)}</div>
         </details>}
-        {selectedExpenseSection.manualGroups.map(([subcategory, entries]) => <details className={styles.expenseGroup} key={subcategory}><summary><span>{subcategory} <small>({entries.length} khoản)</small></span><b>{money(entries.reduce((sum, entry) => sum + entry.expense.amount, 0))}</b></summary><div className={styles.expenseGroupItems}>{entries.map(({ expense, date }) => <button type="button" className={styles.compactExpenseCard} key={`${expense.id}-${date}`} onClick={() => openEditExpense(expense)}><span>{expense.name} · {expense.recurrence === "once" ? dateLabel(date) : `TT ${dateLabel(date)}`}</span><b>{money(expense.amount)}</b></button>)}</div></details>)}
+        {selectedExpenseSection.manualGroups.map(([subcategory, entries]) => <details className={styles.expenseGroup} key={subcategory}><summary><span>{subcategory} <small>({entries.length} khoản)</small></span><b>{money(entries.reduce((sum, entry) => sum + entry.amount, 0))}</b></summary><div className={styles.expenseGroupItems}>{entries.map(({ expense, date, amount }) => <button type="button" className={styles.compactExpenseCard} key={`${expense.id}-${date}`} onClick={() => openEditExpense(expense)}><span>{expense.name} · {expense.category === "investment" ? `KH ${expense.usefulLifeMonths || "?"} tháng · NG ${money(expense.amount)}` : expense.recurrence === "once" ? dateLabel(date) : `TT ${dateLabel(date)}`}</span><b>{money(amount)}</b></button>)}</div></details>)}
         {!selectedExpenseSection.count && <div className={styles.empty}><b>Chưa có chi phí trong nhóm này</b><span>Nhấn “Thêm chi phí” để tạo giao dịch đầu tiên.</span></div>}
           </div>
         </details>
