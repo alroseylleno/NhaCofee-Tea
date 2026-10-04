@@ -878,8 +878,12 @@ function depreciationForAsset(asset: ExpenseRecord, bounds: PeriodBounds) {
   let cursor = `${asset.inServiceOn.slice(0, 7)}-01`;
   const endMonth = `${bounds.end.slice(0, 7)}-01`;
   let months = 0;
-  while (cursor <= endMonth && months < asset.usefulLifeMonths) {
+  // The useful-life cap counts every month since in-service, not just months inside
+  // the viewed period — otherwise a monthly view never sees the asset as fully depreciated.
+  let elapsed = 0;
+  while (cursor <= endMonth && elapsed < asset.usefulLifeMonths) {
     if (cursor.slice(0, 7) >= bounds.start.slice(0, 7)) months += 1;
+    elapsed += 1;
     const [year, month] = cursor.split("-").map(Number);
     const next = new Date(Date.UTC(year, month, 1));
     cursor = `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, "0")}-01`;
