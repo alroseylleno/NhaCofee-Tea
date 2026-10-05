@@ -1,5 +1,5 @@
 import { loadFinanceCounterPrices } from "./finance-store";
-import { loadInventory } from "./inventory-store";
+import { loadInventory, loadStores } from "./inventory-store";
 import { loadCogsCatalog } from "./master-data-store";
 import { DEFAULT_STORE, type ImportedProductSource, type ProductMaster } from "./master-data";
 
@@ -22,6 +22,7 @@ export const UAT_STORAGE_KEYS = {
   inventory: "nha-ops-inventory-local-uat-v1",
   inventoryActive: "nha-ops-active-local-uat-v1",
   inventoryMeta: "nha-ops-meta-local-uat-v1",
+  inventoryStores: "nha-ops-stores-local-uat-v1",
 } as const;
 
 export type UatSyncSummary = { products: number; recipeVersions: number; ingredients: number; lots: number; activeSessions: number; counterPrices: number };
@@ -39,7 +40,7 @@ function financeSnapshotFrom(products: ProductMaster[]): ImportedProductSource[]
 export async function syncProductionToUat(): Promise<UatSyncSummary> {
   // The price book comes along so the UAT sandbox can exercise the price sync
   // too; without it the button has nothing to read and cannot be tested there.
-  const [catalog, inventory, counterPrices] = await Promise.all([loadCogsCatalog(), loadInventory(), loadFinanceCounterPrices().catch(() => [])]);
+  const [catalog, inventory, counterPrices, stores] = await Promise.all([loadCogsCatalog(), loadInventory(), loadFinanceCounterPrices().catch(() => []), loadStores().catch(() => [])]);
   // Receipt files are served from Supabase Storage behind signed URLs that
   // expire within the hour, so the UAT copy drops them instead of keeping a
   // link that will be dead the next time the sandbox is opened.
@@ -67,6 +68,8 @@ export async function syncProductionToUat(): Promise<UatSyncSummary> {
   window.localStorage.setItem(UAT_STORAGE_KEYS.inventory, JSON.stringify(lots));
   window.localStorage.setItem(UAT_STORAGE_KEYS.inventoryActive, JSON.stringify(inventory.activeSessions));
   window.localStorage.setItem(UAT_STORAGE_KEYS.inventoryMeta, JSON.stringify(inventory.lotMeta));
+  // Every lot carries a store id, so the kho list travels with the lots.
+  if (stores.length) window.localStorage.setItem(UAT_STORAGE_KEYS.inventoryStores, JSON.stringify(stores));
 
   return {
     products: catalog.products.length,
