@@ -14,14 +14,16 @@
 //
 //   npm run grab:raw                 # chạy ngầm (headless)
 //   npm run grab:raw -- --headed     # hiện cửa sổ để xem nó bấm, khi gỡ lỗi
-//   npm run grab:raw -- --login      # lần đầu / khi phiên hết hạn: mở cửa sổ, chờ Long đăng nhập tay (OTP)
+//   npm run grab:raw -- --login      # mở cửa sổ, chờ Long đăng nhập tay (khi tự đăng nhập không qua được)
 //
-// Grab Merchant đăng nhập bằng OTP nên không thể tự điền mật khẩu như SAPO. Phiên
-// được giữ trong profile trình duyệt riêng `.grab-state/grab-merchant-profile`
-// (gitignored); hết hạn thì chạy lại với --login.
+// Phiên được giữ trong profile trình duyệt riêng `.grab-state/grab-merchant-profile`
+// (gitignored). Đăng nhập bằng "Tên đăng nhập" không hỏi OTP (Tên đăng nhập →
+// Tiếp tục → Mật khẩu → Đăng nhập), nên khi phiên hết hạn script tự đăng nhập lại
+// bằng GRAB_MERCHANT_USERNAME / GRAB_MERCHANT_PASSWORD trong .env.local
+// (npm run grab:setup hỏi). Thiếu hai biến đó thì vẫn phải --login tay.
 
 import { chromium } from "playwright";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -60,14 +62,79 @@ async function failStep(page, step, error) {
   console.error(`Ảnh chụp màn hình: ${shot}`);
 }
 
+async function loadEnvLocal() {
+  try {
+    const raw = await readFile(path.join(projectRoot, ".env.local"), "utf8");
+    for (const line of raw.split("\n")) {
+      const match = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
+      if (match && !(match[1] in process.env)) process.env[match[1]] = match[2].replace(/^["']|["']$/g, "");
+    }
+  } catch {
+    // Real environment variables are an acceptable source too.
+  }
+}
+
+const LOGIN_URL = `https://weblogin.grab.com/merchant/login?service_id=MEXUSERS&redirect=${encodeURIComponent(`${MERCHANT}/portal`)}`;
+
+/// Replays the username flow Long clicks by hand. Returns false when there are
+/// no stored credentials, so the caller falls back to asking for --login.
+async function autoLogin(page) {
+  const username = process.env.GRAB_MERCHANT_USERNAME;
+  const password = process.env.GRAB_MERCHANT_PASSWORD;
+  if (!username || !password) return false;
+  console.log("Phiên Grab Merchant hết hạn — tự đăng nhập lại…");
+  await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
+  // Once a session has lived in this profile, Grab opens /saved-accounts
+  // ("<user> thân mến, mừng bạn quay lại! → Tiếp tục") instead of the username
+  // form, and its password step submits with "Tiếp tục", not "Đăng nhập".
+  await page.waitForURL(/saved-accounts|login|challenge/, { timeout: 20_000 }).catch(() => {});
+  await page.waitForTimeout(2000);
+  if (page.url().includes("saved-accounts")) {
+    const remembered = (await page.locator("body").innerText()).toLocaleLowerCase("vi").includes(username.toLocaleLowerCase("vi"));
+    if (remembered) await page.getByRole("button", { name: "Tiếp tục", exact: true }).click();
+    else await page.getByRole("button", { name: /Đăng nhập với tài khoản khác/ }).click();
+  }
+  if (!page.url().includes("challenge/password")) {
+    await page.getByText("Tên đăng nhập", { exact: true }).first().click().catch(() => {});
+    const usernameBox = page.locator("#Username");
+    if (await usernameBox.isVisible({ timeout: 10_000 }).catch(() => false)) {
+      await usernameBox.fill(username);
+      await page.getByRole("button", { name: "Tiếp tục" }).click();
+    }
+  }
+  const passwordBox = page.locator('input[type="password"]:visible').first();
+  const notFound = page.getByText("Không tìm thấy tài khoản");
+  await passwordBox.or(notFound).first().waitFor({ timeout: 20_000 });
+  if (await notFound.isVisible()) throw new Error(`Grab không tìm thấy tài khoản "${username}" — sửa GRAB_MERCHANT_USERNAME bằng npm run grab:setup`);
+  await passwordBox.fill(password);
+  await page.getByRole("button", { name: /^(Đăng nhập|Tiếp tục)$/ }).first().click();
+  await page.waitForURL(/merchant\.grab\.com\/(?!vn-vn)/, { timeout: 60_000 }).catch(() => {});
+  return true;
+}
+
 /// Logged in = the marketing portal opens instead of bouncing to the public
 /// /vn-vn landing page.
 async function resolveAdvertiser(page) {
   await page.goto(`${MERCHANT}/dashboard`, { waitUntil: "domcontentloaded" });
+  if (!loginMode) {
+    // Let Grab's client-side redirect to /vn-vn fire before judging the session.
+    await page.waitForTimeout(6000);
+    if (/\/vn-vn\/?$|login|auth/.test(page.url()) && await autoLogin(page)) {
+      await page.goto(`${MERCHANT}/dashboard`, { waitUntil: "domcontentloaded" });
+    }
+  }
   if (loginMode) {
     console.log("Đăng nhập Grab Merchant trong cửa sổ trình duyệt (tối đa 10 phút)...");
+    // Right after goto the URL still reads /dashboard until Grab's client-side
+    // redirect to /vn-vn fires, so a single match would end the wait before
+    // Long can log in. Require a portal URL that holds across two polls.
     const deadline = Date.now() + 600_000;
-    while (Date.now() < deadline && !/merchant\.grab\.com\/(dashboard|marketing|food|store)/.test(page.url())) await page.waitForTimeout(3000);
+    const inPortal = () => /merchant\.grab\.com\/(dashboard|marketing|food|store)/.test(page.url()) && !/\/vn-vn|login|auth/.test(page.url());
+    let stable = 0;
+    while (Date.now() < deadline && stable < 2) {
+      await page.waitForTimeout(3000);
+      stable = inPortal() ? stable + 1 : 0;
+    }
   }
   await page.waitForTimeout(6000);
   await page.goto(`${MERCHANT}/marketing`, { waitUntil: "domcontentloaded" });
@@ -158,6 +225,7 @@ async function withBrowser(step, work) {
   }
 }
 
+await loadEnvLocal();
 await mkdir(STATE_DIR, { recursive: true });
 let failed = false;
 let advertiserId;

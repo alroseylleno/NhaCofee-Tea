@@ -168,7 +168,9 @@ async function runGrabRawChain() {
   });
   const output = `${result.stdout || ""}${result.stderr || ""}`;
   if (result.status === 0) return { ran: true, ok: true, note: "Grab RAW: tải đủ 3 file." };
-  if (/phiên đã hết hạn|Chưa đăng nhập/.test(output)) return { ran: true, ok: false, note: "Grab RAW: phiên Grab Merchant hết hạn — mở Terminal ở nha-ops, chạy: npm run grab:raw -- --login (đăng nhập OTP)." };
+  if (/phiên đã hết hạn|Chưa đăng nhập/.test(output)) return { ran: true, ok: false, note: process.env.GRAB_MERCHANT_USERNAME
+    ? "Grab RAW: phiên Grab Merchant hết hạn và tự đăng nhập lại không qua được — xem .grab-state/grab-raw-error-dang-nhap.png, hoặc chạy: npm run grab:raw -- --login."
+    : "Grab RAW: phiên Grab Merchant hết hạn — chạy npm run grab:setup để lưu tài khoản Grab Merchant (robot sẽ tự đăng nhập lại), hoặc: npm run grab:raw -- --login." };
   const done = (output.match(/^✓/gm) || []).length;
   return { ran: true, ok: false, note: result.signal ? "Grab RAW: chạy quá 8 phút nên bị dừng — bấm Thử lại." : `Grab RAW: chỉ tải được ${done}/3 file — xem .grab-state/grab-raw-error-*.png.` };
 }

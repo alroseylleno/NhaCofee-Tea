@@ -95,6 +95,17 @@ async function main() {
     if (sapoPassword) next = upsertEnv(next, "SAPO_PASSWORD", sapoPassword);
   }
 
+  // Optional Grab Merchant credentials, used by `grab:raw` to log back in by
+  // itself when the browser session expires. Enter skips/keeps.
+  const currentGrabUser = (existing.match(/^\s*GRAB_MERCHANT_USERNAME\s*=\s*(.*)$/m) || [])[1]?.trim();
+  console.log("\nTài khoản Grab Merchant — Tên đăng nhập, không phải số điện thoại (Enter để bỏ qua/giữ nguyên).");
+  const grabUser = (await ask(`Tên đăng nhập Grab Merchant${currentGrabUser ? ` [${currentGrabUser}]` : ""}: `)) || currentGrabUser || "";
+  if (grabUser) {
+    const grabPassword = (await ask("Mật khẩu Grab Merchant (gõ/dán, màn hình không hiện gì; Enter giữ mật khẩu cũ): ", { hidden: true })).trim();
+    next = upsertEnv(next, "GRAB_MERCHANT_USERNAME", grabUser);
+    if (grabPassword) next = upsertEnv(next, "GRAB_MERCHANT_PASSWORD", grabPassword);
+  }
+
   await writeFile(ENV_FILE, next);
   await chmod(ENV_FILE, 0o600);
 
@@ -102,6 +113,7 @@ async function main() {
   console.log(`  GRAB_MAIL_USER=${user}`);
   console.log(`  GRAB_MAIL_APP_PASSWORD=${"*".repeat(16)}`);
   if (sapoEmail) console.log(`  SAPO_EMAIL=${sapoEmail}\n  SAPO_PASSWORD=${"*".repeat(12)}`);
+  if (grabUser) console.log(`  GRAB_MERCHANT_USERNAME=${grabUser}\n  GRAB_MERCHANT_PASSWORD=${"*".repeat(12)}`);
   console.log("\nFile này đã nằm trong .gitignore, không lên GitHub.");
 
   // Verify on the spot: a credential that Gmail rejects should fail HERE, in
