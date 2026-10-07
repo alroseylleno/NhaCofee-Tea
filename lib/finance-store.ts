@@ -539,6 +539,14 @@ export async function upsertFinanceExpenses(records: FinanceExpenseRecord[], ign
   return (data || []).map((row) => expenseFromRow(row));
 }
 
+/// Hard delete. RLS that filters the row out reports success with zero rows, so
+/// the deleted row is selected back and its absence is treated as a failure.
+export async function deleteFinanceExpense(id: string) {
+  const { data, error } = await requireClient().from("finance_expenses").delete().eq("id", id).select("id");
+  if (error) throw supabaseFailure(error, "Không thể xoá chi phí");
+  if (!data?.length) throw new Error("Supabase không xoá dòng chi phí nào — có thể dòng đã bị xoá ở máy khác. Tải lại trang để xem dữ liệu mới nhất.");
+}
+
 function grabReconciliationRows(records: FinanceGrabReconciliationRecord[]) {
   return records.map((record) => ({
     id: record.id,

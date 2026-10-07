@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { ChangeEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
+  deleteFinanceExpense,
   deleteFinanceGrabReconciliation,
   loadFinanceImports,
   replaceFinanceImportBundle,
@@ -29,6 +30,7 @@ import { type IngredientMaster, type ProductMaster as MasterProduct, type Recipe
 import { loadCogsCatalog } from "@/lib/master-data-store";
 import { buildSanCogsBook, emptySanCogsBook, sanLineUnitCogs, type SanCogsBook } from "@/lib/san-cogs";
 import { isSupabaseConfigured } from "@/lib/supabase";
+import { useUrlState } from "@/lib/use-url-state";
 import styles from "./finance.module.css";
 
 export type FinanceInventoryLot = {
@@ -902,14 +904,14 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const storageKey = uatMode ? FINANCE_UAT_STORAGE_KEY : FINANCE_STORAGE_KEY;
   const [state, setState] = useState<FinanceState>(() => uatMode ? seedFinanceState() : emptyFinanceState());
   const [loaded, setLoaded] = useState(false);
-  const [tab, setTab] = useState<FinanceTab>("entry");
+  const [tab, setTab] = useUrlState<FinanceTab>("ft", "entry", ["entry", "revenue", "report", "dashboard"]);
   const [periodMode, setPeriodMode] = useState<PeriodMode>("month");
   const [selectedMonth, setSelectedMonth] = useState(today.slice(0, 7));
   const [selectedQuarter, setSelectedQuarter] = useState(Math.floor((Number(today.slice(5, 7)) - 1) / 3) + 1);
   const [selectedYear, setSelectedYear] = useState(Number(today.slice(0, 4)));
-  const [expenseCategory, setExpenseCategory] = useState<ExpenseCategory>("fixed");
-  const [reportView, setReportView] = useState<ReportView>("pnl");
-  const [revenueSubTab, setRevenueSubTab] = useState<RevenueSubTab>("overview");
+  const [expenseCategory, setExpenseCategory] = useUrlState<ExpenseCategory>("fc", "fixed", ["fixed", "operating", "sales", "investment"]);
+  const [reportView, setReportView] = useUrlState<ReportView>("fr", "pnl", ["pnl", "cash", "inventory", "assets"]);
+  const [revenueSubTab, setRevenueSubTab] = useUrlState<RevenueSubTab>("fv", "overview", ["overview", "products", "platform"]);
   // Ads-efficiency dashboard: granularity + the daily budget ceiling the owner set in Grab Ads.
   const [adsGranularity, setAdsGranularity] = useState<"daily" | "weekly" | "monthly">("daily");
   const [adsDailyCap, setAdsDailyCap] = useState(200000);
@@ -1790,6 +1792,24 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     if (!window.confirm(`Huỷ giao dịch “${expense.name}”? Giao dịch sẽ được giữ lại trong lịch sử.`)) return;
     try { await persistExpense({ ...expense, status: "voided" }); }
     catch (error) { const message = error instanceof Error ? error.message : "Không thể huỷ giao dịch."; setFinanceSyncError(message); window.alert(message); }
+  }
+
+  async function deleteExpense(expense: ExpenseRecord) {
+    if (currentPeriodClosed) { window.alert("Kỳ này đã khóa sổ và không thể xoá giao dịch."); return; }
+    const scope = expense.recurrence === "once" ? "" : `\nĐây là chi phí ${recurrenceLabels[expense.recurrence].toLocaleLowerCase("vi")} — xoá sẽ gỡ nó khỏi MỌI kỳ, kể cả các tháng trước.`;
+    if (!window.confirm(`Xoá chi phí “${expense.name}” (${money(expense.amount)})?${scope}\nKhông hoàn tác được.`)) return;
+    setFinanceSyncError(undefined);
+    try {
+      if (!uatMode) {
+        if (!isSupabaseConfigured) throw new Error("Production chưa cấu hình Supabase. Không thể xoá chi phí.");
+        await deleteFinanceExpense(expense.id);
+      }
+      setState((current) => ({ ...current, expenses: current.expenses.filter((entry) => entry.id !== expense.id) }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Không thể xoá chi phí.";
+      setFinanceSyncError(message);
+      window.alert(message);
+    }
   }
 
   async function markPaid(expense: ExpenseRecord) {
@@ -2828,7 +2848,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
             <div className={styles.expenseGroupItems}>{entries.map((entry) => <button type="button" className={`${styles.compactExpenseCard} ${entry.kind === "waste" ? styles.wasteCard : ""}`} key={entry.id} onClick={() => onOpenInventoryLot(entry.lot.id)}><span>{entry.lot.name} · {entry.kind === "waste" ? "Hao hụt" : "Xuất dùng"} {dateLabel(entry.date)}</span><b>{money(entry.amount)}</b></button>)}</div>
           </details>)}</div>
         </details>}
-        {selectedExpenseSection.manualGroups.map(([subcategory, entries]) => <details className={styles.expenseGroup} key={subcategory}><summary><span>{subcategory} <small>({entries.length} khoản)</small></span><b>{money(entries.reduce((sum, entry) => sum + entry.amount, 0))}</b></summary><div className={styles.expenseGroupItems}>{entries.map(({ expense, date, amount }) => <button type="button" className={styles.compactExpenseCard} key={`${expense.id}-${date}`} onClick={() => openEditExpense(expense)}><span>{expense.name} · {expense.category === "investment" ? `KH ${expense.usefulLifeMonths || "?"} tháng · NG ${money(expense.amount)}` : expense.recurrence === "once" ? dateLabel(date) : `TT ${dateLabel(date)}`}</span><b>{money(amount)}</b></button>)}</div></details>)}
+        {selectedExpenseSection.manualGroups.map(([subcategory, entries]) => <details className={styles.expenseGroup} key={subcategory}><summary><span>{subcategory} <small>({entries.length} khoản)</small></span><b>{money(entries.reduce((sum, entry) => sum + entry.amount, 0))}</b></summary><div className={styles.expenseGroupItems}>{entries.map(({ expense, date, amount }) => <div className={styles.expenseRow} key={`${expense.id}-${date}`}><button type="button" className={styles.compactExpenseCard} onClick={() => openEditExpense(expense)}><span>{expense.name} · {expense.category === "investment" ? `KH ${expense.usefulLifeMonths || "?"} tháng · NG ${money(expense.amount)}` : expense.recurrence === "once" ? dateLabel(date) : `TT ${dateLabel(date)}`}</span><b>{money(amount)}</b></button><button type="button" className={styles.expenseDelete} aria-label={`Xoá chi phí ${expense.name}`} title="Xoá chi phí" onClick={() => void deleteExpense(expense)}>×</button></div>)}</div></details>)}
         {!selectedExpenseSection.count && <div className={styles.empty}><b>Chưa có chi phí trong nhóm này</b><span>Nhấn “Thêm chi phí” để tạo giao dịch đầu tiên.</span></div>}
           </div>
         </details>

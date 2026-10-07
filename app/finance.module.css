@@ -111,6 +111,9 @@
 .inventoryCategoryGroup > summary b { color: #5c472b; font: 700 10px Arial, sans-serif; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .expenseGroupItems { display: grid; gap: 1px; padding: 6px; border-top: 1px solid #dfe6dc; background: #f1f5ef; }
 .compactExpenseCard { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; width: 100%; min-height: 42px; padding: 10px 11px; border: 1px solid transparent; border-radius: 9px; color: var(--ink); background: #fff; text-align: left; transition: border-color .14s ease, background .14s ease, transform .14s ease; }
+.expenseRow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px; align-items: center; }
+.expenseDelete { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 50%; color: #c2412d; background: transparent; font: 700 16px/1 Arial, sans-serif; cursor: pointer; transition: background .14s ease; }
+.expenseDelete:hover, .expenseDelete:focus-visible { background: #fbe4df; }
 .compactExpenseCard:hover { border-color: #bed1bf; background: #fbfdf9; transform: translateX(2px); }
 .compactExpenseCard span { overflow: hidden; font: 11px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
 .compactExpenseCard b { color: #285440; font: 700 12px Arial, sans-serif; white-space: nowrap; font-variant-numeric: tabular-nums; }

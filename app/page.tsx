@@ -7,6 +7,7 @@ import FinanceModule from "@/app/finance-module";
 import ProductMaster from "@/app/product-master";
 import { ALL_RECIPE_UNITS, unitDefinition } from "@/lib/master-data";
 import { isSupabaseConfigured, supabase } from "@/lib/supabase";
+import { useUrlState } from "@/lib/use-url-state";
 import { createActiveSession, DEFAULT_STORE_ID, importInventoryBatch, loadInventory, loadStores, migrateLocalLifecycle, removeActiveSession, removeInventory, saveInventory, saveStore, settleInventoryPeriod, settleInventoryPeriodWithCarry, transferInventory, updateActiveSession, type CloudStore, type CloudTransferLine } from "@/lib/inventory-store";
 
 type Receipt = { name: string; dataUrl?: string; path?: string };
@@ -206,9 +207,9 @@ export default function Home() {
   const [settlementUsed, setSettlementUsed] = useState("");
   const [settlingPeriod, setSettlingPeriod] = useState(false);
   const [showForm, setShowForm] = useState(false);
-  const [workspace, setWorkspace] = useState<"inventory" | "finance" | "products">("inventory");
-  const [tab, setTab] = useState<"inventory" | "active" | "report">("inventory");
-  const [inventoryView, setInventoryView] = useState<"stock" | "active" | "used" | "wasted" | "unconverted">("stock");
+  const [workspace, setWorkspace] = useUrlState<"inventory" | "finance" | "products">("w", "inventory", ["inventory", "finance", "products"]);
+  const [tab, setTab] = useUrlState<"inventory" | "active" | "report">("kt", "inventory", ["inventory", "active", "report"]);
+  const [inventoryView, setInventoryView] = useUrlState<"stock" | "active" | "used" | "wasted" | "unconverted">("kv", "stock", ["stock", "active", "used", "wasted", "unconverted"]);
   const [lifecycleFilter, setLifecycleFilter] = useState<LifecycleFilter>("active");
   const [activeSearch, setActiveSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState("all");

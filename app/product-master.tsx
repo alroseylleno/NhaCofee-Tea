@@ -44,6 +44,7 @@ import { applyUatWorkbookRecipes, workbookRecipeSummary } from "@/lib/uat-recipe
 import { loadFinanceCounterPrices, type FinanceCounterPrice } from "@/lib/finance-store";
 import { syncProductionToUat } from "@/lib/uat-sync";
 import { supabase } from "@/lib/supabase";
+import { useUrlState } from "@/lib/use-url-state";
 import styles from "./product-master.module.css";
 
 type MasterTab = "overview" | "queue" | "products";
@@ -290,7 +291,7 @@ export default function ProductMaster({ inventoryLots, uatMode }: { inventoryLot
     return products === next.products ? next : { ...next, products };
   });
   const [loaded, setLoaded] = useState(false);
-  const [tab, setTab] = useState<MasterTab>("overview");
+  const [tab, setTab] = useUrlState<MasterTab>("pt", "overview", ["overview", "queue", "products"]);
   const [search, setSearch] = useState("");
   const [catalogCategory, setCatalogCategory] = useState("");
   const [catalogSort, setCatalogSort] = useState<CatalogSort>("sku");
