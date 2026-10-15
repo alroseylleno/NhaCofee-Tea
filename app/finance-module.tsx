@@ -537,10 +537,18 @@ function parseCounterPriceRows(file: { name: string }, rows: unknown[][]): Parse
     const rowName = firstText(row, headers, ["ten mat hang (*)", "ten mat hang", "ten mat hang, combo"]);
     if (rowName) carriedName = rowName;
     const name = carriedName;
+    // Newer SAPO exports put the menu group ("Cà phê", "Matcha") in `Tên giá`
+    // and leave the size only as the suffix of `Mã mặt hàng theo giá`
+    // (BX-M, C-LC-S). Reading just `Tên giá` collapsed every tier to size ""
+    // and the import died on the (name, size) primary key.
     const tier = firstText(row, headers, ["ten gia", "loai gia"]).trim().toUpperCase();
-    const size = ["S", "M", "L"].includes(tier) ? tier : "";
+    const codeTier = /-(S|M|L)$/i.exec(firstText(row, headers, ["ma mat hang theo gia"]))?.[1].toUpperCase() || "";
+    const size = ["S", "M", "L"].includes(tier) ? tier : codeTier;
     const storePrice = firstNumber(row, headers, ["gia ban tai nha hang"]);
     if (!name || storePrice <= 0) continue;
+    // One row per (name, size) is what the table key allows; a repeated tier
+    // keeps its first price instead of failing the whole price book.
+    if (records.some((entry) => entry.name === name && (entry.size || "") === size)) continue;
     records.push({
       size,
       name,
