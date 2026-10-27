@@ -87,7 +87,7 @@ Owns:
 - Kho NVL tabs: inventory, active, report.
 - Stock/used-up views, category quick filters, search and sorting.
 - Inventory view filters include `Chưa quy đổi`: only sealed or currently active lots with no usable conversion; historical `Đã dùng` and `Hao hụt` lots are excluded.
-- Inventory card hierarchy is purchase month → Category → grouped ingredient. Opening an ingredient exposes the full receipt history grouped again by month, including lots outside the current card month.
+- Inventory card hierarchy is purchase month → Category → grouped ingredient. The month is `arrivalDate(lot)` = `transferredOn || purchasedOn` (2026-10-28): stock received by transfer sits in the month it reached that kho, so a September lot moved to kho 2 in October shows under October there; the `Tháng nhập` filter and the date sort use the same date. Card counts cover every lot of the card's month, not only lots still in stock — `Đang dùng` comes from `cardActiveCount`, and an open unit whose own month has no card is shown on the ingredient's newest card. Before this, a unit opened from a used-up lot (Cafe NGUYÊN CƯỜNG 011026-002) read `Đang dùng: 0` on a card that was visible. Opening an ingredient exposes the full receipt history grouped again by month, including lots outside the current card month.
 - Category normalization: categories are uppercased and case-only duplicates collapse into one category.
 - Add/edit/copy/delete flows, invoice attachment UI, Excel import/export.
 - Sealed/active/used/wasted calculations and deletion guardrails.

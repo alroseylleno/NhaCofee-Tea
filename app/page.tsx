@@ -100,6 +100,9 @@ function specAmountOf(specification: string) { const match = specification.match
 function specUnitOf(specification: string) { return specification.match(/^\s*\d+(?:[.,]\d+)?\s*([^\s\d]+)/)?.[1] || ""; }
 // A settlement return lot is internal stock, not a purchase. A piece is opened
 // too, but it is still purchased stock on its original purchase date.
+// When the lot reached the kho it sits in: stock received by transfer belongs to
+// the month it arrived, not to the month the source lot was bought.
+function arrivalDate(item: Pick<Ingredient, "purchasedOn" | "transferredOn">) { return item.transferredOn || item.purchasedOn; }
 function isReturnLot(item: Pick<Ingredient, "stockState" | "sourceSessionId">) { return item.stockState === "opened" && Boolean(item.sourceSessionId); }
 function amountLabel(amount: number, unit: string) { return `${amount.toLocaleString("vi-VN", { maximumFractionDigits: 2 })} ${unit}`.trim(); }
 function pieceLabel(item: Ingredient) { return item.pieceAmount ? amountLabel(item.pieceAmount, specUnitOf(item.specification)) : ""; }
@@ -416,13 +419,13 @@ export default function Home() {
     return { ...group, lots };
   }).filter((group) => group.lots.length > 0), [filteredGroups, inventoryView, activeSessions, items]);
   const inventoryMonthOptions = useMemo(() => [...new Set([
-    ...items.map((item) => item.purchasedOn.slice(0, 7)),
+    ...items.map((item) => arrivalDate(item).slice(0, 7)),
     ...activeSessions.filter((session) => session.status === "used" && session.closedAt).map((session) => session.closedAt!.slice(0, 7)),
   ].filter(Boolean))].sort((left, right) => right.localeCompare(left)), [items, activeSessions]);
   const inventoryTimedGroups = useMemo(() => inventoryViewGroups.map((group) => ({
     ...group,
     lots: group.lots.filter((lot) => {
-      const matchesPurchase = purchaseMonthFilter === "all" || lot.purchasedOn.startsWith(purchaseMonthFilter);
+      const matchesPurchase = purchaseMonthFilter === "all" || arrivalDate(lot).startsWith(purchaseMonthFilter);
       const matchesUsed = usedMonthFilter === "all" || activeSessions.some((session) => session.status === "used" && session.sourceReceiptId === lot.id && session.closedAt?.startsWith(usedMonthFilter));
       return matchesPurchase && matchesUsed;
     }),
@@ -431,7 +434,7 @@ export default function Home() {
   const inventoryGroups = useMemo(() => inventoryTimedGroups.filter((group) => inventoryCategory === "all" || group.category === inventoryCategory).sort((left, right) => {
     const difference = inventorySort === "stock"
       ? sealedInGroup(right) - sealedInGroup(left)
-      : Math.max(...right.lots.map((lot) => Date.parse(lot.purchasedOn))) - Math.max(...left.lots.map((lot) => Date.parse(lot.purchasedOn)));
+      : Math.max(...right.lots.map((lot) => Date.parse(arrivalDate(lot)))) - Math.max(...left.lots.map((lot) => Date.parse(arrivalDate(lot))));
     return difference || left.name.localeCompare(right.name, "vi");
   }), [inventoryTimedGroups, inventoryCategory, inventorySort]);
   const selectedGroup = detailGroup ? ingredientGroups.find((group) => group.key === detailGroup.key) || detailGroup : undefined;
@@ -440,7 +443,7 @@ export default function Home() {
     for (const group of inventoryGroups) {
       const lotsByMonth = new Map<string, Ingredient[]>();
       for (const lot of group.lots) {
-        const month = lot.purchasedOn.slice(0, 7);
+        const month = arrivalDate(lot).slice(0, 7);
         lotsByMonth.set(month, [...(lotsByMonth.get(month) || []), lot]);
       }
       for (const [month, lots] of lotsByMonth) {
@@ -456,12 +459,29 @@ export default function Home() {
         groups: groups.sort((left, right) => {
           const difference = inventorySort === "stock"
             ? sealedInGroup(right) - sealedInGroup(left)
-            : Math.max(...right.lots.map((lot) => Date.parse(lot.purchasedOn))) - Math.max(...left.lots.map((lot) => Date.parse(lot.purchasedOn)));
+            : Math.max(...right.lots.map((lot) => Date.parse(arrivalDate(lot)))) - Math.max(...left.lots.map((lot) => Date.parse(arrivalDate(lot))));
           return difference || left.name.localeCompare(right.name, "vi");
         }),
       })),
     }));
   }, [inventoryGroups, inventorySort, activeSessions, items]);
+  const cardMonthsByKey = useMemo(() => {
+    const months = new Map<string, string[]>();
+    for (const section of inventorySections) for (const category of section.categories) for (const group of category.groups) months.set(group.key, [...(months.get(group.key) || []), section.month]);
+    return months;
+  }, [inventorySections]);
+  // A card counts every lot of its month, not only those still in stock: a unit
+  // opened from a used-up lot is still "Đang dùng". An open unit whose month has
+  // no card is shown on the ingredient's newest card instead of nowhere.
+  function cardActiveCount(group: IngredientGroup, month: string) {
+    const months = cardMonthsByKey.get(group.key) || [month];
+    const newest = months.reduce((latest, entry) => entry > latest ? entry : latest, month);
+    const lotMonths = new Map(group.lots.map((lot) => [lot.id, arrivalDate(lot).slice(0, 7)]));
+    return openSessions.filter((session) => {
+      const lotMonth = lotMonths.get(session.sourceReceiptId);
+      return lotMonth === month || (lotMonth !== undefined && month === newest && !months.includes(lotMonth));
+    }).length;
+  }
   const selectedGroupLotMonths = useMemo(() => {
     if (!selectedGroup) return [] as Array<{ month: string; lots: Ingredient[] }>;
     const months = new Map<string, Ingredient[]>();
@@ -1296,7 +1316,7 @@ export default function Home() {
       <div className="inventory-search-controls"><label className="search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Tìm NVL, thương hiệu hoặc nhà cung cấp" /></label><label className="inventory-sort"><span>Sắp xếp</span><select value={inventorySort} onChange={(event) => setInventorySort(event.target.value as "purchasedOn" | "stock")}><option value="purchasedOn">Ngày nhập mới nhất</option><option value="stock">SL tồn kho cao nhất</option></select></label></div>
       <div className="inventory-month-filters"><label><span>Tháng nhập</span><select value={purchaseMonthFilter} onChange={(event) => setPurchaseMonthFilter(event.target.value)}><option value="all">Tất cả tháng</option>{inventoryMonthOptions.map((month) => <option value={month} key={`purchase-${month}`}>Tháng {month.slice(5)}/{month.slice(0, 4)}</option>)}</select></label><label><span>Tháng dùng hết</span><select value={usedMonthFilter} onChange={(event) => setUsedMonthFilter(event.target.value)}><option value="all">Tất cả tháng</option>{inventoryMonthOptions.map((month) => <option value={month} key={`used-${month}`}>Tháng {month.slice(5)}/{month.slice(0, 4)}</option>)}</select></label></div>
       {!loaded ? <p className="empty">Đang tải kho...</p> : inventorySections.length === 0 ? <div className="empty"><b>{items.length ? ({ stock: "Không còn nguyên liệu trong kho", active: "Chưa có nguyên liệu đang dùng", used: "Chưa có nguyên liệu đã dùng", wasted: "Chưa có nguyên liệu hao hụt", unconverted: "Không có nguyên liệu chưa quy đổi" } as const)[inventoryView] : "Kho đang trống"}</b><span>{items.length ? "Thử đổi tháng, trạng thái hoặc tìm bằng từ khóa khác." : "Nhấn dấu + để ghi nhận lần mua nguyên liệu đầu tiên."}</span></div> : <div className="inventory-timeline">{inventorySections.map((monthSection) => <details className="inventory-month-section" open={!collapsedInventoryMonths.has(monthSection.month)} onToggle={(event) => { const isOpen = event.currentTarget.open; setCollapsedInventoryMonths((current) => { const isCollapsed = current.has(monthSection.month); if (isOpen === !isCollapsed) return current; const next = new Set(current); if (isOpen) next.delete(monthSection.month); else next.add(monthSection.month); return next; }); }} key={monthSection.month}><summary className="inventory-month-heading"><span>{formatMonth(monthSection.month)}</span><b>{monthSection.categories.reduce((sum, category) => sum + category.groups.length, 0)} card NVL</b></summary><div className="inventory-month-content">{monthSection.categories.map((categorySection) => <section className="inventory-category-section" key={`${monthSection.month}-${categorySection.category}`}><div className="inventory-category-heading"><h3>{categorySection.category}</h3><span>{categorySection.groups.length} NVL</span></div><div className="inventory-list">{categorySection.groups.map((group) => {
-        const fullGroup = ingredientGroups.find((entry) => entry.key === group.key) || group; const lotIds = new Set(group.lots.map((lot) => lot.id)); const sealed = sealedInGroup(group); const active = openSessions.filter((session) => lotIds.has(session.sourceReceiptId)).length; const used = usedSessions.filter((session) => lotIds.has(session.sourceReceiptId)).length; const wasted = wastedSessions.filter((session) => lotIds.has(session.sourceReceiptId)).length; const latestLot = [...group.lots].sort((a, b) => b.purchasedOn.localeCompare(a.purchasedOn))[0]; const readyLot = [...group.lots].filter((lot) => sealedInLot(lot) > 0).sort((left, right) => Number(right.stockState === "opened") - Number(left.stockState === "opened") || left.purchasedOn.localeCompare(right.purchasedOn))[0]; const originalQuantity = group.lots.filter((lot) => !isReturnLot(lot)).reduce((sum, lot) => sum + lot.quantity, 0); const historyMonths = new Set(fullGroup.lots.map((lot) => lot.purchasedOn.slice(0, 7))).size;
+        const fullGroup = ingredientGroups.find((entry) => entry.key === group.key) || group; const monthLotIds = new Set(fullGroup.lots.filter((lot) => arrivalDate(lot).slice(0, 7) === monthSection.month).map((lot) => lot.id)); const sealed = sealedInGroup(group); const active = cardActiveCount(fullGroup, monthSection.month); const used = usedSessions.filter((session) => monthLotIds.has(session.sourceReceiptId)).length; const wasted = wastedSessions.filter((session) => monthLotIds.has(session.sourceReceiptId)).length; const latestLot = [...group.lots].sort((a, b) => b.purchasedOn.localeCompare(a.purchasedOn))[0]; const readyLot = [...group.lots].filter((lot) => sealedInLot(lot) > 0).sort((left, right) => Number(right.stockState === "opened") - Number(left.stockState === "opened") || left.purchasedOn.localeCompare(right.purchasedOn))[0]; const originalQuantity = group.lots.filter((lot) => !isReturnLot(lot)).reduce((sum, lot) => sum + lot.quantity, 0); const historyMonths = new Set(fullGroup.lots.map((lot) => lot.purchasedOn.slice(0, 7))).size;
         return <details className="ingredient-summary" key={`${monthSection.month}-${group.key}`}><summary><span className="summary-name"><b>{group.name}</b><small>{group.brand} · {group.specification} · {group.lots.length} lần nhập trong tháng{multiStore && storeScope === "all" && storeBreakdown(group) ? ` · ${storeBreakdown(group)}` : ""}</small></span>{readyLot && inventoryView === "stock" && !(multiStore && storeScope === "all") && <button type="button" className="quick-activate-button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); requestActivation(fullGroup, readyLot); }}>{readyLot.pieceAmount ? `Mở lẻ ${pieceLabel(readyLot)}` : readyLot.stockState === "opened" && readyLot.conversion ? `Mở lại ${conversionLabel(readyLot.conversion)}` : `Mở 1 ${readyLot.unit}`} <b>{sealed}/{originalQuantity}</b></button>}<span className="summary-counts"><span><b>Kho:</b> {stockText(group.lots)}</span><span className={active ? "has-active" : ""}><b>Đang dùng:</b> {active}</span><span className={used ? "has-used" : ""}><b>Đã dùng:</b> {used}</span><span className={wasted ? "has-waste" : ""}><b>Hao hụt:</b> {wasted}</span></span></summary><div className="ingredient-group-items">{[...group.lots].sort((left, right) => (right.returnedOn || right.purchasedOn).localeCompare(left.returnedOn || left.purchasedOn)).map((lot) => <div className="ingredient-lot-row" key={lot.id}><span><b>{lot.receiptCode || "Chưa có mã phiếu"}{lot.pieceAmount ? <em className="opened-stock-badge">Lẻ</em> : lot.stockState === "opened" && <em className="opened-stock-badge">Đã mở</em>}</b><small>{isReturnLot(lot) ? `Hoàn kho ${formatDate(lot.returnedOn || lot.purchasedOn)}` : lot.transferredFromId ? `Nhận chuyển kho ${formatDate(lot.transferredOn || lot.purchasedOn)}` : `Nhập ${formatDate(lot.purchasedOn)}`} · còn {lot.pieceAmount ? (sealedInLot(lot) ? `lẻ ${pieceLabel(lot)}` : "0") : `${sealedInLot(lot).toLocaleString("vi-VN")} ${lot.unit}`}{transferredOutByLot[lot.id] ? ` · đã chuyển đi ${transferredOutText(lot)}` : ""}{multiStore && storeScope === "all" ? ` · ${storeName(lot.storeId)}` : ""}{lot.stockState === "opened" && lot.conversion ? ` (${conversionLabel(lot.conversion)})` : ""}</small></span><div>{sealedInLot(lot) > 0 && <button type="button" className="lot-activate-button" onClick={() => requestActivation(fullGroup, lot)}>{lot.pieceAmount ? "Mở phần lẻ" : lot.stockState === "opened" ? "Mở lại" : "Mở 1"}</button>}<button type="button" onClick={() => setDetailLot(lot)}>Chi tiết</button><button type="button" onClick={() => copyIngredient(lot)}>Copy</button></div></div>)}{multiStore && sealed > 0 && inventoryView === "stock" && <button type="button" className="ingredient-history-button" onClick={() => openTransfer(fullGroup)}>Chuyển kho · còn {stockText(group.lots, group.unit)} →</button>}<button type="button" className="ingredient-history-button" onClick={() => setDetailGroup(fullGroup)}>Xem toàn bộ lịch sử · {fullGroup.lots.length} lần nhập / {historyMonths} tháng →</button></div></details>;
       })}</div></section>)}</div></details>)}</div>}
     </section>}
