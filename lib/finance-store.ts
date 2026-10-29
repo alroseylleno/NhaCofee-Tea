@@ -109,7 +109,29 @@ export type FinancePlatformOrderRecord = {
   importedAt?: string;
   /// Present only when the invoice export included item detail.
   items?: FinanceOrderItem[];
+  /// SAPO's Khu vực / Thu ngân — the signals that tell which điểm bán sold it.
+  sapoArea?: string;
+  sapoCashier?: string;
 };
+
+/// One order of a sàn settlement report, kept whole on the daily report so a
+/// merchant whose orders never reach SAPO (N2's sàn stores) still has a full
+/// đối soát: value, merchant promo, commission, taxes and payout.
+export type FinanceSanReportOrder = {
+  code: string;
+  time: string;
+  orderValue: number;
+  merchantPromo: number;
+  commission: number;
+  vatTax: number;
+  incomeTax: number;
+  shippingSupport: number;
+  payout: number;
+};
+
+/// A manual "this invoice belongs to that store" decision. Imports never touch
+/// these, so a re-import keeps every choice Long made.
+export type FinanceOrderStoreAssignment = { orderId: string; storeId: string; note?: string };
 
 // One line of the discount stack on a sàn order. SAPO only reports a single
 // lump "Tổng giảm giá", so the layers behind it (sàn-funded promo, merchant
@@ -153,6 +175,12 @@ export type FinanceGrabDailyReportRecord = {
   id: string;
   /// Which sàn produced the report; defaults to "grab" for pre-platform rows.
   platform: string;
+  /// The điểm bán whose merchant account sent the report; absent = default store.
+  storeId?: string;
+  /// Merchant id read from the report (Grab file name, Shopee/GreenSM "ID cửa hàng").
+  merchantId?: string;
+  /// Every order of the report with its settlement; empty on rows saved before 20261030000100.
+  orders?: FinanceSanReportOrder[];
   reportDate: string;
   fileName: string;
   importedAt: string;
@@ -170,6 +198,8 @@ export type FinanceGrabReconciliationRecord = {
   id: string;
   /// Which sàn settled this order; defaults to "grab" for pre-platform rows.
   platform?: string;
+  /// Store of the merchant whose report settled it; absent = default store.
+  storeId?: string;
   platformOrderId?: string;
   orderCode: string;
   orderDate: string;
@@ -249,6 +279,8 @@ export type FinanceExpenseRecord = {
   salvageValue?: number;
   inServiceOn?: string;
   status: "active" | "voided";
+  /// Điểm bán that carries the cost; absent = Toàn chuỗi (shared, allocated by revenue).
+  storeId?: string;
 };
 
 export type FinanceCloudState = {
@@ -257,6 +289,9 @@ export type FinanceCloudState = {
   products: FinanceProductRecord[];
   services: FinanceServiceRecord[];
   platformOrders: FinancePlatformOrderRecord[];
+  /// Non-sàn invoices (at the counter, Website) from the same SAPO export.
+  counterOrders: FinancePlatformOrderRecord[];
+  orderStoreAssignments: FinanceOrderStoreAssignment[];
   grabReconciliations: FinanceGrabReconciliationRecord[];
   grabDailyReports: FinanceGrabDailyReportRecord[];
   counterPrices: FinanceCounterPrice[];
@@ -291,6 +326,7 @@ function expenseFromRow(row: Record<string, unknown>): FinanceExpenseRecord {
     salvageValue: row.salvage_value === null || row.salvage_value === undefined ? undefined : numberValue(row.salvage_value),
     inServiceOn: row.in_service_on ? String(row.in_service_on) : undefined,
     status: row.status as FinanceExpenseRecord["status"],
+    storeId: row.store_id ? String(row.store_id) : undefined,
   };
 }
 
@@ -298,6 +334,7 @@ function grabReconciliationFromRow(row: Record<string, unknown>): FinanceGrabRec
   return {
     id: String(row.id),
     platform: row.platform ? String(row.platform) : "grab",
+    storeId: row.store_id ? String(row.store_id) : undefined,
     platformOrderId: row.platform_order_id ? String(row.platform_order_id) : undefined,
     orderCode: String(row.order_code),
     orderDate: String(row.order_date),
@@ -316,6 +353,9 @@ function grabDailyReportFromRow(row: Record<string, unknown>): FinanceGrabDailyR
   return {
     id: String(row.id),
     platform: row.platform ? String(row.platform) : "grab",
+    storeId: row.store_id ? String(row.store_id) : undefined,
+    merchantId: row.merchant_id ? String(row.merchant_id) : undefined,
+    orders: normalizeSanReportOrders(row.orders),
     reportDate: String(row.report_date),
     fileName: row.file_name ? String(row.file_name) : "",
     importedAt: row.imported_at ? String(row.imported_at) : new Date().toISOString(),
@@ -334,6 +374,24 @@ function grabDailyReportFromRow(row: Record<string, unknown>): FinanceGrabDailyR
       return { code: String(line?.code ?? ""), time: String(line?.time ?? ""), orderValue: numberValue(line?.orderValue), payout: numberValue(line?.payout), expectedSapo: numberValue(line?.expectedSapo) };
     }),
   };
+}
+
+export function normalizeSanReportOrders(value: unknown): FinanceSanReportOrder[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => {
+    const line = entry as Record<string, unknown>;
+    return {
+      code: String(line?.code ?? ""),
+      time: String(line?.time ?? ""),
+      orderValue: numberValue(line?.orderValue),
+      merchantPromo: numberValue(line?.merchantPromo),
+      commission: numberValue(line?.commission),
+      vatTax: numberValue(line?.vatTax),
+      incomeTax: numberValue(line?.incomeTax),
+      shippingSupport: numberValue(line?.shippingSupport),
+      payout: numberValue(line?.payout),
+    };
+  }).filter((line) => line.code.length > 0);
 }
 
 function counterPriceFromRow(row: Record<string, unknown>): FinanceCounterPrice {
@@ -380,7 +438,15 @@ function platformOrderFromRow(row: Record<string, unknown>): FinancePlatformOrde
         }).filter((item) => item.name.length > 0)
       : undefined,
     importedAt: row.imported_at ? String(row.imported_at) : undefined,
+    sapoArea: row.sapo_area ? String(row.sapo_area) : undefined,
+    sapoCashier: row.sapo_cashier ? String(row.sapo_cashier) : undefined,
   };
+}
+
+/// Tables added by 20261030000100. Until the migration reaches an environment
+/// they read as empty instead of breaking the whole Finance load.
+function missingTable(error: { code?: string; message?: string } | null) {
+  return Boolean(error && (error.code === "42P01" || error.code === "PGRST205" || /does not exist|schema cache/i.test(error.message || "")));
 }
 
 function supabaseFailure(error: unknown, context: string) {
@@ -393,7 +459,7 @@ function supabaseFailure(error: unknown, context: string) {
 
 export async function loadFinanceImports(): Promise<FinanceCloudState> {
   const client = requireClient();
-  const [expensesResult, importsResult, revenueResult, productsResult, servicesResult, platformOrdersResult, grabResult, dailyReportsResult, counterPricesResult] = await Promise.all([
+  const [expensesResult, importsResult, revenueResult, productsResult, servicesResult, platformOrdersResult, grabResult, dailyReportsResult, counterPricesResult, counterOrdersResult, assignmentsResult] = await Promise.all([
     client.from("finance_expenses").select("*").order("incurred_on", { ascending: false }),
     client.from("finance_imports").select("*").order("imported_at", { ascending: false }),
     client.from("finance_revenue_rows").select("*").order("report_date", { ascending: false }),
@@ -403,7 +469,11 @@ export async function loadFinanceImports(): Promise<FinanceCloudState> {
     client.from("finance_grab_reconciliations").select("*").order("order_date", { ascending: false }),
     client.from("finance_grab_daily_reports").select("*").order("report_date", { ascending: false }),
     client.from("finance_counter_prices").select("*").order("name", { ascending: true }),
+    client.from("finance_counter_order_rows").select("*").order("order_date", { ascending: false }),
+    client.from("finance_order_store_assignments").select("*"),
   ]);
+  if (counterOrdersResult.error && !missingTable(counterOrdersResult.error)) throw supabaseFailure(counterOrdersResult.error, "Không thể tải hoá đơn tại quầy");
+  if (assignmentsResult.error && !missingTable(assignmentsResult.error)) throw supabaseFailure(assignmentsResult.error, "Không thể tải đơn đã chuyển điểm bán");
   if (platformOrdersResult.error) throw supabaseFailure(platformOrdersResult.error, "Không thể tải chi tiết đơn nền tảng");
   if (grabResult.error) throw supabaseFailure(grabResult.error, "Không thể tải đối soát sàn");
   if (dailyReportsResult.error) throw supabaseFailure(dailyReportsResult.error, "Không thể tải báo cáo Grab theo ngày");
@@ -504,7 +574,9 @@ export async function loadFinanceImports(): Promise<FinanceCloudState> {
   const grabReconciliations: FinanceGrabReconciliationRecord[] = (grabResult.data || []).map((row) => grabReconciliationFromRow(row));
   const grabDailyReports: FinanceGrabDailyReportRecord[] = (dailyReportsResult.data || []).map((row) => grabDailyReportFromRow(row));
   const counterPrices: FinanceCounterPrice[] = (counterPricesResult.data || []).map((row) => counterPriceFromRow(row));
-  return { expenses, revenues, products, services, platformOrders, grabReconciliations, grabDailyReports, counterPrices, imports };
+  const counterOrders: FinancePlatformOrderRecord[] = counterOrdersResult.error ? [] : (counterOrdersResult.data || []).map((row) => platformOrderFromRow(row));
+  const orderStoreAssignments: FinanceOrderStoreAssignment[] = assignmentsResult.error ? [] : (assignmentsResult.data || []).map((row) => ({ orderId: String(row.order_id), storeId: String(row.store_id), note: row.note ? String(row.note) : undefined }));
+  return { expenses, revenues, products, services, platformOrders, counterOrders, orderStoreAssignments, grabReconciliations, grabDailyReports, counterPrices, imports };
 }
 
 function expenseRows(records: FinanceExpenseRecord[]) {
@@ -525,18 +597,43 @@ function expenseRows(records: FinanceExpenseRecord[]) {
     salvage_value: record.salvageValue ?? null,
     in_service_on: record.inServiceOn || null,
     status: record.status,
+    store_id: record.storeId || null,
     updated_at: new Date().toISOString(),
   }));
 }
 
 export async function upsertFinanceExpenses(records: FinanceExpenseRecord[], ignoreExisting = false) {
   if (!records.length) return [];
-  const { data, error } = await requireClient().from("finance_expenses").upsert(expenseRows(records), {
+  const client = requireClient();
+  let { data, error } = await client.from("finance_expenses").upsert(expenseRows(records), {
     onConflict: "id",
     ignoreDuplicates: ignoreExisting,
   }).select("*");
+  // Before 20261030000100 there is no store column; a Toàn chuỗi cost can still
+  // be saved, a store-specific one must wait for the migration.
+  if (error?.code === "PGRST204" && /store_id/.test(error.message)) {
+    if (records.some((record) => record.storeId)) throw new Error("Supabase chưa có cột điểm bán cho chi phí. Chờ workflow migration 20261030000100 chạy xong rồi lưu lại.");
+    ({ data, error } = await client.from("finance_expenses").upsert(expenseRows(records).map(({ store_id: _storeId, ...row }) => row), { onConflict: "id", ignoreDuplicates: ignoreExisting }).select("*"));
+  }
   if (error) throw supabaseFailure(error, "Không thể lưu chi phí ghi nhận");
   return (data || []).map((row) => expenseFromRow(row));
+}
+
+export async function upsertFinanceOrderStoreAssignments(records: FinanceOrderStoreAssignment[]) {
+  if (!records.length) return;
+  const { error } = await requireClient().from("finance_order_store_assignments").upsert(records.map((record) => ({
+    order_id: record.orderId,
+    store_id: record.storeId,
+    note: record.note || null,
+    updated_at: new Date().toISOString(),
+  })), { onConflict: "order_id" });
+  if (error) throw supabaseFailure(error, "Không thể lưu điểm bán của đơn");
+}
+
+export async function deleteFinanceOrderStoreAssignments(orderIds: string[]) {
+  if (!orderIds.length) return;
+  const { error } = await requireClient().from("finance_order_store_assignments").delete().in("order_id", orderIds);
+  if (error) throw supabaseFailure(error, "Không thể bỏ điểm bán đã chọn tay");
 }
 
 /// Hard delete. RLS that filters the row out reports success with zero rows, so
@@ -551,6 +648,7 @@ function grabReconciliationRows(records: FinanceGrabReconciliationRecord[]) {
   return records.map((record) => ({
     id: record.id,
     platform: record.platform || "grab",
+    ...(record.storeId ? { store_id: record.storeId } : {}),
     platform_order_id: record.platformOrderId || null,
     order_code: record.orderCode,
     order_date: record.orderDate,
@@ -605,12 +703,10 @@ export async function loadFinanceCounterPrices(): Promise<FinanceCounterPrice[]>
   }));
 }
 
-export async function upsertFinanceGrabDailyReports(records: FinanceGrabDailyReportRecord[]) {
+export async function upsertFinanceGrabDailyReports(records: FinanceGrabDailyReportRecord[], defaultStoreId: string) {
   if (!records.length) return;
-  // (platform, report_date) carries the UNIQUE index; conflicting on it (not
-  // on id) means a re-imported day replaces its previous row instead of
-  // erroring, while three sàn can each own the same date.
-  const { error } = await requireClient().from("finance_grab_daily_reports").upsert(records.map((record) => ({
+  const client = requireClient();
+  const legacyRow = (record: FinanceGrabDailyReportRecord) => ({
     id: record.id,
     platform: record.platform || "grab",
     report_date: record.reportDate,
@@ -624,8 +720,26 @@ export async function upsertFinanceGrabDailyReports(records: FinanceGrabDailyRep
     total_marketing: record.totalMarketing,
     marketing_lines: record.marketingLines,
     unmatched: record.unmatched,
-  })), { onConflict: "platform,report_date" });
-  if (error) throw supabaseFailure(error, "Không thể lưu báo cáo Grab theo ngày");
+  });
+  // (platform, store_id, report_date) carries the UNIQUE index since
+  // 20261030000100: a re-imported day replaces its own row, while two merchants
+  // of the same sàn can each own the same date.
+  const { error } = await client.from("finance_grab_daily_reports").upsert(records.map((record) => ({
+    ...legacyRow(record),
+    store_id: record.storeId || defaultStoreId,
+    merchant_id: record.merchantId || null,
+    orders: record.orders || [],
+  })), { onConflict: "platform,store_id,report_date" });
+  if (!error) return;
+  // Migration not applied yet: only the default store's reports fit the old key.
+  const oldSchema = error.code === "42P10" || error.code === "42703" || (error.code === "PGRST204" && /store_id|merchant_id|orders/.test(error.message));
+  if (oldSchema && records.every((record) => !record.storeId || record.storeId === defaultStoreId)) {
+    const retry = await client.from("finance_grab_daily_reports").upsert(records.map(legacyRow), { onConflict: "platform,report_date" });
+    if (!retry.error) return;
+    throw supabaseFailure(retry.error, "Không thể lưu báo cáo sàn theo ngày");
+  }
+  if (oldSchema) throw new Error("Supabase chưa có cột điểm bán cho báo cáo sàn. Chờ workflow migration 20261030000100 chạy xong rồi quét lại.");
+  throw supabaseFailure(error, "Không thể lưu báo cáo sàn theo ngày");
 }
 
 export async function upsertFinanceGrabReconciliations(records: FinanceGrabReconciliationRecord[]) {
@@ -664,6 +778,8 @@ function platformOrderRows(records: FinancePlatformOrderRecord[]) {
     source_file_name: record.sourceFileName || null,
     imported_at: record.importedAt || new Date().toISOString(),
     items: record.items || [],
+    sapo_area: record.sapoArea || null,
+    sapo_cashier: record.sapoCashier || null,
   }));
 }
 
@@ -769,9 +885,10 @@ export async function replaceFinanceImportBundle(bundle: {
   revenue?: { meta: Omit<FinanceImportMeta, "dataType" | "importedAt">; records: FinanceRevenueRecord[] };
   products?: { meta: Omit<FinanceImportMeta, "dataType" | "importedAt">; records: FinanceProductRecord[] };
   service?: { meta: Omit<FinanceImportMeta, "dataType" | "importedAt">; records: FinanceServiceRecord[] };
-  orders?: { meta: Omit<FinanceImportMeta, "dataType" | "importedAt">; records: FinancePlatformOrderRecord[] };
+  orders?: { meta: Omit<FinanceImportMeta, "dataType" | "importedAt">; records: FinancePlatformOrderRecord[]; counterRecords?: FinancePlatformOrderRecord[] };
 }) {
-  const { error } = await requireClient().rpc("replace_finance_import_bundle_v2", {
+  const client = requireClient();
+  const v2Args = {
     p_revenue_file_name: bundle.revenue?.meta.fileName ?? null,
     p_revenue_period_start: bundle.revenue?.meta.periodStart ?? null,
     p_revenue_period_end: bundle.revenue?.meta.periodEnd ?? null,
@@ -788,6 +905,18 @@ export async function replaceFinanceImportBundle(bundle: {
     p_orders_period_start: bundle.orders?.meta.periodStart ?? null,
     p_orders_period_end: bundle.orders?.meta.periodEnd ?? null,
     p_orders_rows: bundle.orders ? platformOrderRows(bundle.orders.records) : null,
+  };
+  const { error } = await client.rpc("replace_finance_import_bundle_v3", {
+    ...v2Args,
+    p_counter_rows: bundle.orders?.counterRecords ? platformOrderRows(bundle.orders.counterRecords) : null,
   });
-  if (error) throw supabaseFailure(error, "Không thể lưu bộ file tài chính");
+  if (!error) return;
+  // Before 20261030000100 there is no v3: the sàn invoices still land, the
+  // counter invoices wait for the migration (store split reads them only).
+  if (error.code === "PGRST202") {
+    const legacy = await client.rpc("replace_finance_import_bundle_v2", { ...v2Args, p_orders_rows: bundle.orders ? platformOrderRows(bundle.orders.records).map(({ sapo_area: _area, sapo_cashier: _cashier, ...row }) => row) : null });
+    if (!legacy.error) return;
+    throw supabaseFailure(legacy.error, "Không thể lưu bộ file tài chính");
+  }
+  throw supabaseFailure(error, "Không thể lưu bộ file tài chính");
 }

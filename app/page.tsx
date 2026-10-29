@@ -8,7 +8,8 @@ import ProductMaster from "@/app/product-master";
 import { ALL_RECIPE_UNITS, unitDefinition } from "@/lib/master-data";
 import { isSupabaseConfigured, supabase } from "@/lib/supabase";
 import { useUrlState } from "@/lib/use-url-state";
-import { createActiveSession, DEFAULT_STORE_ID, importInventoryBatch, loadInventory, loadStores, migrateLocalLifecycle, removeActiveSession, removeInventory, saveInventory, saveStore, settleInventoryPeriod, settleInventoryPeriodWithCarry, transferInventory, updateActiveSession, type CloudStore, type CloudTransferLine } from "@/lib/inventory-store";
+import { withFinanceSeed } from "@/lib/store-scope";
+import { createActiveSession, DEFAULT_STORE_ID, importInventoryBatch, loadInventory, loadStores, migrateLocalLifecycle, removeActiveSession, removeInventory, saveInventory, saveStore, saveStoreFinanceConfig, settleInventoryPeriod, settleInventoryPeriodWithCarry, transferInventory, updateActiveSession, type CloudStore, type CloudTransferLine } from "@/lib/inventory-store";
 
 type Receipt = { name: string; dataUrl?: string; path?: string };
 type Change = { field: string; from: string; to: string };
@@ -268,6 +269,10 @@ export default function Home() {
     const ids = new Set(items.map((item) => item.id));
     return allSessions.filter((entry) => ids.has(entry.sourceReceiptId));
   }, [allSessions, items, storeScope]);
+  // Memoised so Finance's per-store ledger and comparisons are not rebuilt on
+  // every render of this page.
+  const financeLots = useMemo(() => allItems.map((item) => ({ id: item.id, name: item.name, category: item.category, quantity: item.quantity, unit: item.unit, unitCost: item.unitCost, purchasedOn: item.purchasedOn, receiptCode: item.receiptCode, internalReturn: isReturnLot(item), availableFrom: item.returnedOn, storeId: item.storeId || defaultStoreId, transferredFromId: item.transferredFromId, transferredOn: item.transferredOn, pieceAmount: item.pieceAmount, history: item.history })), [allItems, defaultStoreId]);
+  const financeSessions = useMemo(() => allSessions.map((entry) => ({ id: entry.id, sourceReceiptId: entry.sourceReceiptId, activatedAt: entry.activatedAt, costRecognitionMonth: entry.costRecognitionMonth, status: entry.status, closedAt: entry.closedAt, reason: entry.reason, recognizedCost: entry.recognizedCost })), [allSessions]);
   // Children carry their own cost, so a piece counts at its share of the unit.
   const transferredOutByLot = useMemo(() => allItems.reduce<Record<string, { units: number; amount: number; value: number }>>((totals, item) => {
     if (!item.transferredFromId) return totals;
@@ -284,7 +289,9 @@ export default function Home() {
     setActiveSessions(storedActive ? JSON.parse(storedActive) as ActiveSession[] : seed.activeSessions);
     setLotMeta(storedMeta ? JSON.parse(storedMeta) as Record<string, LotMeta> : seed.lotMeta);
     const storedStores = window.localStorage.getItem(LOCAL_UAT_STORES_KEY);
-    setStores(storedStores ? JSON.parse(storedStores) as Store[] : DEFAULT_STORES);
+    // UAT only: stores copied from a Production without migration 20261030000100
+    // get the same Finance configuration the migration seeds.
+    setStores(withFinanceSeed(storedStores ? JSON.parse(storedStores) as Store[] : DEFAULT_STORES));
     setCloudLifecycleReady(false);
     setLoaded(true);
   }
@@ -1073,6 +1080,12 @@ export default function Home() {
       else setStores((current) => [...current, store]);
     } catch (error) { window.alert(error instanceof Error ? error.message : "Không thể thêm kho."); }
   }
+  /// Finance's "Cấu hình điểm bán" (kind, opening date, SAPO signals, sàn
+  /// merchants). Production writes Supabase first, then reloads the list.
+  async function saveStoreConfig(store: Store) {
+    if (!isLocalUat) { await saveStoreFinanceConfig(store); setStores(await loadStores()); }
+    else setStores((current) => current.map((entry) => entry.id === store.id ? { ...entry, ...store } : entry));
+  }
   async function renameStore() {
     const store = stores.find((entry) => entry.id === storeScope);
     if (!store) return;
@@ -1293,8 +1306,11 @@ export default function Home() {
     {canAccessFinance && <nav className="module-switcher" aria-label="Khu vực quản lý"><button className={workspace === "inventory" ? "active" : ""} onClick={() => setWorkspace("inventory")}>Kho NVL</button><button className={workspace === "finance" ? "active" : ""} onClick={() => setWorkspace("finance")}>Tài chính</button><button className={workspace === "products" ? "active" : ""} onClick={() => setWorkspace("products")}>Sản phẩm</button></nav>}
     {workspace === "finance" && canAccessFinance ? <FinanceModule
       uatMode={isLocalUat}
-      inventoryLots={allItems.map((item) => ({ id: item.id, name: item.name, category: item.category, quantity: item.quantity, unit: item.unit, unitCost: item.unitCost, purchasedOn: item.purchasedOn, receiptCode: item.receiptCode, internalReturn: isReturnLot(item), availableFrom: item.returnedOn }))}
-      inventorySessions={allSessions.map((entry) => ({ id: entry.id, sourceReceiptId: entry.sourceReceiptId, activatedAt: entry.activatedAt, costRecognitionMonth: entry.costRecognitionMonth, status: entry.status, closedAt: entry.closedAt, reason: entry.reason, recognizedCost: entry.recognizedCost }))}
+      stores={stores}
+      defaultStoreId={defaultStoreId}
+      onSaveStore={saveStoreConfig}
+      inventoryLots={financeLots}
+      inventorySessions={financeSessions}
       onOpenInventoryLot={(id) => { const lot = allItems.find((item) => item.id === id); if (!lot) return; if (storeScope !== "all" && storeOf(lot) !== storeScope) setSelectedStore(storeOf(lot)); setWorkspace("inventory"); setTab("inventory"); setDetailLot(lot); }}
     /> : workspace === "products" && canAccessFinance ? <ProductMaster
       uatMode={isLocalUat}

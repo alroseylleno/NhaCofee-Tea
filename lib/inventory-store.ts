@@ -8,7 +8,12 @@ export type CloudLotMeta = { expiresOn: string; shelfLifeHours?: number; storage
 export type CloudActiveSession = { id: string; sourceReceiptId: string; ingredientKey: string; activatedAt: string; costRecognitionMonth?: string; useBy?: string; status: "active" | "used" | "wasted"; closedAt?: string; reason: string; note?: string; openedAmount?: number; openedUnit?: string; provisionalCost?: number; recognizedCost?: number; settlement?: CloudPeriodSettlement };
 export type CloudInventoryState = { items: CloudItem[]; lotMeta: Record<string, CloudLotMeta>; activeSessions: CloudActiveSession[]; lifecycleReady: boolean };
 export type CloudInventoryImport = { item: CloudItem; event: CloudHistory; meta?: CloudLotMeta };
-export type CloudStore = { id: string; code: string; name: string; status: "active" | "inactive"; isDefault: boolean };
+/// A sàn merchant account of one store. `inSapo` says whether its orders land in
+/// SAPO (then đối soát matches them to invoices) or exist only in the sàn report.
+export type StorePlatformAccount = { platform: "grab" | "shopee" | "greensm"; merchantId?: string; name?: string; inSapo: boolean };
+/// Finance fields (migration 20261030000100) are optional so a store row from an
+/// older schema still loads: kind defaults to "outlet", lists to empty.
+export type CloudStore = { id: string; code: string; name: string; status: "active" | "inactive"; isDefault: boolean; kind?: "outlet" | "warehouse"; openedOn?: string; sapoAreas?: string[]; sapoCashiers?: string[]; platformAccounts?: StorePlatformAccount[] };
 // A line moves `quantity` whole units, or — with `amount` — that định lượng out of
 // one unit whose định lượng is `unitAmount`; `remainderLotId` names the lot for
 // what stays behind when the unit comes off a multi-unit lot (migration 20261027000100).
@@ -153,10 +158,52 @@ export async function settleInventoryPeriodWithCarry(input: { sessionId: string;
   return data?.[0] as { recognized_cost: number; carried_cost: number; returned_lot_id: string; continued_session_id: string; cost_recognition_month: string } | undefined;
 }
 
+function platformAccountsFrom(value: unknown): StorePlatformAccount[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const account = entry as Record<string, unknown>;
+    const platform = String(account?.platform || "");
+    if (platform !== "grab" && platform !== "shopee" && platform !== "greensm") return [];
+    return [{ platform, merchantId: account.merchantId ? String(account.merchantId) : undefined, name: account.name ? String(account.name) : undefined, inSapo: account.inSapo !== false }];
+  });
+}
+
 export async function loadStores(): Promise<CloudStore[]> {
-  const { data, error } = await requireClient().from("stores").select("id, code, name, status, is_default").order("created_at", { ascending: true });
+  const client = requireClient();
+  let result: { data: Record<string, unknown>[] | null; error: { code?: string; message: string } | null } = await client.from("stores").select("id, code, name, status, is_default, kind, opened_on, sapo_areas, sapo_cashiers, platform_accounts").order("created_at", { ascending: true });
+  // Before 20261030000100 the finance columns do not exist yet.
+  if (result.error?.code === "42703") result = await client.from("stores").select("id, code, name, status, is_default").order("created_at", { ascending: true });
+  const { data, error } = result;
   if (error) throw error;
-  return (data || []).map((row) => ({ id: row.id, code: row.code, name: row.name, status: row.status === "inactive" ? "inactive" as const : "active" as const, isDefault: Boolean(row.is_default) }));
+  return (data || []).map((row) => ({
+    id: String(row.id),
+    code: String(row.code),
+    name: String(row.name),
+    status: row.status === "inactive" ? "inactive" as const : "active" as const,
+    isDefault: Boolean(row.is_default),
+    // Left undefined on a schema without the column, so Finance can tell
+    // "not configured yet" apart from "configured as an outlet".
+    kind: row.kind === undefined || row.kind === null ? undefined : row.kind === "warehouse" ? "warehouse" as const : "outlet" as const,
+    openedOn: row.opened_on ? String(row.opened_on) : undefined,
+    sapoAreas: Array.isArray(row.sapo_areas) ? row.sapo_areas.map(String) : [],
+    sapoCashiers: Array.isArray(row.sapo_cashiers) ? row.sapo_cashiers.map(String) : [],
+    platformAccounts: platformAccountsFrom(row.platform_accounts),
+  }));
+}
+
+/// Saves only the Finance configuration of a store (kind, opening date, SAPO
+/// signals, sàn merchants); name and status stay with saveStore.
+export async function saveStoreFinanceConfig(store: CloudStore) {
+  const { error } = await requireClient().from("stores").update({
+    kind: store.kind || "outlet",
+    opened_on: store.openedOn || null,
+    sapo_areas: store.sapoAreas || [],
+    sapo_cashiers: store.sapoCashiers || [],
+    platform_accounts: store.platformAccounts || [],
+    updated_at: new Date().toISOString(),
+  }).eq("id", store.id);
+  if (error?.code === "PGRST204" || error?.code === "42703") throw new Error("Supabase chưa có cấu hình điểm bán. Chờ workflow migration 20261030000100 chạy xong rồi lưu lại.");
+  if (error) throw error;
 }
 
 export async function saveStore(store: CloudStore, isNew: boolean) {

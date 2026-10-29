@@ -28,6 +28,10 @@ export type GrabReportOrder = {
   payout: number;
   /// True when the deduction chain reproduces the payout within rounding.
   balanced: boolean;
+  /// Shopee/GreenSM print the store on every row; a file that ever carries two
+  /// branches can then be split per store. Grab prints it once per PDF.
+  storeName?: string;
+  merchantId?: string;
 };
 
 export type GrabReportMarketingLine = { time: string; description: string; fee: number; tax: number; total: number };
@@ -42,6 +46,10 @@ export type ParsedGrabReport = {
   /// ISO yyyy-mm-dd from the report header.
   reportDate: string;
   storeName?: string;
+  /// The merchant account behind the report: Shopee/GreenSM "ID cửa hàng", or
+  /// the id in Grab's file name (see merchantIdFromFileName). Two stores on the
+  /// same sàn can share a display name, never an id.
+  merchantId?: string;
   orders: GrabReportOrder[];
   marketing: GrabReportMarketingLine[];
   totalOrderValue: number;
@@ -52,11 +60,14 @@ export type ParsedGrabReport = {
   netIncome: number;
 };
 
-const NUMBER_TOKEN = "(?:-?\\d[\\d.]*|-)";
+// Some PDFs (first seen 13/10/2026) wrap a negative thousands amount so its
+// minus lands on its own line: "- 1.770" means -1.770, not "n/a" then 1.770.
+// Only dotted amounts are re-joined, so the "-" placeholder before "0" stays n/a.
+const NUMBER_TOKEN = "(?:-\\s\\d{1,3}(?:\\.\\d{3})+|-?\\d[\\d.]*|-)";
 
 function parseAmount(token: string) {
   if (token === "-") return 0;
-  const value = Number(token.replace(/\./g, ""));
+  const value = Number(token.replace(/[\s.]/g, ""));
   return Number.isFinite(value) ? value : 0;
 }
 
@@ -222,12 +233,22 @@ function headerIndex(header: string[], wanted: string) {
   return header.findIndex((cell) => fold(cell).includes(fold(wanted)));
 }
 
-function finishSanReport(platform: SanPlatform, reportDate: string, orders: GrabReportOrder[], storeName?: string): ParsedGrabReport {
+/// Grab names its PDF "5-C8BGGY6BV2V3RE-20261027.pdf" and GreenSM its xlsx
+/// "Revenue_Report_01KW6QK7GYCY10CYWA32ND0KYF_20261026.xlsx": the id in the
+/// name is the merchant. Shopee's file name carries none (read the CSV column).
+export function merchantIdFromFileName(fileName?: string) {
+  const name = String(fileName || "").split(/[\\/]/).pop() || "";
+  return name.match(/^(\d-[A-Z0-9]+)-\d{8}\.pdf$/i)?.[1]
+    || name.match(/^Revenue_Report_([A-Z0-9]+)_\d{8}/i)?.[1]
+    || undefined;
+}
+
+function finishSanReport(platform: SanPlatform, reportDate: string, orders: GrabReportOrder[], storeName?: string, merchantId?: string): ParsedGrabReport {
   const totalOrderValue = orders.reduce((sum, order) => sum + order.orderValue, 0);
   const totalPayout = orders.reduce((sum, order) => sum + order.payout, 0);
   // Neither platform bills day-level marketing in these reports — Shopee's file
   // has no ads section at all and GreenSM charges cofund inside the order row.
-  return { platform, reportDate, storeName, orders, marketing: [], totalOrderValue, totalPayout, totalMarketing: 0, netIncome: totalPayout };
+  return { platform, reportDate, storeName, merchantId, orders, marketing: [], totalOrderValue, totalPayout, totalMarketing: 0, netIncome: totalPayout };
 }
 
 /// ShopeeFood "Shopeefood_Income_Details_Merchant_DD-MM-YYYY.csv" (mailed daily
@@ -244,6 +265,7 @@ export function parseShopeeIncomeCsv(rawText: string, fileName?: string): Parsed
   const col = {
     code: headerIndex(header, "Mã Đơn Hàng"),
     store: headerIndex(header, "Tên cửa hàng"),
+    storeId: headerIndex(header, "ID cửa hàng"),
     time: headerIndex(header, "Thời gian hoàn thành"),
     value: headerIndex(header, "Giá trị đơn hàng"),
     promo: headerIndex(header, "Khuyến mại từ quán"),
@@ -256,12 +278,14 @@ export function parseShopeeIncomeCsv(rawText: string, fileName?: string): Parsed
   const orders: GrabReportOrder[] = [];
   let reportDate = (fileName?.match(/(\d{2})-(\d{2})-(\d{4})/) || []).slice(1).reverse().join("-");
   let storeName: string | undefined;
+  let merchantId: string | undefined;
   for (const row of rows.slice(headerRow + 1)) {
     const code = String(row[col.code] || "").trim();
     if (!code) continue;
     const stamp = vnTimestamp(row[col.time]);
     if (stamp && !reportDate) reportDate = stamp.date;
     if (!storeName && col.store >= 0) storeName = String(row[col.store] || "").trim() || undefined;
+    if (!merchantId && col.storeId >= 0) merchantId = String(row[col.storeId] || "").trim() || undefined;
     const orderValue = vnAmount(row[col.value]);
     const merchantPromo = vnAmount(row[col.promo]);
     const serviceFee = vnAmount(row[col.serviceFee]);
@@ -286,10 +310,12 @@ export function parseShopeeIncomeCsv(rawText: string, fileName?: string): Parsed
       shippingSupport,
       payout,
       balanced: Math.abs(orderValue - merchantPromo - commission - tax - shippingSupport - payout) <= 1,
+      storeName: col.store >= 0 ? String(row[col.store] || "").trim() || undefined : undefined,
+      merchantId: col.storeId >= 0 ? String(row[col.storeId] || "").trim() || undefined : undefined,
     });
   }
   if (!reportDate) throw new Error(`${fileName || "CSV"}: không xác định được ngày báo cáo.`);
-  return finishSanReport("shopee", reportDate, orders, storeName);
+  return finishSanReport("shopee", reportDate, orders, storeName, merchantId);
 }
 
 /// GreenSM "Revenue_Report_<store>_YYYYMMDD.xlsx", sheet "Detail Transactions"
@@ -306,6 +332,7 @@ export function parseGreenRevenueRows(rows: unknown[][], fileName?: string): Par
     shortCode: headerIndex(header, "Mã Rút Gọn"),
     code: headerIndex(header, "Mã Đơn Hàng"),
     store: headerIndex(header, "Tên cửa hàng"),
+    storeId: headerIndex(header, "ID cửa hàng"),
     time: headerIndex(header, "Thời gian hoàn thành"),
     status: headerIndex(header, "Trạng thái"),
     value: headerIndex(header, "Giá trị đơn hàng"),
@@ -318,6 +345,7 @@ export function parseGreenRevenueRows(rows: unknown[][], fileName?: string): Par
   const orders: GrabReportOrder[] = [];
   let reportDate = (fileName?.match(/(\d{4})(\d{2})(\d{2})/) || []).slice(1).join("-");
   let storeName: string | undefined;
+  let merchantId: string | undefined;
   for (const raw of rows.slice(headerRow + 1)) {
     const row = (raw || []).map((cell) => (cell == null ? "" : String(cell)));
     const fullCode = String(row[col.code] || "").trim();
@@ -327,6 +355,7 @@ export function parseGreenRevenueRows(rows: unknown[][], fileName?: string): Par
     const stamp = vnTimestamp(row[col.time]);
     if (stamp && !reportDate) reportDate = stamp.date;
     if (!storeName && col.store >= 0) storeName = row[col.store].trim() || undefined;
+    if (!merchantId && col.storeId >= 0) merchantId = row[col.storeId].trim() || undefined;
     const orderValue = vnAmount(row[col.value]);
     const net = vnAmount(row[col.net]);
     const commission = vnAmount(row[col.commission]);
@@ -348,8 +377,10 @@ export function parseGreenRevenueRows(rows: unknown[][], fileName?: string): Par
       shippingSupport: 0,
       payout,
       balanced: Math.abs(net - commission - vat - pit - payout) <= 1,
+      storeName: col.store >= 0 ? row[col.store].trim() || undefined : undefined,
+      merchantId: col.storeId >= 0 ? row[col.storeId].trim() || undefined : undefined,
     });
   }
   if (!reportDate) throw new Error(`${fileName || "xlsx"}: không xác định được ngày báo cáo.`);
-  return finishSanReport("greensm", reportDate, orders, storeName);
+  return finishSanReport("greensm", reportDate, orders, storeName, merchantId || merchantIdFromFileName(fileName));
 }

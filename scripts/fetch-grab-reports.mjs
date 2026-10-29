@@ -49,6 +49,56 @@ const DEFAULT_SUBJECT = "Báo cáo doanh số";
 /// with orders (the "(Mart)" twin never has one); GreenSM mails only on days
 /// with revenue. minBytes guards against tracking-pixel-sized junk without
 /// rejecting Shopee's legitimately tiny one-order CSVs.
+/// "ID cửa hàng" of a ShopeeFood income CSV (first data row), or "" when absent.
+function shopeeStoreId(buffer) {
+  const lines = buffer.toString("utf8").replace(/^\uFEFF/, "").split(/\r?\n/).filter((line) => line.trim());
+  if (lines.length < 2) return "";
+  const fold = (value) => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/gi, "d").toLowerCase().trim();
+  const column = lines[0].split(",").findIndex((cell) => fold(cell).includes("id cua hang"));
+  return column >= 0 ? String(lines[1].split(",")[column] || "").trim() : "";
+}
+
+/// Which store a report file belongs to, read from inside the file: Shopee "ID
+/// cửa hàng", GreenSM "ID cửa hàng" + "Tên cửa hàng", Grab's branch line
+/// ("Nhà Coffee&Tea - Trương Phước Phan"). N2 is registered as a branch of N1's
+/// owner account, so a file name alone may not tell the two apart.
+async function reportIdentity(platformKey, buffer) {
+  try {
+    if (platformKey === "shopee") return shopeeStoreId(buffer);
+    if (platformKey === "greensm") {
+      const XLSX = await import("xlsx");
+      const original = console.error;
+      console.error = (...args) => { if (typeof args[0] === "string" && args[0].startsWith("Bad uncompressed size")) return; original(...args); };
+      let workbook;
+      try { workbook = XLSX.read(buffer, { type: "buffer" }); } finally { console.error = original; }
+      const sheet = workbook.Sheets[workbook.SheetNames.find((name) => /detail/i.test(name)) || workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" }).map((row) => row.map((cell) => String(cell)));
+      const fold = (value) => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/gi, "d").toLowerCase().trim();
+      const headerRow = rows.findIndex((row) => row.some((cell) => fold(cell).includes("id cua hang")));
+      if (headerRow < 0) return "";
+      const idColumn = rows[headerRow].findIndex((cell) => fold(cell).includes("id cua hang"));
+      const nameColumn = rows[headerRow].findIndex((cell) => fold(cell).includes("ten cua hang"));
+      return [...new Set(rows.slice(headerRow + 1).filter((row) => row[idColumn]).map((row) => `${row[idColumn]} ${nameColumn >= 0 ? row[nameColumn] : ""}`.trim()))].sort().join(" + ");
+    }
+    if (platformKey === "grab") {
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+      const task = pdfjs.getDocument({ data: new Uint8Array(buffer), useSystemFonts: true });
+      const document = await task.promise;
+      try {
+        const page = await document.getPage(1);
+        const text = (await page.getTextContent()).items.map((item) => item.str || "").join(" ");
+        return text.match(/\+\d{9,}\s+(.+?)\s+Tóm tắt/)?.[1]?.trim() || "";
+      } finally { await task.destroy(); }
+    }
+  } catch { /* unreadable: treated as unknown, the file is then kept under a uid suffix */ }
+  return "";
+}
+
+/// "Nhà Coffee&Tea - Trương Phước Phan" → "nha-coffee-tea-truong-phuoc-phan"
+function identitySlug(value) {
+  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/gi, "d").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
+}
+
 const PLATFORMS = [
   {
     key: "grab",
@@ -246,11 +296,12 @@ async function main() {
       for (const candidate of candidates) {
         for (const [index, attachment] of candidate.parts.entries()) {
           const fallback = `${platform.key}-${candidate.uid}-${index + 1}${platform.extensions[0]}`;
-          const fileName = safeFileName(attachment.filename, fallback, platform.extensions);
-          if (existing.has(fileName.toLowerCase())) {
-            skipped++;
-            continue;
-          }
+          let fileName = safeFileName(attachment.filename, fallback, platform.extensions);
+          // Two stores can mail files of the same name for the same day
+          // (Shopee never puts the merchant in the name; Grab/GreenSM may keep
+          // the owner account's id for a new branch). On a name collision the
+          // store inside each file decides: same store = already have it.
+          const collides = existing.has(fileName.toLowerCase());
           const download = await client.download(String(candidate.uid), attachment.part, { uid: true });
           const chunks = [];
           for await (const chunk of download.content) chunks.push(chunk);
@@ -258,6 +309,21 @@ async function main() {
           if (buffer.length < platform.minBytes) {
             console.warn(`  bỏ qua ${fileName} (chỉ ${buffer.length} bytes)`);
             continue;
+          }
+          if (collides) {
+            const incomingStore = await reportIdentity(platform.key, buffer);
+            const existingStore = await reportIdentity(platform.key, await readFile(path.join(directory, fileName)).catch(() => Buffer.alloc(0)));
+            if (!incomingStore || incomingStore === existingStore) {
+              skipped++;
+              continue;
+            }
+            const extension = path.extname(fileName);
+            fileName = `${fileName.slice(0, -extension.length)}_${platform.key === "shopee" ? incomingStore : identitySlug(incomingStore)}${extension}`;
+            if (existing.has(fileName.toLowerCase())) {
+              skipped++;
+              continue;
+            }
+            console.log(`  (trùng tên file với quán khác: ${existingStore || "?"} ≠ ${incomingStore})`);
           }
           await writeFile(path.join(directory, fileName), buffer);
           existing.add(fileName.toLowerCase());
