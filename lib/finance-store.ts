@@ -281,7 +281,12 @@ export type FinanceExpenseRecord = {
   status: "active" | "voided";
   /// Điểm bán that carries the cost; absent = Toàn chuỗi (shared, allocated by revenue).
   storeId?: string;
+  /// Ảnh / PDF hoá đơn, like a Kho lot's receipt. Production keeps the file in
+  /// the "bills" bucket (`path`); UAT keeps it in the browser (`dataUrl`).
+  receipt?: FinanceExpenseReceipt;
 };
+
+export type FinanceExpenseReceipt = { name: string; path?: string; dataUrl?: string };
 
 export type FinanceCloudState = {
   expenses: FinanceExpenseRecord[];
@@ -327,6 +332,7 @@ function expenseFromRow(row: Record<string, unknown>): FinanceExpenseRecord {
     inServiceOn: row.in_service_on ? String(row.in_service_on) : undefined,
     status: row.status as FinanceExpenseRecord["status"],
     storeId: row.store_id ? String(row.store_id) : undefined,
+    receipt: row.receipt_path ? { name: row.receipt_name ? String(row.receipt_name) : "Hóa đơn", path: String(row.receipt_path) } : undefined,
   };
 }
 
@@ -598,6 +604,8 @@ function expenseRows(records: FinanceExpenseRecord[]) {
     in_service_on: record.inServiceOn || null,
     status: record.status,
     store_id: record.storeId || null,
+    receipt_path: record.receipt?.path || null,
+    receipt_name: record.receipt?.path ? record.receipt.name : null,
     updated_at: new Date().toISOString(),
   }));
 }
@@ -605,18 +613,46 @@ function expenseRows(records: FinanceExpenseRecord[]) {
 export async function upsertFinanceExpenses(records: FinanceExpenseRecord[], ignoreExisting = false) {
   if (!records.length) return [];
   const client = requireClient();
-  let { data, error } = await client.from("finance_expenses").upsert(expenseRows(records), {
-    onConflict: "id",
-    ignoreDuplicates: ignoreExisting,
-  }).select("*");
-  // Before 20261030000100 there is no store column; a Toàn chuỗi cost can still
-  // be saved, a store-specific one must wait for the migration.
-  if (error?.code === "PGRST204" && /store_id/.test(error.message)) {
-    if (records.some((record) => record.storeId)) throw new Error("Supabase chưa có cột điểm bán cho chi phí. Chờ workflow migration 20261030000100 chạy xong rồi lưu lại.");
-    ({ data, error } = await client.from("finance_expenses").upsert(expenseRows(records).map(({ store_id: _storeId, ...row }) => row), { onConflict: "id", ignoreDuplicates: ignoreExisting }).select("*"));
+  let rows: Array<Record<string, unknown>> = expenseRows(records);
+  const upsert = () => client.from("finance_expenses").upsert(rows, { onConflict: "id", ignoreDuplicates: ignoreExisting }).select("*");
+  let { data, error } = await upsert();
+  // A column added by a later migration may not exist yet: a cost that does not
+  // use it can still be saved without it, one that does must wait.
+  //   store_id            — 20261030000100 (điểm bán)
+  //   receipt_path / name — 20261030000200 (ảnh hoá đơn)
+  for (let attempt = 0; attempt < 2 && error?.code === "PGRST204"; attempt += 1) {
+    if (/store_id/.test(error.message)) {
+      if (records.some((record) => record.storeId)) throw new Error("Supabase chưa có cột điểm bán cho chi phí. Chờ workflow migration 20261030000100 chạy xong rồi lưu lại.");
+      rows = rows.map(({ store_id: _storeId, ...row }) => row);
+    } else if (/receipt_(path|name)/.test(error.message)) {
+      if (records.some((record) => record.receipt?.path)) throw new Error("Supabase chưa có cột ảnh hoá đơn cho chi phí. Bỏ ảnh để lưu ngay, hoặc chờ workflow migration 20261030000200 chạy xong rồi lưu lại.");
+      rows = rows.map(({ receipt_path: _path, receipt_name: _name, ...row }) => row);
+    } else break;
+    ({ data, error } = await upsert());
   }
   if (error) throw supabaseFailure(error, "Không thể lưu chi phí ghi nhận");
   return (data || []).map((row) => expenseFromRow(row));
+}
+
+/// Same bucket and naming as a Kho lot's bill (saveInventory), under expenses/.
+export async function uploadFinanceExpenseReceipt(expenseId: string, file: File): Promise<FinanceExpenseReceipt> {
+  const path = `expenses/${expenseId}-${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
+  const { error } = await requireClient().storage.from("bills").upload(path, file, { upsert: false, contentType: file.type || undefined });
+  if (error) throw supabaseFailure(error, "Không thể tải ảnh hoá đơn lên");
+  return { name: file.name, path };
+}
+
+/// Best effort: drops a file whose expense row could not be saved.
+export async function removeFinanceExpenseReceiptFile(path: string) {
+  try { await requireClient().storage.from("bills").remove([path]); } catch { /* an orphan file costs nothing but space */ }
+}
+
+/// Short-lived link to view a stored bill; fetched when the expense is opened,
+/// never kept in state that outlives the page.
+export async function financeExpenseReceiptUrl(path: string) {
+  const { data, error } = await requireClient().storage.from("bills").createSignedUrl(path, 3600);
+  if (error) throw supabaseFailure(error, "Không mở được ảnh hoá đơn");
+  return data.signedUrl;
 }
 
 export async function upsertFinanceOrderStoreAssignments(records: FinanceOrderStoreAssignment[]) {

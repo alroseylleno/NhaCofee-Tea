@@ -1083,3 +1083,28 @@
   .storeAccountRow > input, .storeAccountRow > .storeAccountCheck { grid-column: 1 / -1; }
   .expenseStoreSelect { max-width: 96px; }
 }
+
+/* Đính kèm hoá đơn in the expense form — same two choices as Nhập kho. */
+.receiptField { min-width: 0; margin: 16px 0 6px; padding: 0; border: 0; }
+.receiptField legend { display: grid; gap: 2px; margin-bottom: 8px; padding: 0; color: #5c584f; font: 700 11px Arial, sans-serif; }
+.receiptField legend small { font-weight: 400; }
+.receiptOptions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.sheet .receiptChoice { display: grid; gap: 4px; place-items: center; margin: 0; padding: 13px 8px; border: 1px dashed #aeb6a9; border-radius: 11px; color: #1e4b3f; background: #f7f8f1; text-align: center; cursor: pointer; }
+.sheet .receiptChoice:hover { border-color: #5c8974; background: #f0f5ec; }
+.sheet .receiptChoice:focus-within { border-color: #5c8974; box-shadow: 0 0 0 3px #bdd8c255; }
+.sheet .receiptChoice input { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); border: 0; opacity: 0; }
+.receiptChoice span { font: 23px/1 Arial, sans-serif; }
+.receiptChoice b { font: 700 12px Arial, sans-serif; }
+.sheet .receiptChoice small { font-size: 9px; }
+.sheet .receiptCamera { border-color: #9fbea6; background: #edf3e8; }
+.receiptPreview { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 12px; align-items: center; margin-top: 10px; padding: 10px; border: 1px solid #cbd9ca; border-radius: 11px; background: #f3f8f0; }
+.receiptThumb { display: block; width: 64px; height: 64px; overflow: hidden; border: 1px solid #d8d0c3; border-radius: 8px; background: #fff; }
+.receiptThumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.receiptFileBadge { display: grid; place-items: center; width: 64px; height: 64px; border-radius: 8px; color: #fff; background: #5b8d72; font: 700 12px Arial, sans-serif; letter-spacing: .04em; }
+.receiptMeta { display: grid; gap: 3px; min-width: 0; }
+.receiptMeta > b { overflow: hidden; color: var(--ink); font: 700 12px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+.sheet .receiptMeta small { font-size: 10px; }
+.receiptMeta > div { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 3px; }
+.receiptMeta a, .receiptMeta button { padding: 6px 9px; border: 1px solid #c6d5c7; border-radius: 8px; color: #1e4b3f; background: #fff; font: 700 11px Arial, sans-serif; text-decoration: none; cursor: pointer; }
+.receiptMeta button { border-color: #edc5bb; color: #a54c37; background: #fff7f4; }
+.expenseReceiptMark { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 99px; color: #1e4b3f; background: #e3eee0; font: 700 8px/1.4 Arial, sans-serif; font-style: normal; letter-spacing: .03em; vertical-align: 1px; }

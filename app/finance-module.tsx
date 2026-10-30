@@ -15,6 +15,10 @@ import {
   upsertFinanceGrabReconciliations,
   upsertFinanceOrderStoreAssignments,
   deleteFinanceOrderStoreAssignments,
+  uploadFinanceExpenseReceipt,
+  removeFinanceExpenseReceiptFile,
+  financeExpenseReceiptUrl,
+  type FinanceExpenseReceipt,
   type FinanceGrabDailyReportRecord,
   type FinanceOrderStoreAssignment,
   type FinanceSanReportOrder,
@@ -31,6 +35,7 @@ import {
 } from "@/lib/finance-store";
 import { extractGrabPdfText, merchantIdFromFileName, parseGrabReportText, parseGreenRevenueRows, parseShopeeIncomeCsv, type ParsedGrabReport } from "@/lib/grab-report";
 import { type CloudStore, type StorePlatformAccount } from "@/lib/inventory-store";
+import { isPdfReceipt, prepareReceiptFile, readFileAsDataUrl, RECEIPT_MAX_BYTES, RECEIPT_UAT_MAX_BYTES } from "@/lib/receipt-image";
 import { buildStoreLedger, type LedgerHistory } from "@/lib/store-ledger";
 import { ATTRIBUTION_LABELS, attributeOrder, defaultOutletId, foldSignal, outletsOf, outletsOpenOn, storeForReport, storeFromExpenseName, unclaimedSignals, type StoreAttributionSource } from "@/lib/store-scope";
 import { type IngredientMaster, type ProductMaster as MasterProduct, type RecipeVersion } from "@/lib/master-data";
@@ -127,6 +132,10 @@ type ExpenseForm = {
   /// "" = Toàn chuỗi.
   storeId: string;
 };
+
+/// The bill in the expense form: the stored one (path on Production, dataUrl on
+/// UAT) or a newly chosen file, plus a link that opens it in a new tab.
+type ExpenseReceiptDraft = FinanceExpenseReceipt & { file?: File; viewUrl?: string; viewError?: string };
 
 /// Giá Grab = giá quầy / 0,7278 (fee rule chốt 12/07/2026), so the counter
 /// price of a basket is estimated back from the Grab list price. Editable.
@@ -1120,6 +1129,14 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const [adsHover, setAdsHover] = useState<string | null>(null);
   const [showExpenseForm, setShowExpenseForm] = useState(false);
   const [savingExpense, setSavingExpense] = useState(false);
+  const [expenseReceipt, setExpenseReceipt] = useState<ExpenseReceiptDraft>();
+  /// Bumped whenever the form's bill changes, so a slow link lookup for a bill
+  /// the user already replaced cannot land on the new one.
+  const receiptViewRequest = useRef(0);
+  useEffect(() => {
+    const url = expenseReceipt?.viewUrl;
+    return () => { if (url?.startsWith("blob:")) URL.revokeObjectURL(url); };
+  }, [expenseReceipt?.viewUrl]);
   const [importingExpenses, setImportingExpenses] = useState(false);
   const [expenseImportNotice, setExpenseImportNotice] = useState<string | undefined>();
   const [importingFinance, setImportingFinance] = useState(false);
@@ -2085,13 +2102,55 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     setEditingExpenseId(undefined);
     // The store being viewed is the natural owner; Toàn chuỗi view books shared.
     setExpenseForm(expenseFormDefaults(category, scope === "all" ? "" : scope));
+    showExpenseReceipt(undefined);
     setShowExpenseForm(true);
+  }
+
+  /// Puts a stored bill in the form and fetches a link to open it: a signed URL
+  /// on Production, a blob URL on UAT (browsers refuse to open a data: URL in a
+  /// new tab). A UAT copy of a Production expense has only the path: no preview.
+  function showExpenseReceipt(receipt?: FinanceExpenseReceipt) {
+    const request = ++receiptViewRequest.current;
+    if (!receipt) { setExpenseReceipt(undefined); return; }
+    setExpenseReceipt({ ...receipt });
+    const view = receipt.dataUrl
+      ? fetch(receipt.dataUrl).then((response) => response.blob()).then((blob) => URL.createObjectURL(blob))
+      : receipt.path && !uatMode && isSupabaseConfigured ? financeExpenseReceiptUrl(receipt.path) : undefined;
+    view?.then((viewUrl) => {
+      if (receiptViewRequest.current === request) setExpenseReceipt((current) => current && { ...current, viewUrl });
+      else if (viewUrl.startsWith("blob:")) URL.revokeObjectURL(viewUrl);
+    }).catch((error) => {
+      if (receiptViewRequest.current === request) setExpenseReceipt((current) => current && { ...current, viewError: error instanceof Error ? error.message : "Không mở được ảnh hoá đơn" });
+    });
+  }
+
+  async function attachExpenseReceipt(event: ChangeEvent<HTMLInputElement>) {
+    const chosen = event.target.files?.[0];
+    event.target.value = "";
+    if (!chosen) return;
+    const request = ++receiptViewRequest.current;
+    const file = await prepareReceiptFile(chosen);
+    const limit = uatMode ? RECEIPT_UAT_MAX_BYTES : RECEIPT_MAX_BYTES;
+    if (file.size > limit) {
+      const size = `${(file.size / 1024 / 1024).toLocaleString("vi-VN", { maximumFractionDigits: 1 })} MB`;
+      window.alert(uatMode ? `UAT lưu hoá đơn ngay trong trình duyệt nên chỉ nhận file tới 1,5 MB (file này ${size}). Production nhận tới 10 MB.` : `File hoá đơn tối đa 10 MB (file này ${size}).`);
+      return;
+    }
+    const dataUrl = uatMode ? await readFileAsDataUrl(file) : undefined;
+    if (receiptViewRequest.current !== request) return;
+    setExpenseReceipt({ name: file.name, file, dataUrl, viewUrl: URL.createObjectURL(file) });
+  }
+
+  function removeExpenseReceipt() {
+    receiptViewRequest.current += 1;
+    setExpenseReceipt(undefined);
   }
 
   function openEditExpense(expense: ExpenseRecord) {
     if (currentPeriodClosed) { window.alert("Kỳ này đã khóa sổ và không thể sửa trực tiếp."); return; }
     setEditingExpenseId(expense.id);
     setExpenseForm({ name: expense.name, category: expense.category, subcategory: expense.subcategory, subcategoryIsCustom: !subcategories.includes(expense.subcategory), amount: amountInput(String(expense.amount)), incurredOn: expense.incurredOn, recurrence: expense.recurrence, paymentStatus: expense.paymentStatus, paymentDate: expense.paymentDate || "", invoiceCode: expense.invoiceCode || "", vendor: expense.vendor || "", vendorIsCustom: Boolean(expense.vendor && !vendors.includes(expense.vendor)), note: expense.note || "", usefulLifeMonths: String(expense.usefulLifeMonths || 36), salvageValue: amountInput(String(expense.salvageValue || 0)), inServiceOn: expense.inServiceOn || expense.incurredOn, storeId: expense.storeId || "" });
+    showExpenseReceipt(expense.receipt);
     setShowExpenseForm(true);
   }
 
@@ -2121,12 +2180,24 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     const record: ExpenseRecord = { id: editingExpenseId || crypto.randomUUID(), name: expenseForm.name.trim(), category: expenseForm.category, subcategory: expenseForm.subcategory.trim() || "Khác", amount, incurredOn: expenseForm.incurredOn, recurrence, paymentStatus: expenseForm.paymentStatus, paymentDate: recurrence !== "once" || expenseForm.paymentStatus === "paid" ? paymentDate : undefined, invoiceCode: expenseForm.invoiceCode.trim() || undefined, vendor: expenseForm.vendor.trim() || undefined, note: expenseForm.note.trim() || undefined, usefulLifeMonths: expenseForm.category === "investment" ? Math.max(1, Number(expenseForm.usefulLifeMonths) || 36) : undefined, salvageValue: expenseForm.category === "investment" ? parseAmount(expenseForm.salvageValue) : undefined, inServiceOn: expenseForm.category === "investment" ? expenseForm.inServiceOn : undefined, status: "active", storeId: expenseForm.storeId || undefined };
     setSavingExpense(true);
     setFinanceSyncError(undefined);
+    let uploadedPath: string | undefined;
     try {
+      // Production uploads a new bill first, like a Kho lot; the row then points
+      // at it. UAT keeps the file itself in the record.
+      if (expenseReceipt?.file && !uatMode) {
+        if (!isSupabaseConfigured) throw new Error("Production chưa cấu hình Supabase. Chi phí chưa được lưu.");
+        record.receipt = await uploadFinanceExpenseReceipt(record.id, expenseReceipt.file);
+        uploadedPath = record.receipt.path;
+      } else if (expenseReceipt) {
+        record.receipt = { name: expenseReceipt.name, path: expenseReceipt.path, dataUrl: uatMode ? expenseReceipt.dataUrl : undefined };
+      }
       await persistExpense(record);
       setExpenseCategory(record.category);
       setShowExpenseForm(false);
       setEditingExpenseId(undefined);
+      showExpenseReceipt(undefined);
     } catch (error) {
+      if (uploadedPath) void removeFinanceExpenseReceiptFile(uploadedPath);
       const message = error instanceof Error ? error.message : "Không thể lưu chi phí.";
       setFinanceSyncError(message);
       window.alert(message);
@@ -2255,7 +2326,10 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: true, defval: null });
       const parsedRecords = parseExpenseRows(file, rows, outlets).map((record) => record.storeId || !financeConfigured ? record : { ...record, storeId: storeFromExpenseName(stores, record.name) });
       const recordsById = new Map(parsedRecords.map((record) => [record.id, record]));
-      const records = [...recordsById.values()];
+      // The workbook carries no bill: a row that updates an existing cost keeps
+      // the one already attached to it.
+      const receiptsById = new Map(state.expenses.filter((expense) => expense.receipt).map((expense) => [expense.id, expense.receipt]));
+      const records = [...recordsById.values()].map((record) => record.receipt || !receiptsById.has(record.id) ? record : { ...record, receipt: receiptsById.get(record.id) });
       const duplicateCount = parsedRecords.length - records.length;
       if (!window.confirm(`Nhập ${records.length} dòng chi phí${duplicateCount ? ` (${duplicateCount} ID trùng trong file đã lấy dòng cuối)` : ""}? Dòng trùng ID trên hệ thống sẽ được cập nhật, dữ liệu khác được giữ nguyên.`)) return;
       if (!uatMode) {
@@ -3400,7 +3474,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
             <div className={styles.expenseGroupItems}>{entries.map((entry) => <button type="button" className={`${styles.compactExpenseCard} ${entry.kind === "waste" ? styles.wasteCard : ""}`} key={entry.id} onClick={() => onOpenInventoryLot(entry.lot.id)}><span>{entry.lot.name} · {entry.kind === "waste" ? "Hao hụt" : "Xuất dùng"} {dateLabel(entry.date)}</span><b>{money(entry.amount)}</b></button>)}</div>
           </details>)}</div>
         </details>}
-        {selectedExpenseSection.manualGroups.map(([subcategory, entries]) => <details className={styles.expenseGroup} key={subcategory}><summary><span>{subcategory} <small>({entries.length} khoản)</small></span><b>{money(entries.reduce((sum, entry) => sum + entry.amount, 0))}</b></summary><div className={styles.expenseGroupItems}>{entries.map(({ expense, date, amount }) => <div className={`${styles.expenseRow} ${multiOutlet ? styles.expenseRowStore : ""}`} key={`${expense.id}-${date}`}><button type="button" className={styles.compactExpenseCard} onClick={() => openEditExpense(expense)}><span>{expense.name} · {expense.category === "investment" ? `KH ${expense.usefulLifeMonths || "?"} tháng · NG ${money(expense.amount)}` : expense.recurrence === "once" ? dateLabel(date) : `TT ${dateLabel(date)}`}</span><b>{money(amount)}</b></button>{multiOutlet && <select className={`${styles.expenseStoreSelect} ${expense.storeId ? styles.expenseStoreSelectSet : ""}`} value={expense.storeId || ""} aria-label={`Ghi nhận cho — ${expense.name}`} title="Chuyển ghi nhận cho điểm bán khác" onChange={(event) => void moveExpenseToStore(expense, event.target.value)}><option value="">Toàn chuỗi</option>{outlets.map((store) => <option value={store.id} key={store.id}>{store.name}</option>)}{expense.storeId && !isOutletId(expense.storeId) && <option value={expense.storeId}>{storeLabel(expense.storeId)}</option>}</select>}<button type="button" className={styles.expenseDelete} aria-label={`Xoá chi phí ${expense.name}`} title="Xoá chi phí" onClick={() => void deleteExpense(expense)}>×</button></div>)}</div></details>)}
+        {selectedExpenseSection.manualGroups.map(([subcategory, entries]) => <details className={styles.expenseGroup} key={subcategory}><summary><span>{subcategory} <small>({entries.length} khoản)</small></span><b>{money(entries.reduce((sum, entry) => sum + entry.amount, 0))}</b></summary><div className={styles.expenseGroupItems}>{entries.map(({ expense, date, amount }) => <div className={`${styles.expenseRow} ${multiOutlet ? styles.expenseRowStore : ""}`} key={`${expense.id}-${date}`}><button type="button" className={styles.compactExpenseCard} onClick={() => openEditExpense(expense)}><span>{expense.name} · {expense.category === "investment" ? `KH ${expense.usefulLifeMonths || "?"} tháng · NG ${money(expense.amount)}` : expense.recurrence === "once" ? dateLabel(date) : `TT ${dateLabel(date)}`}{expense.receipt && <i className={styles.expenseReceiptMark} title={`Có hoá đơn: ${expense.receipt.name}`}>HĐ</i>}</span><b>{money(amount)}</b></button>{multiOutlet && <select className={`${styles.expenseStoreSelect} ${expense.storeId ? styles.expenseStoreSelectSet : ""}`} value={expense.storeId || ""} aria-label={`Ghi nhận cho — ${expense.name}`} title="Chuyển ghi nhận cho điểm bán khác" onChange={(event) => void moveExpenseToStore(expense, event.target.value)}><option value="">Toàn chuỗi</option>{outlets.map((store) => <option value={store.id} key={store.id}>{store.name}</option>)}{expense.storeId && !isOutletId(expense.storeId) && <option value={expense.storeId}>{storeLabel(expense.storeId)}</option>}</select>}<button type="button" className={styles.expenseDelete} aria-label={`Xoá chi phí ${expense.name}`} title="Xoá chi phí" onClick={() => void deleteExpense(expense)}>×</button></div>)}</div></details>)}
         {!selectedExpenseSection.count && <div className={styles.empty}><b>Chưa có chi phí trong nhóm này</b><span>Nhấn “Thêm chi phí” để tạo giao dịch đầu tiên.</span></div>}
           </div>
         </details>
@@ -3969,7 +4043,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     </section>}
 
     {showStoreConfig && onSaveStore && <StoreConfigSheet stores={stores} onClose={() => setShowStoreConfig(false)} onSave={onSaveStore} />}
-    {showExpenseForm && <div className={styles.backdrop} role="presentation" onMouseDown={() => !savingExpense && setShowExpenseForm(false)}><form className={styles.sheet} onSubmit={saveExpense} onMouseDown={(event) => event.stopPropagation()}><div className={styles.sheetHandle} /><div className={styles.sheetTitle}><div><span>{editingExpenseId ? "CẬP NHẬT" : "GHI NHẬN"}</span><h2>{categoryLabels[expenseForm.category]}</h2></div><button disabled={savingExpense} type="button" onClick={() => setShowExpenseForm(false)}>×</button></div><label>Category<select value={expenseForm.category} onChange={(event) => setExpenseForm((current) => ({ ...current, category: event.target.value as ExpenseCategory, recurrence: event.target.value === "fixed" ? "monthly" : "once" }))}>{(Object.keys(categoryLabels) as ExpenseCategory[]).map((category) => <option value={category} key={category}>{categoryLabels[category]}</option>)}</select></label>{stores.length > 1 && <label>Ghi nhận cho<select value={expenseForm.storeId} onChange={(event) => setExpenseForm((current) => ({ ...current, storeId: event.target.value }))}><option value="">Toàn chuỗi (dùng chung, chia theo doanh thu)</option>{outlets.map((store) => <option value={store.id} key={store.id}>{store.name}</option>)}{expenseForm.storeId && !isOutletId(expenseForm.storeId) && <option value={expenseForm.storeId}>{storeLabel(expenseForm.storeId)}</option>}</select></label>}<label>Tên chi phí / tài sản<input autoFocus required value={expenseForm.name} onChange={(event) => { const name = event.target.value; setExpenseForm((current) => ({ ...current, name, storeId: current.storeId || storeFromExpenseName(stores, name) || "" })); }} placeholder="Ví dụ: Tiền thuê mặt bằng" /></label><div className={styles.formRow}><label>Subcategory<select required value={expenseForm.subcategoryIsCustom ? "__other" : expenseForm.subcategory} onChange={(event) => { const value = event.target.value; setExpenseForm((current) => ({ ...current, subcategoryIsCustom: value === "__other", subcategory: value === "__other" ? "" : value })); }}><option value="">Chọn subcategory</option>{subcategories.map((subcategory) => <option value={subcategory} key={subcategory}>{subcategory}</option>)}<option value="__other">Khác</option></select>{expenseForm.subcategoryIsCustom && <input required value={expenseForm.subcategory} onChange={(event) => setExpenseForm((current) => ({ ...current, subcategory: event.target.value }))} placeholder="Nhập subcategory mới" />}</label><label>Số tiền<input required inputMode="numeric" value={expenseForm.amount} onChange={(event) => setExpenseForm((current) => ({ ...current, amount: amountInput(event.target.value) }))} placeholder="15,000,000" /></label></div><div className={styles.formRow}><label>Ngày ghi nhận<VietnameseDateInput required value={expenseForm.incurredOn} onChange={(incurredOn) => setExpenseForm((current) => ({ ...current, incurredOn }))} /></label>{expenseForm.category !== "investment" && <label>Chu kỳ<select value={expenseForm.recurrence} onChange={(event) => setExpenseForm((current) => ({ ...current, recurrence: event.target.value as Recurrence }))}>{(Object.keys(recurrenceLabels) as Recurrence[]).map((recurrence) => <option value={recurrence} key={recurrence}>{recurrenceLabels[recurrence]}</option>)}</select></label>}</div>{expenseForm.category === "investment" && <><div className={styles.formRow}><label>Ngày sử dụng<VietnameseDateInput value={expenseForm.inServiceOn} onChange={(inServiceOn) => setExpenseForm((current) => ({ ...current, inServiceOn }))} /></label><label>Khấu hao (tháng)<input min="1" type="number" value={expenseForm.usefulLifeMonths} onChange={(event) => setExpenseForm((current) => ({ ...current, usefulLifeMonths: event.target.value }))} /></label></div><label>Giá trị thu hồi<input inputMode="numeric" value={expenseForm.salvageValue} onChange={(event) => setExpenseForm((current) => ({ ...current, salvageValue: amountInput(event.target.value) }))} /></label></>}<div className={styles.formRow}><label>Thanh toán<select value={expenseForm.paymentStatus} onChange={(event) => setExpenseForm((current) => ({ ...current, paymentStatus: event.target.value as PaymentStatus }))}>{(Object.keys(paymentLabels) as PaymentStatus[]).map((status) => <option value={status} key={status}>{paymentLabels[status]}</option>)}</select></label>{(expenseForm.paymentStatus === "paid" || expenseForm.recurrence !== "once") && <label>{expenseForm.recurrence === "once" ? "Ngày thanh toán" : "Ngày thanh toán theo chu kỳ"}<VietnameseDateInput required={expenseForm.recurrence !== "once"} value={expenseForm.paymentDate} onChange={(paymentDate) => setExpenseForm((current) => ({ ...current, paymentDate }))} /></label>}</div><div className={styles.formRow}><label>Mã hóa đơn<input value={expenseForm.invoiceCode} onChange={(event) => setExpenseForm((current) => ({ ...current, invoiceCode: event.target.value }))} /></label><label>Nhà cung cấp<select required value={expenseForm.vendorIsCustom ? "__other" : expenseForm.vendor} onChange={(event) => { const value = event.target.value; setExpenseForm((current) => ({ ...current, vendorIsCustom: value === "__other", vendor: value === "__other" ? "" : value })); }}><option value="">Chọn nhà cung cấp</option>{vendors.map((vendor) => <option value={vendor} key={vendor}>{vendor}</option>)}<option value="__other">Khác</option></select>{expenseForm.vendorIsCustom && <input required value={expenseForm.vendor} onChange={(event) => setExpenseForm((current) => ({ ...current, vendor: event.target.value }))} placeholder="Nhập nhà cung cấp mới" />}</label></div><label>Note<textarea value={expenseForm.note} onChange={(event) => setExpenseForm((current) => ({ ...current, note: event.target.value }))} placeholder="Ghi chú nội bộ" /></label><button disabled={savingExpense} className={styles.primaryButton} type="submit">{savingExpense ? "Đang lưu…" : editingExpenseId ? "Lưu thay đổi" : "Ghi nhận chi phí"}</button></form></div>}
+    {showExpenseForm && <div className={styles.backdrop} role="presentation" onMouseDown={() => !savingExpense && setShowExpenseForm(false)}><form className={styles.sheet} onSubmit={saveExpense} onMouseDown={(event) => event.stopPropagation()}><div className={styles.sheetHandle} /><div className={styles.sheetTitle}><div><span>{editingExpenseId ? "CẬP NHẬT" : "GHI NHẬN"}</span><h2>{categoryLabels[expenseForm.category]}</h2></div><button disabled={savingExpense} type="button" onClick={() => setShowExpenseForm(false)}>×</button></div><label>Category<select value={expenseForm.category} onChange={(event) => setExpenseForm((current) => ({ ...current, category: event.target.value as ExpenseCategory, recurrence: event.target.value === "fixed" ? "monthly" : "once" }))}>{(Object.keys(categoryLabels) as ExpenseCategory[]).map((category) => <option value={category} key={category}>{categoryLabels[category]}</option>)}</select></label>{stores.length > 1 && <label>Ghi nhận cho<select value={expenseForm.storeId} onChange={(event) => setExpenseForm((current) => ({ ...current, storeId: event.target.value }))}><option value="">Toàn chuỗi (dùng chung, chia theo doanh thu)</option>{outlets.map((store) => <option value={store.id} key={store.id}>{store.name}</option>)}{expenseForm.storeId && !isOutletId(expenseForm.storeId) && <option value={expenseForm.storeId}>{storeLabel(expenseForm.storeId)}</option>}</select></label>}<label>Tên chi phí / tài sản<input autoFocus required value={expenseForm.name} onChange={(event) => { const name = event.target.value; setExpenseForm((current) => ({ ...current, name, storeId: current.storeId || storeFromExpenseName(stores, name) || "" })); }} placeholder="Ví dụ: Tiền thuê mặt bằng" /></label><div className={styles.formRow}><label>Subcategory<select required value={expenseForm.subcategoryIsCustom ? "__other" : expenseForm.subcategory} onChange={(event) => { const value = event.target.value; setExpenseForm((current) => ({ ...current, subcategoryIsCustom: value === "__other", subcategory: value === "__other" ? "" : value })); }}><option value="">Chọn subcategory</option>{subcategories.map((subcategory) => <option value={subcategory} key={subcategory}>{subcategory}</option>)}<option value="__other">Khác</option></select>{expenseForm.subcategoryIsCustom && <input required value={expenseForm.subcategory} onChange={(event) => setExpenseForm((current) => ({ ...current, subcategory: event.target.value }))} placeholder="Nhập subcategory mới" />}</label><label>Số tiền<input required inputMode="numeric" value={expenseForm.amount} onChange={(event) => setExpenseForm((current) => ({ ...current, amount: amountInput(event.target.value) }))} placeholder="15,000,000" /></label></div><div className={styles.formRow}><label>Ngày ghi nhận<VietnameseDateInput required value={expenseForm.incurredOn} onChange={(incurredOn) => setExpenseForm((current) => ({ ...current, incurredOn }))} /></label>{expenseForm.category !== "investment" && <label>Chu kỳ<select value={expenseForm.recurrence} onChange={(event) => setExpenseForm((current) => ({ ...current, recurrence: event.target.value as Recurrence }))}>{(Object.keys(recurrenceLabels) as Recurrence[]).map((recurrence) => <option value={recurrence} key={recurrence}>{recurrenceLabels[recurrence]}</option>)}</select></label>}</div>{expenseForm.category === "investment" && <><div className={styles.formRow}><label>Ngày sử dụng<VietnameseDateInput value={expenseForm.inServiceOn} onChange={(inServiceOn) => setExpenseForm((current) => ({ ...current, inServiceOn }))} /></label><label>Khấu hao (tháng)<input min="1" type="number" value={expenseForm.usefulLifeMonths} onChange={(event) => setExpenseForm((current) => ({ ...current, usefulLifeMonths: event.target.value }))} /></label></div><label>Giá trị thu hồi<input inputMode="numeric" value={expenseForm.salvageValue} onChange={(event) => setExpenseForm((current) => ({ ...current, salvageValue: amountInput(event.target.value) }))} /></label></>}<div className={styles.formRow}><label>Thanh toán<select value={expenseForm.paymentStatus} onChange={(event) => setExpenseForm((current) => ({ ...current, paymentStatus: event.target.value as PaymentStatus }))}>{(Object.keys(paymentLabels) as PaymentStatus[]).map((status) => <option value={status} key={status}>{paymentLabels[status]}</option>)}</select></label>{(expenseForm.paymentStatus === "paid" || expenseForm.recurrence !== "once") && <label>{expenseForm.recurrence === "once" ? "Ngày thanh toán" : "Ngày thanh toán theo chu kỳ"}<VietnameseDateInput required={expenseForm.recurrence !== "once"} value={expenseForm.paymentDate} onChange={(paymentDate) => setExpenseForm((current) => ({ ...current, paymentDate }))} /></label>}</div><div className={styles.formRow}><label>Mã hóa đơn<input value={expenseForm.invoiceCode} onChange={(event) => setExpenseForm((current) => ({ ...current, invoiceCode: event.target.value }))} /></label><label>Nhà cung cấp<select required value={expenseForm.vendorIsCustom ? "__other" : expenseForm.vendor} onChange={(event) => { const value = event.target.value; setExpenseForm((current) => ({ ...current, vendorIsCustom: value === "__other", vendor: value === "__other" ? "" : value })); }}><option value="">Chọn nhà cung cấp</option>{vendors.map((vendor) => <option value={vendor} key={vendor}>{vendor}</option>)}<option value="__other">Khác</option></select>{expenseForm.vendorIsCustom && <input required value={expenseForm.vendor} onChange={(event) => setExpenseForm((current) => ({ ...current, vendor: event.target.value }))} placeholder="Nhập nhà cung cấp mới" />}</label></div><fieldset className={styles.receiptField}><legend>Đính kèm hóa đơn <small>ảnh hoặc PDF, để đối chiếu số tiền, nhà cung cấp và mã hoá đơn sau này</small></legend><div className={styles.receiptOptions}><label className={`${styles.receiptChoice} ${styles.receiptCamera}`}><input type="file" accept="image/*" capture="environment" disabled={savingExpense} onChange={(event) => void attachExpenseReceipt(event)} /><span aria-hidden="true">◎</span><b>Chụp bằng camera</b><small>Mở camera sau trên điện thoại</small></label><label className={styles.receiptChoice}><input type="file" accept="image/*,.pdf" disabled={savingExpense} onChange={(event) => void attachExpenseReceipt(event)} /><span aria-hidden="true">⇧</span><b>Chọn ảnh / PDF</b><small>Tải file có sẵn từ thiết bị</small></label></div>{expenseReceipt && <div className={styles.receiptPreview}>{!isPdfReceipt(expenseReceipt) && (expenseReceipt.viewUrl || expenseReceipt.dataUrl) ? <a className={styles.receiptThumb} href={expenseReceipt.viewUrl || undefined} target="_blank" rel="noreferrer" title="Mở hoá đơn"><img src={expenseReceipt.viewUrl || expenseReceipt.dataUrl} alt={`Hoá đơn ${expenseReceipt.name}`} /></a> : <span className={styles.receiptFileBadge}>{isPdfReceipt(expenseReceipt) ? "PDF" : "ẢNH"}</span>}<div className={styles.receiptMeta}><b>{expenseReceipt.name}</b><small>{expenseReceipt.file ? `Chưa lưu · lưu cùng chi phí khi bấm “${editingExpenseId ? "Lưu thay đổi" : "Ghi nhận chi phí"}”` : expenseReceipt.viewError ? expenseReceipt.viewError : !expenseReceipt.dataUrl && uatMode ? "Ảnh nằm trên Production, UAT không mở được" : "Đã lưu cùng chi phí"}</small><div>{expenseReceipt.viewUrl && <a href={expenseReceipt.viewUrl} target="_blank" rel="noreferrer">Mở hoá đơn</a>}<button type="button" disabled={savingExpense} onClick={removeExpenseReceipt}>Bỏ hoá đơn</button></div></div></div>}</fieldset><label>Note<textarea value={expenseForm.note} onChange={(event) => setExpenseForm((current) => ({ ...current, note: event.target.value }))} placeholder="Ghi chú nội bộ" /></label><button disabled={savingExpense} className={styles.primaryButton} type="submit">{savingExpense ? "Đang lưu…" : editingExpenseId ? "Lưu thay đổi" : "Ghi nhận chi phí"}</button></form></div>}
 
   </div>;
 }
