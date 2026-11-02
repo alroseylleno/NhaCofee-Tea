@@ -281,12 +281,19 @@ export type FinanceExpenseRecord = {
   status: "active" | "voided";
   /// Điểm bán that carries the cost; absent = Toàn chuỗi (shared, allocated by revenue).
   storeId?: string;
-  /// Ảnh / PDF hoá đơn, like a Kho lot's receipt. Production keeps the file in
-  /// the "bills" bucket (`path`); UAT keeps it in the browser (`dataUrl`).
-  receipt?: FinanceExpenseReceipt;
+  /// Ảnh / PDF hoá đơn, like a Kho lot's receipt, in the order they were added.
+  /// Production keeps each file in the "bills" bucket (`path`); UAT keeps it in
+  /// the browser (`dataUrl`).
+  receipts?: FinanceExpenseReceipt[];
 };
 
 export type FinanceExpenseReceipt = { name: string; path?: string; dataUrl?: string };
+
+/// A UAT record saved before the bill list carries a single `receipt`.
+export function withReceiptList(record: FinanceExpenseRecord & { receipt?: FinanceExpenseReceipt }): FinanceExpenseRecord {
+  const { receipt, ...rest } = record;
+  return rest.receipts?.length || !receipt ? rest : { ...rest, receipts: [receipt] };
+}
 
 export type FinanceCloudState = {
   expenses: FinanceExpenseRecord[];
@@ -332,8 +339,16 @@ function expenseFromRow(row: Record<string, unknown>): FinanceExpenseRecord {
     inServiceOn: row.in_service_on ? String(row.in_service_on) : undefined,
     status: row.status as FinanceExpenseRecord["status"],
     storeId: row.store_id ? String(row.store_id) : undefined,
-    receipt: row.receipt_path ? { name: row.receipt_name ? String(row.receipt_name) : "Hóa đơn", path: String(row.receipt_path) } : undefined,
+    receipts: receiptsFromRow(row),
   };
+}
+
+/// `receipts` (20261102000100) is the list. Before that migration, or on a row
+/// the single-bill app wrote, receipt_path / receipt_name stand in for it.
+function receiptsFromRow(row: Record<string, unknown>): FinanceExpenseReceipt[] | undefined {
+  const list = Array.isArray(row.receipts) ? row.receipts.flatMap((entry: { name?: unknown; path?: unknown } | null) => entry && typeof entry.path === "string" && entry.path ? [{ name: entry.name ? String(entry.name) : "Hóa đơn", path: entry.path }] : []) : [];
+  if (list.length) return list;
+  return row.receipt_path ? [{ name: row.receipt_name ? String(row.receipt_name) : "Hóa đơn", path: String(row.receipt_path) }] : undefined;
 }
 
 function grabReconciliationFromRow(row: Record<string, unknown>): FinanceGrabReconciliationRecord {
@@ -586,28 +601,34 @@ export async function loadFinanceImports(): Promise<FinanceCloudState> {
 }
 
 function expenseRows(records: FinanceExpenseRecord[]) {
-  return records.map((record) => ({
-    id: record.id,
-    name: record.name,
-    category: record.category,
-    subcategory: record.subcategory,
-    amount: record.amount,
-    incurred_on: record.incurredOn,
-    recurrence: record.recurrence,
-    payment_status: record.paymentStatus,
-    payment_date: record.paymentDate || null,
-    invoice_code: record.invoiceCode || null,
-    vendor: record.vendor || null,
-    note: record.note || null,
-    useful_life_months: record.usefulLifeMonths ?? null,
-    salvage_value: record.salvageValue ?? null,
-    in_service_on: record.inServiceOn || null,
-    status: record.status,
-    store_id: record.storeId || null,
-    receipt_path: record.receipt?.path || null,
-    receipt_name: record.receipt?.path ? record.receipt.name : null,
-    updated_at: new Date().toISOString(),
-  }));
+  return records.map((record) => {
+    const receipts = (record.receipts || []).flatMap(({ name, path }) => path ? [{ name, path }] : []);
+    return {
+      id: record.id,
+      name: record.name,
+      category: record.category,
+      subcategory: record.subcategory,
+      amount: record.amount,
+      incurred_on: record.incurredOn,
+      recurrence: record.recurrence,
+      payment_status: record.paymentStatus,
+      payment_date: record.paymentDate || null,
+      invoice_code: record.invoiceCode || null,
+      vendor: record.vendor || null,
+      note: record.note || null,
+      useful_life_months: record.usefulLifeMonths ?? null,
+      salvage_value: record.salvageValue ?? null,
+      in_service_on: record.inServiceOn || null,
+      status: record.status,
+      store_id: record.storeId || null,
+      receipts,
+      // The first bill also fills the single-bill columns, so an app built
+      // before 20261102000100 still finds one.
+      receipt_path: receipts[0]?.path || null,
+      receipt_name: receipts[0]?.name || null,
+      updated_at: new Date().toISOString(),
+    };
+  });
 }
 
 export async function upsertFinanceExpenses(records: FinanceExpenseRecord[], ignoreExisting = false) {
@@ -620,12 +641,17 @@ export async function upsertFinanceExpenses(records: FinanceExpenseRecord[], ign
   // use it can still be saved without it, one that does must wait.
   //   store_id            — 20261030000100 (điểm bán)
   //   receipt_path / name — 20261030000200 (ảnh hoá đơn)
-  for (let attempt = 0; attempt < 2 && error?.code === "PGRST204"; attempt += 1) {
+  //   receipts            — 20261102000100 (nhiều hoá đơn; một hoá đơn vẫn đi qua receipt_path)
+  const storedBills = (record: FinanceExpenseRecord) => (record.receipts || []).filter((receipt) => receipt.path).length;
+  for (let attempt = 0; attempt < 3 && error?.code === "PGRST204"; attempt += 1) {
     if (/store_id/.test(error.message)) {
       if (records.some((record) => record.storeId)) throw new Error("Supabase chưa có cột điểm bán cho chi phí. Chờ workflow migration 20261030000100 chạy xong rồi lưu lại.");
       rows = rows.map(({ store_id: _storeId, ...row }) => row);
+    } else if (/'receipts'/.test(error.message)) {
+      if (records.some((record) => storedBills(record) > 1)) throw new Error("Supabase chưa có cột cho nhiều hoá đơn. Giữ 1 hoá đơn để lưu ngay, hoặc chờ workflow migration 20261102000100 chạy xong rồi lưu lại.");
+      rows = rows.map(({ receipts: _receipts, ...row }) => row);
     } else if (/receipt_(path|name)/.test(error.message)) {
-      if (records.some((record) => record.receipt?.path)) throw new Error("Supabase chưa có cột ảnh hoá đơn cho chi phí. Bỏ ảnh để lưu ngay, hoặc chờ workflow migration 20261030000200 chạy xong rồi lưu lại.");
+      if (records.some((record) => storedBills(record) > 0)) throw new Error("Supabase chưa có cột ảnh hoá đơn cho chi phí. Bỏ ảnh để lưu ngay, hoặc chờ workflow migration 20261030000200 chạy xong rồi lưu lại.");
       rows = rows.map(({ receipt_path: _path, receipt_name: _name, ...row }) => row);
     } else break;
     ({ data, error } = await upsert());
@@ -635,24 +661,27 @@ export async function upsertFinanceExpenses(records: FinanceExpenseRecord[], ign
 }
 
 /// Same bucket and naming as a Kho lot's bill (saveInventory), under expenses/.
-export async function uploadFinanceExpenseReceipt(expenseId: string, file: File): Promise<FinanceExpenseReceipt> {
-  const path = `expenses/${expenseId}-${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
+/// Several bills go up at once and a phone names every photo image.jpg, so the
+/// position in the batch keeps their paths apart.
+export async function uploadFinanceExpenseReceipt(expenseId: string, file: File, index = 0): Promise<FinanceExpenseReceipt> {
+  const path = `expenses/${expenseId}-${Date.now()}-${index + 1}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
   const { error } = await requireClient().storage.from("bills").upload(path, file, { upsert: false, contentType: file.type || undefined });
   if (error) throw supabaseFailure(error, "Không thể tải ảnh hoá đơn lên");
   return { name: file.name, path };
 }
 
-/// Best effort: drops a file whose expense row could not be saved.
-export async function removeFinanceExpenseReceiptFile(path: string) {
-  try { await requireClient().storage.from("bills").remove([path]); } catch { /* an orphan file costs nothing but space */ }
+/// Best effort: drops files whose expense row could not be saved.
+export async function removeFinanceExpenseReceiptFiles(paths: string[]) {
+  if (!paths.length) return;
+  try { await requireClient().storage.from("bills").remove(paths); } catch { /* an orphan file costs nothing but space */ }
 }
 
-/// Short-lived link to view a stored bill; fetched when the expense is opened,
-/// never kept in state that outlives the page.
-export async function financeExpenseReceiptUrl(path: string) {
-  const { data, error } = await requireClient().storage.from("bills").createSignedUrl(path, 3600);
+/// Short-lived links to view stored bills, one request for the whole list;
+/// fetched when the expense is opened, never kept in state that outlives the page.
+export async function financeExpenseReceiptUrls(paths: string[]) {
+  const { data, error } = await requireClient().storage.from("bills").createSignedUrls(paths, 3600);
   if (error) throw supabaseFailure(error, "Không mở được ảnh hoá đơn");
-  return data.signedUrl;
+  return new Map(data.flatMap((entry) => entry.path && entry.signedUrl && !entry.error ? [[entry.path, entry.signedUrl] as const] : []));
 }
 
 export async function upsertFinanceOrderStoreAssignments(records: FinanceOrderStoreAssignment[]) {

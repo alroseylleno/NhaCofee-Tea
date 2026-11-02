@@ -12,6 +12,9 @@ const SMALL_ENOUGH = 1_500_000;
 export const RECEIPT_MAX_BYTES = 10 * 1024 * 1024;
 /// UAT keeps the file inside localStorage next to the whole Finance state.
 export const RECEIPT_UAT_MAX_BYTES = 1_500_000;
+/// Bills per expense: room for the bill, the transfer screenshot and photos of
+/// the goods, while a UAT record (files kept in localStorage) stays loadable.
+export const RECEIPT_MAX_FILES = 10;
 
 export async function prepareReceiptFile(file: File): Promise<File> {
   if (!file.type.startsWith("image/") || /gif|svg/i.test(file.type)) return file;
@@ -47,4 +50,16 @@ export function readFileAsDataUrl(file: File) {
 
 export function isPdfReceipt(receipt: { name: string; dataUrl?: string; file?: File }) {
   return /\.pdf$/i.test(receipt.name) || receipt.file?.type === "application/pdf" || Boolean(receipt.dataUrl?.startsWith("data:application/pdf"));
+}
+
+/// A stored UAT bill as a Blob, decoded on the spot so its link exists in the
+/// same tick as the form that shows it (browsers refuse to open data: URLs).
+export function dataUrlToBlob(dataUrl: string) {
+  const comma = dataUrl.indexOf(",");
+  const header = dataUrl.slice(0, comma);
+  const body = dataUrl.slice(comma + 1);
+  const binary = header.includes(";base64") ? atob(body) : decodeURIComponent(body);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type: /^data:([^;,]+)/.exec(header)?.[1] || "application/octet-stream" });
 }

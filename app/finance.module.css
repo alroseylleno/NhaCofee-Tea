@@ -1097,14 +1097,19 @@
 .receiptChoice b { font: 700 12px Arial, sans-serif; }
 .sheet .receiptChoice small { font-size: 9px; }
 .sheet .receiptCamera { border-color: #9fbea6; background: #edf3e8; }
-.receiptPreview { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 12px; align-items: center; margin-top: 10px; padding: 10px; border: 1px solid #cbd9ca; border-radius: 11px; background: #f3f8f0; }
-.receiptThumb { display: block; width: 64px; height: 64px; overflow: hidden; border: 1px solid #d8d0c3; border-radius: 8px; background: #fff; }
+/* The attached bills: one tile each — tap the picture to open it, × to drop it. */
+.receiptListHead { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 10px; margin-top: 12px; }
+.receiptListHead b { color: var(--ink); font: 700 11px Arial, sans-serif; }
+.sheet .receiptListHead small { font-size: 10px; }
+.receiptList { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; margin: 8px 0 0; padding: 0; list-style: none; }
+.receiptList li { position: relative; display: grid; gap: 3px; min-width: 0; padding: 6px; border: 1px solid #cbd9ca; border-radius: 11px; background: #f3f8f0; }
+.receiptList li.receiptPending { border-style: dashed; border-color: #9fbea6; background: #fbfcf8; }
+.receiptThumb { display: block; width: 100%; aspect-ratio: 1; overflow: hidden; border: 1px solid #d8d0c3; border-radius: 8px; background: #fff; }
 .receiptThumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
-.receiptFileBadge { display: grid; place-items: center; width: 64px; height: 64px; border-radius: 8px; color: #fff; background: #5b8d72; font: 700 12px Arial, sans-serif; letter-spacing: .04em; }
-.receiptMeta { display: grid; gap: 3px; min-width: 0; }
-.receiptMeta > b { overflow: hidden; color: var(--ink); font: 700 12px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
-.sheet .receiptMeta small { font-size: 10px; }
-.receiptMeta > div { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 3px; }
-.receiptMeta a, .receiptMeta button { padding: 6px 9px; border: 1px solid #c6d5c7; border-radius: 8px; color: #1e4b3f; background: #fff; font: 700 11px Arial, sans-serif; text-decoration: none; cursor: pointer; }
-.receiptMeta button { border-color: #edc5bb; color: #a54c37; background: #fff7f4; }
+.receiptFileBadge { display: grid; place-items: center; width: 100%; aspect-ratio: 1; border-radius: 8px; color: #fff; background: #5b8d72; font: 700 12px Arial, sans-serif; letter-spacing: .04em; text-decoration: none; }
+.receiptList li > b { overflow: hidden; color: var(--ink); font: 700 10px Arial, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+.sheet .receiptList li > small { overflow: hidden; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.receiptList li.receiptPending > small { color: #8a6a1f; }
+.sheet .receiptRemove { position: absolute; top: 1px; right: 1px; display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 1px solid #edc5bb; border-radius: 99px; color: #a54c37; background: #fff7f4; font: 700 16px/1 Arial, sans-serif; cursor: pointer; box-shadow: 0 1px 4px #27251f22; }
+.sheet .receiptRemove:disabled { opacity: .45; cursor: default; }
 .expenseReceiptMark { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 99px; color: #1e4b3f; background: #e3eee0; font: 700 8px/1.4 Arial, sans-serif; font-style: normal; letter-spacing: .03em; vertical-align: 1px; }
