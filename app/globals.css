@@ -252,3 +252,12 @@
 .detail-month-group > div:first-child span { color: var(--muted); font-size: 9px; }
 .unit-warning { display: block; margin-top: 6px; padding: 8px 9px; border-radius: 8px; color: #8a4a23; background: #fdf1e0; font: 11px/1.45 Arial, sans-serif; }
 .unit-warning b { font-weight: 700; }
+
+/* Hoá đơn của lô — đỏ khi lô nhập chưa có hoá đơn, như danh sách chi phí bên Tài chính. */
+.missing-bill-count { margin-left: 6px; color: #b4321f; font: 700 10px Arial, sans-serif; font-style: normal; white-space: nowrap; }
+.summary-name .missing-bill-count { margin-left: 0; }
+.bill-mark { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 99px; color: #1e4b3f; background: #e3eee0; font: 700 8px/1.4 Arial, sans-serif; font-style: normal; letter-spacing: .03em; vertical-align: 1px; }
+.bill-mark.missing { color: #b4321f; background: #fbe6df; }
+.ingredient-lot-row.lot-missing-bill > span b, .ingredient-lot-row.lot-missing-bill > span small { color: #b4321f; }
+.lot-card.lot-missing-bill .lot-top > div > b, .lot-card.lot-missing-bill .lot-top > div > span { color: #b4321f; }
+.receipt-detail p.receipt-missing { color: #b4321f; font-weight: 700; }
