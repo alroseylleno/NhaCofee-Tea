@@ -1120,3 +1120,6 @@
 .sheet .receiptRemove { position: absolute; top: 1px; right: 1px; display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 1px solid #edc5bb; border-radius: 99px; color: #a54c37; background: #fff7f4; font: 700 16px/1 Arial, sans-serif; cursor: pointer; box-shadow: 0 1px 4px #27251f22; }
 .sheet .receiptRemove:disabled { opacity: .45; cursor: default; }
 .expenseReceiptMark { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 99px; color: #1e4b3f; background: #e3eee0; font: 700 8px/1.4 Arial, sans-serif; font-style: normal; letter-spacing: .03em; vertical-align: 1px; }
+/* Hoá đơn theo kỳ: the kỳ a recurring cost's bills belong to. */
+.receiptField legend > span { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.receiptPeriod { padding: 2px 8px; border-radius: 99px; color: #fff; background: #1e4b3f; font: 700 10px/1.4 Arial, sans-serif; font-style: normal; letter-spacing: .02em; }

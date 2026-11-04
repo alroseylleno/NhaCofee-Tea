@@ -287,7 +287,40 @@ export type FinanceExpenseRecord = {
   receipts?: FinanceExpenseReceipt[];
 };
 
-export type FinanceExpenseReceipt = { name: string; path?: string; dataUrl?: string };
+/// `period` ties a bill to one kỳ of a recurring cost (see expensePeriodOf); a
+/// one-off cost or an asset has no kỳ. A recurring cost's bill without one was
+/// attached before bills went per kỳ and still counts for every kỳ.
+export type FinanceExpenseReceipt = { name: string; path?: string; dataUrl?: string; period?: string };
+
+/// The kỳ a bill of a recurring cost belongs to. Long, 04/11/2026: a fixed cost
+/// gets its own bills every month (every row), not one upload for all months.
+/// Monthly, quarterly and yearly costs fall due once in a month, and the month
+/// survives a change of payment day; a weekly cost keeps the exact due date.
+export function expensePeriodOf(recurrence: FinanceExpenseRecord["recurrence"], dueDate: string) {
+  return recurrence === "weekly" ? dueDate : dueDate.slice(0, 7);
+}
+
+export function isRecurringExpense(expense: Pick<FinanceExpenseRecord, "category" | "recurrence">) {
+  return expense.category !== "investment" && expense.recurrence !== "once";
+}
+
+/// Bills of one row of the expense list: everything for a one-off cost or an
+/// asset; for a recurring cost, those of the row's kỳ plus any older bill that
+/// was never tied to a kỳ.
+export function expenseBillsFor(expense: FinanceExpenseRecord, dueDate: string) {
+  const receipts = expense.receipts || [];
+  if (!isRecurringExpense(expense)) return receipts;
+  const period = expensePeriodOf(expense.recurrence, dueDate);
+  return receipts.filter((receipt) => !receipt.period || receipt.period === period);
+}
+
+const PERIOD_PATTERN = /^\d{4}-\d{2}(-\d{2})?$/;
+/// A bill uploaded for one kỳ carries it in its path too
+/// (expenses/<id chi phí>-<kỳ>-<thời điểm>-<thứ tự>-<tên>), so the kỳ survives an
+/// older app that rewrites the list as {name, path} only.
+function periodFromPath(path: string) {
+  return /-(\d{4}-\d{2}(?:-\d{2})?)-\d{13}-\d+-[^/]*$/.exec(path)?.[1];
+}
 
 /// A UAT record saved before the bill list carries a single `receipt`.
 export function withReceiptList(record: FinanceExpenseRecord & { receipt?: FinanceExpenseReceipt }): FinanceExpenseRecord {
@@ -346,7 +379,11 @@ function expenseFromRow(row: Record<string, unknown>): FinanceExpenseRecord {
 /// `receipts` (20261102000100) is the list. Before that migration, or on a row
 /// the single-bill app wrote, receipt_path / receipt_name stand in for it.
 function receiptsFromRow(row: Record<string, unknown>): FinanceExpenseReceipt[] | undefined {
-  const list = Array.isArray(row.receipts) ? row.receipts.flatMap((entry: { name?: unknown; path?: unknown } | null) => entry && typeof entry.path === "string" && entry.path ? [{ name: entry.name ? String(entry.name) : "Hóa đơn", path: entry.path }] : []) : [];
+  const list = Array.isArray(row.receipts) ? row.receipts.flatMap((entry: { name?: unknown; path?: unknown; period?: unknown } | null) => {
+    if (!entry || typeof entry.path !== "string" || !entry.path) return [];
+    const period = typeof entry.period === "string" && PERIOD_PATTERN.test(entry.period) ? entry.period : periodFromPath(entry.path);
+    return [{ name: entry.name ? String(entry.name) : "Hóa đơn", path: entry.path, ...(period ? { period } : {}) }];
+  }) : [];
   if (list.length) return list;
   return row.receipt_path ? [{ name: row.receipt_name ? String(row.receipt_name) : "Hóa đơn", path: String(row.receipt_path) }] : undefined;
 }
@@ -602,7 +639,7 @@ export async function loadFinanceImports(): Promise<FinanceCloudState> {
 
 function expenseRows(records: FinanceExpenseRecord[]) {
   return records.map((record) => {
-    const receipts = (record.receipts || []).flatMap(({ name, path }) => path ? [{ name, path }] : []);
+    const receipts = (record.receipts || []).flatMap(({ name, path, period }) => path ? [{ name, path, ...(period ? { period } : {}) }] : []);
     return {
       id: record.id,
       name: record.name,
@@ -663,11 +700,11 @@ export async function upsertFinanceExpenses(records: FinanceExpenseRecord[], ign
 /// Same bucket and naming as a Kho lot's bill (saveInventory), under expenses/.
 /// Several bills go up at once and a phone names every photo image.jpg, so the
 /// position in the batch keeps their paths apart.
-export async function uploadFinanceExpenseReceipt(expenseId: string, file: File, index = 0): Promise<FinanceExpenseReceipt> {
-  const path = `expenses/${expenseId}-${Date.now()}-${index + 1}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
+export async function uploadFinanceExpenseReceipt(expenseId: string, file: File, index = 0, period?: string): Promise<FinanceExpenseReceipt> {
+  const path = `expenses/${expenseId}-${period ? `${period}-` : ""}${Date.now()}-${index + 1}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
   const { error } = await requireClient().storage.from("bills").upload(path, file, { upsert: false, contentType: file.type || undefined });
   if (error) throw supabaseFailure(error, "Không thể tải ảnh hoá đơn lên");
-  return { name: file.name, path };
+  return { name: file.name, path, ...(period ? { period } : {}) };
 }
 
 /// Best effort: drops files whose expense row could not be saved.
