@@ -37,10 +37,17 @@ const MERCHANT = "https://merchant.grab.com";
 // ID này chỉ là phương án cuối.
 const FALLBACK_ADVERTISER_ID = "547376854891398048";
 
+// Grab Merchant picks its UI language from localStorage `lang` (VN / GB). On
+// 31/10/2026 the profile flipped to GB and every Vietnamese caption below
+// missed (0/3 files). The robot pins VN, and each caption also matches the
+// English text Grab shows under GB, so a flip can no longer stop the export.
+const UI_LANG = "VN";
+const caption = (vi, en) => new RegExp(`^(${vi}|${en})$`);
+
 const REPORTS = [
   { key: "campaigns", label: "Chiến dịch", folder: "Campaign", days: 183, format: "CSV", allColumns: true },
-  { key: "promo", label: "Khuyến mãi", folder: "promo", range: "12 tháng qua", format: "PNG", checkboxes: ["Tóm tắt chỉ số", "Biểu đồ với chế độ xem hiện tại"] },
-  { key: "keywords", label: "Từ khoá", folder: "keyword", range: "3 tháng qua", format: "CSV", allColumns: true },
+  { key: "promo", label: "Khuyến mãi", folder: "promo", range: caption("12 tháng qua", "Last 12 months"), format: "PNG", checkboxes: [caption("Tóm tắt chỉ số", "Summary of metrics"), caption("Biểu đồ với chế độ xem hiện tại", "Chart with the current view")] },
+  { key: "keywords", label: "Từ khoá", folder: "keyword", range: caption("3 tháng qua", "Last 3 months"), format: "CSV", allColumns: true },
 ];
 
 const loginMode = process.argv.includes("--login");
@@ -145,8 +152,8 @@ async function resolveAdvertiser(page) {
 
 async function applyPreset(page, dateButton, before, range) {
   await dateButton.click();
-  await page.getByText(range, { exact: true }).click();
-  await page.getByRole("button", { name: "Áp dụng", exact: true }).click();
+  await page.getByText(range).click();
+  await page.getByRole("button", { name: caption("Áp dụng", "Apply") }).click();
   // The label is the only on-screen proof the filter took; a stale label means
   // the download would silently carry the default 7-day window.
   await page.waitForFunction(([pattern, old]) => [...document.querySelectorAll("div")].some((el) => el.children.length === 0 && new RegExp(pattern).test(el.innerText.trim()) && el.innerText.trim() !== old), [DATE_RANGE.source, before], { timeout: 20_000 }).catch(() => {});
@@ -172,20 +179,20 @@ async function exportReport(page, advertiserId, report) {
   await page.waitForTimeout(4000);
 
 
-  await page.getByRole("button", { name: /Tải về/ }).first().click();
-  const dialog = page.locator("div").filter({ has: page.getByText("Chọn định dạng", { exact: true }) }).filter({ has: page.getByText("Chọn tùy chọn", { exact: true }) }).last();
+  await page.getByRole("button", { name: /Tải về|Download/ }).first().click();
+  const dialog = page.locator("div").filter({ has: page.getByText(caption("Chọn định dạng", "Select format")) }).filter({ has: page.getByText(caption("Chọn tùy chọn", "Select options")) }).last();
   await dialog.waitFor({ timeout: 15_000 });
   await dialog.getByText(report.format, { exact: true }).click();
-  if (report.allColumns) await dialog.getByText("Bao gồm tất cả các cột có sẵn", { exact: true }).click();
-  const limit = dialog.getByText(/giới hạn trong/);
+  if (report.allColumns) await dialog.getByText(caption("Bao gồm tất cả các cột có sẵn", "Include all available columns")).click();
+  const limit = dialog.getByText(/giới hạn trong|limited to/i);
   if (await limit.isVisible().catch(() => false)) throw new Error(`Grab khoá nút tải: ${(await limit.innerText()).trim()}`);
-  for (const caption of report.checkboxes || []) {
-    const box = dialog.locator("label").filter({ hasText: caption }).locator("input[type=checkbox]");
-    if (!(await box.isChecked())) await dialog.getByText(caption, { exact: true }).click();
+  for (const option of report.checkboxes || []) {
+    const box = dialog.locator("label").filter({ hasText: option }).locator("input[type=checkbox]");
+    if (!(await box.isChecked())) await dialog.getByText(option).click();
   }
   const [download] = await Promise.all([
     page.waitForEvent("download", { timeout: 120_000 }),
-    dialog.getByRole("button", { name: "Tải về", exact: true }).click(),
+    dialog.getByRole("button", { name: caption("Tải về", "Download") }).click(),
   ]);
 
   const folder = path.join(RAW_DIR, report.folder);
@@ -214,6 +221,7 @@ async function exportReport(page, advertiserId, report) {
 /// and must not cost the reports that come after it.
 async function withBrowser(step, work) {
   const context = await chromium.launchPersistentContext(PROFILE_DIR, { headless, acceptDownloads: true, viewport: { width: 1440, height: 900 }, locale: "vi-VN" });
+  await context.addInitScript((lang) => { if (location.hostname === "merchant.grab.com") localStorage.setItem("lang", lang); }, UI_LANG);
   const page = context.pages()[0] || await context.newPage();
   try {
     return await work(page);
