@@ -59,6 +59,8 @@ export type FinanceInventoryLot = {
   purchasedOn: string;
   receiptCode?: string;
   internalReturn?: boolean;
+  /// For a return lot: the session whose unopened rest it holds.
+  sourceSessionId?: string;
   availableFrom?: string;
   /// Kho that holds the lot now; absent = default store.
   storeId?: string;
@@ -86,6 +88,9 @@ type ExpenseCategory = "fixed" | "operating" | "sales" | "investment";
 type Recurrence = "once" | "weekly" | "monthly" | "quarterly" | "yearly";
 type PaymentStatus = "unpaid" | "partial" | "paid";
 type ReportView = "pnl" | "cash" | "inventory" | "assets";
+/// cogs = Xuất dùng · waste = Hao hụt · reclass = cost of a unit opened in an
+/// earlier kỳ moving from Xuất dùng to this kỳ's Hao hụt (always negative).
+type InventoryLineKind = "cogs" | "waste" | "reclass";
 type RevenueSubTab = "overview" | "products" | "platform";
 
 type ExpenseRecord = FinanceExpenseRecord;
@@ -1524,13 +1529,30 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const inventoryEvents = useMemo(() => inventorySessions.flatMap((session) => {
     const lot = scopedLotsById.get(session.sourceReceiptId);
     if (!lot) return [];
-    const events: Array<{ id: string; date: string; lot: FinanceInventoryLot; amount: number; kind: "cogs" | "waste"; reason: string }> = [];
+    const events: Array<{ id: string; sessionId: string; date: string; openedOn: string; lot: FinanceInventoryLot; amount: number; kind: "cogs" | "waste"; reason: string }> = [];
     const activatedOn = session.costRecognitionMonth ? `${session.costRecognitionMonth}-01` : session.activatedAt.slice(0, 10);
-    if (inRange(activatedOn, bounds)) events.push({ id: `${session.id}-cogs`, date: activatedOn, lot, amount: session.recognizedCost ?? lot.unitCost, kind: "cogs", reason: session.reason });
+    // A wasted unit loses exactly what opening it cost, so D + E stays the opened total.
+    const cost = session.recognizedCost ?? lot.unitCost;
+    if (inRange(activatedOn, bounds)) events.push({ id: `${session.id}-cogs`, sessionId: session.id, date: activatedOn, openedOn: activatedOn, lot, amount: cost, kind: "cogs", reason: session.reason });
     const wastedOn = session.status === "wasted" ? session.closedAt?.slice(0, 10) : undefined;
-    if (wastedOn && inRange(wastedOn, bounds)) events.push({ id: `${session.id}-waste`, date: wastedOn, lot, amount: lot.unitCost, kind: "waste", reason: session.reason });
+    if (wastedOn && inRange(wastedOn, bounds)) events.push({ id: `${session.id}-waste`, sessionId: session.id, date: wastedOn, openedOn: activatedOn, lot, amount: cost, kind: "waste", reason: session.reason });
     return events;
   }), [scopedLotsById, inventorySessions, bounds]);
+  /// The same events as lines that add up to the P&L: every opened unit is
+  /// counted once. A "cogs" event is the cost leaving the kho, and a waste event
+  /// only re-labels part of it, so a unit opened and thrown away in this kỳ is a
+  /// single "Hao hụt" line (listing both counted it twice — 1.164.418đ in 2026),
+  /// and a unit opened in an earlier kỳ but thrown away in this one adds a minus
+  /// "reclass" line under Xuất dùng: its cost was taken when it was opened.
+  const inventoryLines = useMemo(() => {
+    const wastedHere = new Set(inventoryEvents.filter((entry) => entry.kind === "waste").map((entry) => entry.sessionId));
+    const openedHere = new Set(inventoryEvents.filter((entry) => entry.kind === "cogs").map((entry) => entry.sessionId));
+    return inventoryEvents.flatMap((entry) => {
+      if (entry.kind === "cogs") return wastedHere.has(entry.sessionId) ? [] : [{ ...entry, kind: "cogs" as InventoryLineKind }];
+      const waste = { ...entry, kind: "waste" as InventoryLineKind };
+      return openedHere.has(entry.sessionId) ? [waste] : [waste, { ...entry, id: `${entry.sessionId}-reclass`, kind: "reclass" as InventoryLineKind, amount: -entry.amount }];
+    });
+  }, [inventoryEvents]);
   const assetExpenses = scopedExpenses.filter((expense) => expense.category === "investment");
   const depreciation = assetExpenses.reduce((sum, asset) => sum + depreciationForAsset(asset, bounds), 0);
 
@@ -1583,8 +1605,13 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const ebitda = grossProfit - fixedCost - operatingCost - salesCost;
   const operatingProfit = ebitda - depreciation;
   const totalPeriodExpense = inventoryCogs + inventoryWaste + fixedCost + operatingCost + salesCost + depreciation;
-  const paidManual = manualOccurrences.filter((entry) => entry.expense.paymentStatus === "paid").reduce((sum, entry) => sum + entry.amount, 0);
-  const unpaidManual = manualOccurrences.filter((entry) => entry.expense.paymentStatus !== "paid").reduce((sum, entry) => sum + entry.amount, 0);
+  /// "Đã thanh toán" on a recurring cost describes the kỳ paid so far: a year
+  /// view counted the November and December rent as already paid on 05/11.
+  /// A kỳ whose payment date is still ahead is not money that left yet.
+  const occurrencePaid = (entry: { expense: ExpenseRecord; date: string }) => entry.expense.paymentStatus === "paid" && entry.date <= today;
+  const paidManual = manualOccurrences.filter(occurrencePaid).reduce((sum, entry) => sum + entry.amount, 0);
+  const unpaidManual = manualOccurrences.filter((entry) => !occurrencePaid(entry)).reduce((sum, entry) => sum + entry.amount, 0);
+  const notYetDueManual = manualOccurrences.filter((entry) => entry.expense.paymentStatus === "paid" && entry.date > today).reduce((sum, entry) => sum + entry.amount, 0);
 
   /// A purchase belongs to the kho that held the goods the day they were bought.
   const purchaseLots = useMemo(() => inventoryLots.filter((lot) => !lot.internalReturn && inRange(lot.purchasedOn, bounds) && (scope === "all" || ledger.purchaseStoreOf(lot) === scope)), [inventoryLots, bounds, scope, ledger]);
@@ -2094,7 +2121,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       const key = occurrence.expense.subcategory || "Khác";
       manualGroups.set(key, [...(manualGroups.get(key) || []), occurrence]);
     }
-    const categoryInventoryEvents = category === "operating" ? inventoryEvents : [];
+    const categoryInventoryEvents = category === "operating" ? inventoryLines : [];
     const inventoryCategoryGroups = new Map<string, typeof categoryInventoryEvents>();
     for (const inventoryEvent of categoryInventoryEvents) {
       const key = inventoryEvent.lot.category.trim() || "KHÁC";
@@ -3188,9 +3215,12 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     }
     return [...groups.entries()].sort(([left], [right]) => left.localeCompare(right, "vi")).map(([label, details]) => detailGroup(label, details));
   };
-  const inventoryEntries = (kind: "cogs" | "waste") => inventoryEvents.filter((entry) => entry.kind === kind);
-  const inventoryDetails = (kind: "cogs" | "waste") => inventoryEntries(kind).map((entry) => ({ label: `${entry.lot.name} · ${entry.lot.receiptCode || "không mã phiếu"}`, date: entry.date, amount: -entry.amount }));
-  const inventoryGroups = (kind: "cogs" | "waste") => groupDetailsBy(inventoryEntries(kind), (entry) => entry.lot.category.trim() || "KHÁC", (entry) => ({ label: `${entry.lot.name} · ${entry.lot.receiptCode || "không mã phiếu"}`, date: entry.date, amount: -entry.amount }));
+  // Xuất dùng = cogs + reclass lines, Hao hụt = waste lines, so each drill-down
+  // adds up to its row (the Xuất dùng one used to list every opening, waste included).
+  const inventoryEntries = (kind: "cogs" | "waste") => inventoryLines.filter((entry) => kind === "waste" ? entry.kind === "waste" : entry.kind !== "waste");
+  const inventoryLineLabel = (entry: (typeof inventoryLines)[number]) => `${entry.lot.name} · ${entry.lot.receiptCode || "không mã phiếu"}${entry.kind === "reclass" ? ` · mở ${dateLabel(entry.openedOn)}, chuyển sang hao hụt` : ""}`;
+  const inventoryDetails = (kind: "cogs" | "waste") => inventoryEntries(kind).map((entry) => ({ label: inventoryLineLabel(entry), date: entry.date, amount: -entry.amount }));
+  const inventoryGroups = (kind: "cogs" | "waste") => groupDetailsBy(inventoryEntries(kind), (entry) => entry.lot.category.trim() || "KHÁC", (entry) => ({ label: inventoryLineLabel(entry), date: entry.date, amount: -entry.amount }));
   const revenueDetails = periodRevenues.map((entry) => ({ label: "Bán hàng", date: entry.date, amount: entry.storeRevenue + entry.appRevenue }));
   const discountDetails = periodRevenues.filter((entry) => entry.discounts).map((entry) => ({ label: "Giảm giá / voucher", date: entry.date, amount: -entry.discounts }));
   // One detail list per sàn-cost component, day by day, each row naming its
@@ -3292,7 +3322,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     ] : []),
   ];
   const cashInDetails: PnlDetail[] = periodRevenues.map((entry) => ({ label: "Thu bán hàng", date: entry.date, amount: entry.cashReceived || entry.storeRevenue + entry.appRevenue - entry.discounts - entry.platformFees }));
-  const paidExpenseDetails: PnlDetail[] = manualOccurrences.filter((entry) => entry.expense.paymentStatus === "paid").map((entry) => ({ label: entry.expense.name, date: entry.date, amount: -entry.amount }));
+  const paidExpenseDetails: PnlDetail[] = manualOccurrences.filter(occurrencePaid).map((entry) => ({ label: entry.expense.name, date: entry.date, amount: -entry.amount }));
   const paidAssetDetails: PnlDetail[] = assetExpenses.filter((asset) => asset.paymentStatus === "paid" && inRange(asset.paymentDate || asset.incurredOn, bounds)).map((asset) => ({ label: asset.name, date: asset.paymentDate || asset.incurredOn, amount: -asset.amount }));
   const purchaseDetails: PnlDetail[] = purchaseLots.map((lot) => ({ label: `${lot.name} · ${lot.receiptCode || "không mã phiếu"}`, date: lot.purchasedOn, amount: -(lot.quantity * lot.unitCost) }));
   const cashOutDetails = [...purchaseDetails, ...paidExpenseDetails, ...paidAssetDetails];
@@ -3309,6 +3339,64 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     return { label: `${lot?.name || "Lô"} · ${lot?.receiptCode || "không mã phiếu"} · ${direction === "in" ? `từ ${storeLabel(flow.fromStoreId)}` : `sang ${storeLabel(flow.toStoreId)}`}`, date: flow.date, amount: direction === "in" ? flow.value : -flow.value };
   });
   const inventoryReportGroups = (entries: Array<{ lot: FinanceInventoryLot; amount: number }>, sign = 1) => groupDetailsBy(entries, (entry) => entry.lot.category || "KHÁC", (entry) => ({ label: `${entry.lot.name} · ${entry.lot.receiptCode || "không mã phiếu"}`, date: entry.lot.availableFrom || entry.lot.purchasedOn, amount: entry.amount * sign }));
+  /// What the kho should hold from the money alone, against what its lots say.
+  /// They part when the kho data contradicts itself — on 05/11/2026 a 2.114.320đ
+  /// gap: 19 lots whose quantity was cut (while attaching bills) below the units
+  /// already opened from them, so those openings are a cost with no purchase
+  /// behind it while the lot's stock stops at 0, plus two return lots worth more
+  /// than the unopened rest of their unit. Each lot's share is listed so the gap
+  /// can be traced to the lots to recount.
+  const expectedClosingInventory = openingInventory + inventoryPurchases + transferIn - transferOut - inventoryCogs - inventoryWaste;
+  const inventoryGap = closingInventory - expectedClosingInventory;
+  const inventoryGapGroups: PnlGroup[] = (() => {
+    if (Math.abs(inventoryGap) < 1) return [];
+    const sessionLot = new Map(inventorySessions.map((session) => [session.id, session.sourceReceiptId]));
+    const openedCount = new Map<string, number>();
+    for (const session of inventorySessions) openedCount.set(session.sourceReceiptId, (openedCount.get(session.sourceReceiptId) || 0) + 1);
+    // A return lot holds the rest of a unit its source lot already issued: both
+    // sides are booked on the source lot, so a correct settlement nets to 0.
+    const ownerOf = (lotId: string) => {
+      const lot = lotByIdForReport.get(lotId);
+      return (lot?.internalReturn && lot.sourceSessionId && sessionLot.get(lot.sourceSessionId)) || lotId;
+    };
+    const residual = new Map<string, number>();
+    const add = (lotId: string, amount: number) => { const owner = ownerOf(lotId); residual.set(owner, (residual.get(owner) || 0) + amount); };
+    for (const entry of closingInventoryEntries) add(entry.lot.id, entry.amount);
+    for (const entry of openingInventoryEntries) add(entry.lot.id, -entry.amount);
+    for (const lot of purchaseLots) add(lot.id, -lot.quantity * lot.unitCost);
+    for (const flow of transferFlows) add(flow.lotId, flow.toStoreId === scope ? -flow.value : flow.value);
+    for (const entry of inventoryEvents) if (entry.kind === "cogs") add(entry.lot.id, entry.amount);
+    // A unit opened in one kỳ and settled in a later one leaves the kho whole
+    // when opened but returns its rest only at settlement (Matcha MK4: −184.667
+    // in July, +184.667 in August) — a timing gap that cancels over both kỳ.
+    const recognizedOn = new Map(inventorySessions.map((session) => [session.id, session.costRecognitionMonth ? `${session.costRecognitionMonth}-01` : session.activatedAt.slice(0, 10)]));
+    const settledAcrossKy = (lotId: string) => inventoryLots.some((entry) => entry.internalReturn && entry.sourceSessionId && sessionLot.get(entry.sourceSessionId) === lotId && !inRange(recognizedOn.get(entry.sourceSessionId) || "", bounds));
+    const overOpened: PnlDetail[] = [];
+    const returns: PnlDetail[] = [];
+    const returnTiming: PnlDetail[] = [];
+    const other: PnlDetail[] = [];
+    let traced = 0;
+    for (const [lotId, amount] of residual) {
+      if (Math.abs(amount) < 1) continue;
+      const lot = lotByIdForReport.get(lotId);
+      if (!lot) continue;
+      traced += amount;
+      const opened = openedCount.get(lotId) || 0;
+      const label = `${lot.name} · ${lot.receiptCode || "không mã phiếu"}`;
+      if (opened > lot.quantity) overOpened.push({ label: `${label} · đã mở ${opened.toLocaleString("vi-VN")} ${lot.unit}, lô ghi ${lot.quantity.toLocaleString("vi-VN")}`, date: lot.purchasedOn, amount });
+      else if (settledAcrossKy(lotId)) returnTiming.push({ label: `${label} · mở kỳ trước, hoàn phần còn lại kỳ này`, date: lot.purchasedOn, amount });
+      else if (inventoryLots.some((entry) => entry.internalReturn && entry.sourceSessionId && sessionLot.get(entry.sourceSessionId) === lotId)) returns.push({ label: `${label} · lô hoàn kho khác phần chưa dùng`, date: lot.purchasedOn, amount });
+      else other.push({ label, date: lot.purchasedOn, amount });
+    }
+    const rest = inventoryGap - traced;
+    if (Math.abs(rest) >= 1) other.push({ label: "Chênh lệch chuyển / gộp kho", amount: rest });
+    return nonEmptyGroups([
+      detailGroup("Lô mở nhiều hơn số lượng đang ghi", overOpened),
+      detailGroup("Hoàn kho lệch phần còn lại", returns),
+      detailGroup("Hoàn kho khác kỳ mở (lệch thời điểm, cân lại khi xem gộp các kỳ)", returnTiming),
+      detailGroup("Khác", other),
+    ]);
+  })();
   const inventoryRows: PnlRow[] = [
     { code: "A", label: "Tồn đầu kỳ", value: openingInventory, tone: "total", details: [], groups: inventoryReportGroups(openingInventoryEntries), itemCount: openingInventoryEntries.length },
     { code: "B", label: "Nhập kho", value: inventoryPurchases, tone: "income", details: purchaseDetails.map((detail) => ({ ...detail, amount: Math.abs(detail.amount) })), groups: inventoryReportGroups(purchaseLots.map((lot) => ({ lot, amount: lot.quantity * lot.unitCost }))), itemCount: purchaseLots.length },
@@ -3316,9 +3404,12 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       { code: "B1", label: "Nhận chuyển kho", value: transferIn, tone: "income" as const, details: transferDetails("in"), groups: [detailGroup("Nhận từ kho khác", transferDetails("in"))], itemCount: transferDetails("in").length },
       { code: "B2", label: "Chuyển kho đi", value: -transferOut, tone: "cost" as const, details: transferDetails("out"), groups: [detailGroup("Chuyển sang kho khác", transferDetails("out"))], itemCount: transferDetails("out").length },
     ] : []),
-    { code: "C", label: "Xuất dùng", value: -inventoryIssued, tone: "cost", details: inventoryDetails("cogs"), groups: inventoryGroups("cogs"), itemCount: inventoryDetails("cogs").length },
+    // C is the P&L's "NVL đã xuất dùng": opened minus what was then thrown away,
+    // which D carries — C used to hold both and D took the waste off a second time.
+    { code: "C", label: "Xuất dùng", value: -inventoryCogs, tone: "cost", details: inventoryDetails("cogs"), groups: inventoryGroups("cogs"), itemCount: inventoryDetails("cogs").length },
     { code: "D", label: "Hao hụt", value: -inventoryWaste, tone: "cost", details: inventoryDetails("waste"), groups: inventoryGroups("waste"), itemCount: inventoryDetails("waste").length },
     { code: "E", formula: scope !== "all" ? "E = A + B + B1 − B2 − C − D" : "E = A + B − C − D", label: "Tồn cuối kỳ", value: closingInventory, tone: "grand", details: [], groups: inventoryReportGroups(closingInventoryEntries), itemCount: closingInventoryEntries.length },
+    ...(inventoryGapGroups.length ? [{ code: "⚠", formula: scope !== "all" ? "= E − (A + B + B1 − B2 − C − D)" : "= E − (A + B − C − D)", label: inventoryGap > 0 ? "Chưa khớp · lô kho ghi nhiều hơn tiền hàng còn lại" : "Chưa khớp · lô kho ghi ít hơn tiền hàng còn lại", value: inventoryGap, tone: "cost" as const, details: [], groups: inventoryGapGroups, itemCount: inventoryGapGroups.reduce((sum, group) => sum + group.details.length, 0) }] : []),
     ...(scope === "all" && stores.length > 1 ? [{ code: "E′", label: "Tồn cuối kỳ theo kho", value: closingInventory, tone: "total" as const, details: [], groups: stores.map((store) => detailGroup(store.name, closingStock.entries.filter((entry) => entry.storeId === store.id).map((entry) => ({ label: `${lotByIdForReport.get(entry.lot.id)?.name || "Lô"} · ${entry.lot.receiptCode || "không mã phiếu"}`, amount: entry.amount })))).filter((group) => group.details.length), itemCount: stores.length }] : []),
   ];
   // Roll-forward like the inventory report: a purchase price appears once, in the
@@ -3563,7 +3654,30 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     </nav>
 
     {tab === "entry" && <section className={styles.content}>
-      <div className={styles.summaryStrip}><div><span>Tổng chi phí kỳ</span><strong>{money(totalPeriodExpense)}</strong></div><div><span>Đã thanh toán</span><strong>{money(paidManual + inventoryPurchases + paidInvestments)}</strong></div><div><span>Chưa thanh toán</span><strong>{money(unpaidManual)}</strong></div><div><span>Từ Kho NVL</span><strong>{money(inventoryCogs + inventoryWaste)}</strong></div></div>
+      {/* Two bases side by side, each named: the P&L cost of the kỳ and the cash
+          that left in it. "Đã thanh toán" read as the paid part of the total
+          (212tr "paid" of a 160tr total, Long 05/11/2026) — it never was: it
+          holds NVL bought (not used) and assets paid (not depreciated), and
+          leaves out sàn fees, withheld before the money arrives. */}
+      <div className={styles.summaryStrip}>
+        <div><span>Tổng chi phí kỳ (P&L)</span><strong>{money(totalPeriodExpense)}</strong><small>NVL đã dùng, khấu hao, phí sàn, chi phí ghi tay</small></div>
+        <div><span>Tiền đã chi ra</span><strong>{money(cashOut)}</strong><small>Mua NVL {money(inventoryPurchases)} · tài sản {money(paidInvestments)} · chi phí {money(paidManual)}</small></div>
+        <div><span>Chưa thanh toán</span><strong>{money(unpaidManual)}</strong><small>{notYetDueManual ? `gồm ${money(notYetDueManual)} định kỳ chưa đến hạn` : "chi phí ghi tay"}</small></div>
+        <div><span>NVL xuất khỏi kho</span><strong>{money(inventoryCogs + inventoryWaste)}</strong><small>dùng {money(inventoryCogs)} · hao hụt {money(inventoryWaste)}</small></div>
+      </div>
+      <div className={styles.nvlBridge}>
+        <div className={styles.nvlBridgeHead}><span>TIỀN HÀNG NVL · {bounds.label.toUpperCase()}{multiOutlet ? ` · ${scopeLabel.toUpperCase()}` : ""}</span><button type="button" onClick={() => { setTab("report"); setReportView("inventory"); }}>Báo cáo Tồn kho →</button></div>
+        <div className={styles.nvlBridgeSteps}>
+          {Math.abs(openingInventory) >= 1 && <div><span>Tồn đầu kỳ</span><b>{money(openingInventory)}</b></div>}
+          <div><span>{Math.abs(openingInventory) >= 1 ? "+ Mua vào" : "Đã mua"}</span><b>{money(inventoryPurchases)}</b></div>
+          {scope !== "all" && (transferIn || transferOut) ? <div><span>± Chuyển kho</span><b>{money(transferIn - transferOut)}</b></div> : null}
+          <div><span>− Xuất dùng</span><b>{money(inventoryCogs)}</b></div>
+          <div><span>− Hao hụt</span><b>{money(inventoryWaste)}</b></div>
+          <div className={styles.nvlBridgeTotal}><span>= Lẽ ra còn trong kho</span><b>{money(expectedClosingInventory)}</b></div>
+          <div className={styles.nvlBridgeTotal}><span>Còn trong kho (theo lô)</span><b>{money(closingInventory)}</b></div>
+          {Math.abs(inventoryGap) >= 1 && <button type="button" className={styles.nvlBridgeGap} onClick={() => { setTab("report"); setReportView("inventory"); }}><span>⚠ Chưa khớp</span><b>{inventoryGap > 0 ? "+" : "−"}{money(Math.abs(inventoryGap))}</b><small>xem lô cần kiểm →</small></button>}
+        </div>
+      </div>
       <div className={styles.sectionHeader}><div><span>GIAO DỊCH TRONG KỲ</span><h2>Chi phí vận hành quán</h2></div><div className={styles.expenseHeaderActions}><label className={importingExpenses ? styles.importing : ""}><input type="file" accept=".xls,.xlsx" disabled={importingExpenses} onChange={importExpensesExcel} />{importingExpenses ? "Đang nhập…" : "Nhập Excel"}</label><button type="button" disabled={!state.expenses.length} onClick={() => void exportExpensesExcel()}>Xuất Excel</button><button className={styles.addExpenseButton} onClick={() => openAddExpense(expenseCategory)}>+ Thêm chi phí</button></div></div>
       {scopeAllocation && scopeSummaries && <div className={styles.storeShareNote}><b>{scopeLabel}: chỉ hiện khoản ghi nhận cho điểm bán này</b><span>Chi phí dùng chung (Toàn chuỗi) kỳ này {money(scopeSummaries.pool)} · {scopeLabel} gánh {percent(scopeAllocation.share * 100)} theo doanh thu thuần = {money(scopeAllocation.allocated)} (dòng M trong P&L). Đổi điểm bán của một khoản ở góc phải dòng đó, khi xem Toàn chuỗi.</span></div>}
       {expenseImportNotice && <div className={styles.importHubSuccess}><b>Excel chi phí</b><span>{expenseImportNotice}</span></div>}
@@ -3577,7 +3691,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           <summary><span>Từ Kho NVL <small>({selectedExpenseSection.inventoryEvents.length} khoản)</small></span><b>{money(selectedExpenseSection.inventoryEvents.reduce((sum, entry) => sum + entry.amount, 0))}</b></summary>
           <div className={styles.inventoryCategoryList}>{selectedExpenseSection.inventoryCategoryGroups.map(([inventoryCategory, entries]) => <details className={styles.inventoryCategoryGroup} key={inventoryCategory}>
             <summary><span>{inventoryCategory} <small>({entries.length} khoản)</small></span><b>{money(entries.reduce((sum, entry) => sum + entry.amount, 0))}</b></summary>
-            <div className={styles.expenseGroupItems}>{entries.map((entry) => <button type="button" className={`${styles.compactExpenseCard} ${entry.kind === "waste" ? styles.wasteCard : ""}`} key={entry.id} onClick={() => onOpenInventoryLot(entry.lot.id)}><span>{entry.lot.name} · {entry.kind === "waste" ? "Hao hụt" : "Xuất dùng"} {dateLabel(entry.date)}</span><b>{money(entry.amount)}</b></button>)}</div>
+            <div className={styles.expenseGroupItems}>{entries.map((entry) => <button type="button" className={`${styles.compactExpenseCard} ${entry.kind === "waste" ? styles.wasteCard : ""}`} key={entry.id} onClick={() => onOpenInventoryLot(entry.lot.id)}><span>{entry.lot.name} · {entry.kind === "reclass" ? `Mở ${dateLabel(entry.openedOn)} (đã tính kỳ đó) → hao hụt ${dateLabel(entry.date)}` : `${entry.kind === "waste" ? "Hao hụt" : "Xuất dùng"} ${dateLabel(entry.date)}`}</span><b>{money(entry.amount)}</b></button>)}</div>
           </details>)}</div>
         </details>}
         {selectedExpenseSection.manualGroups.map(([subcategory, entries]) => { const missingBills = entries.filter(({ expense, date }) => !expenseBillsFor(expense, date).length).length; return <details className={styles.expenseGroup} key={subcategory}><summary><span>{subcategory} <small>({entries.length} khoản)</small>{missingBills > 0 && <em className={styles.missingBillCount}>{missingBills} thiếu HĐ</em>}</span><b>{money(entries.reduce((sum, entry) => sum + entry.amount, 0))}</b></summary><div className={styles.expenseGroupItems}>{entries.map(({ expense, date, amount }) => { const bills = expenseBillsFor(expense, date); const missingBillTitle = isRecurringExpense(expense) ? `Chưa có hoá đơn / hình ảnh cho kỳ TT ${dateLabel(date)}` : "Chưa có hoá đơn / hình ảnh"; return <div className={`${styles.expenseRow} ${multiOutlet ? styles.expenseRowStore : ""}`} key={`${expense.id}-${date}`}><button type="button" className={`${styles.compactExpenseCard} ${bills.length ? "" : styles.expenseMissingBill}`} title={bills.length ? undefined : missingBillTitle} onClick={() => openEditExpense(expense, date)}><span>{expense.name} · {expense.category === "investment" ? `KH ${expense.usefulLifeMonths || "?"} tháng · NG ${money(expense.amount)}` : expense.recurrence === "once" ? dateLabel(date) : `TT ${dateLabel(date)}`}{bills.length ? <i className={styles.expenseReceiptMark} title={`Có ${bills.length} hoá đơn: ${bills.map((receipt) => receipt.name).join(", ")}`}>{bills.length > 1 ? `HĐ ${bills.length}` : "HĐ"}</i> : null}</span><b>{money(amount)}</b></button>{multiOutlet && <select className={`${styles.expenseStoreSelect} ${expense.storeId ? styles.expenseStoreSelectSet : ""}`} value={expense.storeId || ""} aria-label={`Ghi nhận cho — ${expense.name}`} title="Chuyển ghi nhận cho điểm bán khác" onChange={(event) => void moveExpenseToStore(expense, event.target.value)}><option value="">Toàn chuỗi</option>{outlets.map((store) => <option value={store.id} key={store.id}>{store.name}</option>)}{expense.storeId && !isOutletId(expense.storeId) && <option value={expense.storeId}>{storeLabel(expense.storeId)}</option>}</select>}<button type="button" className={styles.expenseDelete} aria-label={`Xoá chi phí ${expense.name}`} title="Xoá chi phí" onClick={() => void deleteExpense(expense)}>×</button></div>; })}</div></details>; })}
@@ -4081,7 +4195,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       <div className={styles.reportTabs}>{(["pnl", "cash", "inventory", "assets"] as ReportView[]).map((view) => <button className={reportView === view ? styles.selected : ""} key={view} onClick={() => setReportView(view)}>{view === "pnl" ? "P&L" : view === "cash" ? "Dòng tiền" : view === "inventory" ? "Tồn kho" : "Tài sản & khấu hao"}</button>)}</div>
       {reportView === "pnl" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article className={styles.visualPrimary}><span>DOANH THU THUẦN</span><strong>{money(netRevenue)}</strong><small>{revenueDetails.length} dòng doanh thu</small></article><article><span>LỢI NHUẬN GỘP</span><strong>{money(grossProfit)}</strong><small>{percent(grossMargin)} gross margin</small></article><article className={operatingProfit < 0 ? styles.visualRisk : ""}><span>LỢI NHUẬN HOẠT ĐỘNG</span><strong>{money(operatingProfit)}</strong><small>{netRevenue ? percent(operatingProfit / netRevenue * 100) : "-"} doanh thu</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>CƠ CẤU CHI PHÍ</span><h3>Chi phí đang tập trung ở đâu?</h3></div><b>{money(totalPeriodExpense)}</b></div><div className={styles.visualBars}>{pnlCostMix.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxPnlCost * 100}%` }} /></i><small>{totalPeriodExpense ? percent(entry.value / totalPeriodExpense * 100) : "0%"} tổng chi phí</small></div>)}</div></article></section>}
       {reportView === "cash" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article className={styles.visualPrimary}><span>TIỀN VÀO</span><strong>{money(cashIn)}</strong><small>{cashInDetails.length} dòng thu</small></article><article><span>TIỀN RA</span><strong>{money(cashOut)}</strong><small>{cashOutDetails.length} dòng chi</small></article><article className={netCash < 0 ? styles.visualRisk : ""}><span>DÒNG TIỀN THUẦN</span><strong>{money(netCash)}</strong><small>{cashIn ? percent(netCash / cashIn * 100) : "-"} tiền vào</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>TIỀN RA THEO NHÓM</span><h3>Dòng tiền đang đi vào đâu?</h3></div><b>{money(cashOut)}</b></div><div className={styles.visualBars}>{cashComponents.length ? cashComponents.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxCashComponent * 100}%` }} /></i><small>{cashOut ? percent(entry.value / cashOut * 100) : "0%"} tiền ra</small></div>) : <p>Chưa có dòng tiền ra trong kỳ.</p>}</div></article></section>}
-      {reportView === "inventory" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article><span>TỒN ĐẦU KỲ</span><strong>{money(openingInventory)}</strong><small>{openingInventoryEntries.length} lô</small></article><article className={styles.visualPrimary}><span>TỒN CUỐI KỲ</span><strong>{money(closingInventory)}</strong><small>{closingInventoryEntries.length} lô còn giá trị</small></article><article><span>ĐÃ XUẤT / HAO HỤT</span><strong>{money(inventoryIssued)}</strong><small>Hao hụt {money(inventoryWaste)}</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>CƠ CẤU TỒN CUỐI KỲ</span><h3>Category giữ nhiều giá trị nhất</h3></div><b>{closingCategoryValues.length} category</b></div><div className={styles.visualBars}>{closingCategoryValues.length ? closingCategoryValues.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxClosingCategory * 100}%` }} /></i><small>{closingInventory ? percent(entry.value / closingInventory * 100) : "0%"} tồn cuối kỳ</small></div>) : <p>Chưa có tồn kho cuối kỳ.</p>}</div></article></section>}
+      {reportView === "inventory" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article><span>TỒN ĐẦU KỲ</span><strong>{money(openingInventory)}</strong><small>{openingInventoryEntries.length} lô</small></article><article className={styles.visualPrimary}><span>TỒN CUỐI KỲ</span><strong>{money(closingInventory)}</strong><small>{closingInventoryEntries.length} lô còn giá trị</small></article><article><span>XUẤT KHỎI KHO</span><strong>{money(inventoryIssued)}</strong><small>dùng {money(inventoryCogs)} · hao hụt {money(inventoryWaste)}</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>CƠ CẤU TỒN CUỐI KỲ</span><h3>Category giữ nhiều giá trị nhất</h3></div><b>{closingCategoryValues.length} category</b></div><div className={styles.visualBars}>{closingCategoryValues.length ? closingCategoryValues.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxClosingCategory * 100}%` }} /></i><small>{closingInventory ? percent(entry.value / closingInventory * 100) : "0%"} tồn cuối kỳ</small></div>) : <p>Chưa có tồn kho cuối kỳ.</p>}</div></article></section>}
       {reportView === "assets" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article className={styles.visualPrimary}><span>NGUYÊN GIÁ</span><strong>{money(assetOriginalValue)}</strong><small>{assetsOwned.length} tài sản</small></article><article><span>ĐÃ KHẤU HAO</span><strong>{money(assetAccumulatedValue)}</strong><small>{assetOriginalValue ? percent(assetAccumulatedValue / assetOriginalValue * 100) : "0%"} nguyên giá</small></article><article><span>GIÁ TRỊ CÒN LẠI</span><strong>{money(assetRemainingValue)}</strong><small>Khấu hao kỳ {money(depreciation)}</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>CƠ CẤU TÀI SẢN</span><h3>Nguyên giá theo nhóm tài sản</h3></div><b>{assetCategoryValues.length} nhóm</b></div><div className={styles.visualBars}>{assetCategoryValues.length ? assetCategoryValues.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxAssetCategory * 100}%` }} /></i><small>{assetOriginalValue ? percent(entry.value / assetOriginalValue * 100) : "0%"} nguyên giá</small></div>) : <p>Chưa có tài sản trong kỳ.</p>}</div><div className={styles.assetValueTrack}><span>Giá trị còn lại</span><i><b style={{ width: `${assetOriginalValue ? assetRemainingValue / assetOriginalValue * 100 : 0}%` }} /></i><strong>{assetOriginalValue ? percent(assetRemainingValue / assetOriginalValue * 100) : "0%"}</strong></div></article></section>}
       {reportView === "pnl" && scope === "all" && scopeSummaries && (() => {
         const columns = [...scopeSummaries.outlets.map((row) => ({ key: row.key, label: storeLabel(row.key), row, allocated: -row.allocated, after: row.afterAllocation })), { key: "shared", label: "Toàn chuỗi (dùng chung)", row: scopeSummaries.shared, allocated: scopeSummaries.pool, after: scopeSummaries.shared.operatingProfit + scopeSummaries.pool }];

@@ -56,6 +56,19 @@
 .summaryStrip > div { min-width: 0; padding: 13px; border: 1px solid var(--line); border-radius: 13px; background: #fff; }
 .summaryStrip span { display: block; color: var(--muted); font: 10px Arial, sans-serif; }
 .summaryStrip strong { display: block; overflow: hidden; margin-top: 5px; font-size: 16px; text-overflow: ellipsis; white-space: nowrap; }
+.summaryStrip small { display: block; margin-top: 4px; color: var(--muted); font: 10px/1.35 Arial, sans-serif; }
+.nvlBridge { margin: -12px 0 24px; padding: 13px; border: 1px solid var(--line); border-radius: 13px; background: #fff; }
+.nvlBridgeHead { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 10px; }
+.nvlBridgeHead span { color: var(--muted); font: 700 10px Arial, sans-serif; letter-spacing: .06em; }
+.nvlBridgeHead button { padding: 0; border: 0; color: #1e4b3f; background: none; font: 700 11px Arial, sans-serif; cursor: pointer; }
+.nvlBridgeSteps { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.nvlBridgeSteps > * { min-width: 0; padding: 9px 10px; border: 1px solid transparent; border-radius: 10px; color: var(--ink); background: var(--cream); text-align: left; }
+.nvlBridgeSteps span { display: block; color: var(--muted); font: 10px Arial, sans-serif; }
+.nvlBridgeSteps b { display: block; overflow: hidden; margin-top: 3px; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.nvlBridgeSteps .nvlBridgeTotal { background: #e7efe9; }
+.nvlBridgeSteps .nvlBridgeGap { border-color: #e3b3a6; color: #a54835; background: #fbeee9; font: inherit; cursor: pointer; }
+.nvlBridgeGap span, .nvlBridgeGap small { color: #a54835; }
+.nvlBridgeGap small { display: block; margin-top: 2px; font: 10px Arial, sans-serif; }
 .sectionHeader, .reportHeader, .dashboardActions { display: flex; justify-content: space-between; gap: 12px; align-items: flex-end; }
 .sectionHeader span, .reportHeader span, .dashboardActions span { color: #8d7b59; font: 700 9px Arial, sans-serif; letter-spacing: .13em; }
 .sectionHeader h2, .reportHeader h2, .dashboardActions h2 { margin-top: 4px; font-size: 22px; }
@@ -750,6 +763,7 @@
   .periodStatus { grid-column: auto; display: grid; gap: 3px; text-align: right; }
   .content { padding: 28px 28px 80px; }
   .summaryStrip { grid-template-columns: repeat(4, 1fr); }
+  .nvlBridgeSteps { grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); }
   .categoryTabs { grid-template-columns: repeat(4, 1fr); }
   .reportGrid { grid-template-columns: repeat(3, 1fr); }
   .reportVisualization { grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); align-items: stretch; }

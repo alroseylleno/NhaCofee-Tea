@@ -300,7 +300,7 @@ export default function Home() {
   }, [allSessions, items, storeScope]);
   // Memoised so Finance's per-store ledger and comparisons are not rebuilt on
   // every render of this page.
-  const financeLots = useMemo(() => allItems.map((item) => ({ id: item.id, name: item.name, category: item.category, quantity: item.quantity, unit: item.unit, unitCost: item.unitCost, purchasedOn: item.purchasedOn, receiptCode: item.receiptCode, internalReturn: isReturnLot(item), availableFrom: item.returnedOn, storeId: item.storeId || defaultStoreId, transferredFromId: item.transferredFromId, transferredOn: item.transferredOn, pieceAmount: item.pieceAmount, history: item.history })), [allItems, defaultStoreId]);
+  const financeLots = useMemo(() => allItems.map((item) => ({ id: item.id, name: item.name, category: item.category, quantity: item.quantity, unit: item.unit, unitCost: item.unitCost, purchasedOn: item.purchasedOn, receiptCode: item.receiptCode, internalReturn: isReturnLot(item), sourceSessionId: item.sourceSessionId, availableFrom: item.returnedOn, storeId: item.storeId || defaultStoreId, transferredFromId: item.transferredFromId, transferredOn: item.transferredOn, pieceAmount: item.pieceAmount, history: item.history })), [allItems, defaultStoreId]);
   const financeSessions = useMemo(() => allSessions.map((entry) => ({ id: entry.id, sourceReceiptId: entry.sourceReceiptId, activatedAt: entry.activatedAt, costRecognitionMonth: entry.costRecognitionMonth, status: entry.status, closedAt: entry.closedAt, reason: entry.reason, recognizedCost: entry.recognizedCost })), [allSessions]);
   // Children carry their own cost, so a piece counts at its share of the unit.
   const transferredOutByLot = useMemo(() => allItems.reduce<Record<string, { units: number; amount: number; value: number }>>((totals, item) => {
@@ -814,10 +814,20 @@ export default function Home() {
     setSavingIngredient(true);
     try { await persistIngredient(); } finally { savingIngredientRef.current = false; setSavingIngredient(false); }
   }
+  /// Units opened from a lot can't be un-bought. Cutting a lot's quantity below
+  /// them (19 lots on 02–04/11/2026, while attaching bills) left 2.026.920đ of
+  /// openings with no purchase behind them, and Tài chính's kho out of balance.
+  /// Only a cut is refused: a lot already in that state can still be edited.
+  function quantityBelowOpened(lot: Ingredient, quantity: number) {
+    const opened = allSessions.filter((entry) => entry.sourceReceiptId === lot.id).length;
+    return quantity < opened && quantity < lot.quantity ? `Lô ${lot.receiptCode || lot.name} đã mở dùng ${opened} ${lot.unit}, nên SL tổng không thể nhỏ hơn ${opened} (đang nhập ${quantity}). Nếu hoá đơn chỉ ghi ${quantity} ${lot.unit}, số đã mở thừa thuộc lô khác hoặc một lần mua chưa nhập kho — kiểm đếm thực tế trước khi sửa.` : undefined;
+  }
   async function persistIngredient() {
     const quantity = Number(form.quantity); const unitCost = parsePrice(form.unitCost);
     if (!form.name.trim() || !quantity || !unitCost) return;
     const current = editingId ? allItems.find((item) => item.id === editingId) : undefined;
+    const openedConflict = current ? quantityBelowOpened(current, quantity) : undefined;
+    if (openedConflict) { window.alert(openedConflict); return; }
     if (!current && multiStore && !form.storeId) { window.alert("Chọn kho nhận lô hàng này."); return; }
     const enteredInvoiceCode = form.invoiceCode.trim();
     if (!current && !enteredInvoiceCode && !window.confirm("Chưa nhập mã hóa đơn. Bạn có đồng ý dùng mã tự tạo theo DDMMYY-STT làm mã hóa đơn và mã phiếu nhập kho không?")) return;
@@ -1006,6 +1016,8 @@ export default function Home() {
         // A matching receipt code keeps the lot ID, its invoice attachment, and all active/used history intact.
         // Its store never changes through an import: moving stock between stores is a transfer.
         if (entry.item.storeId && entry.item.storeId !== storeOf(current)) throw new Error(`Lô ${current.receiptCode} đang ở ${storeName(current.storeId)}. Muốn đổi kho, hãy dùng nút Chuyển kho thay vì sửa cột Kho trong Excel.`);
+        const openedConflict = quantityBelowOpened(current, entry.item.quantity);
+        if (openedConflict) throw new Error(openedConflict);
         const item = { ...current, ...entry.item, id: current.id, receipt: current.receipt, history: current.history, storeId: storeOf(current) };
         const currentMeta = lotMeta[current.id];
         const meta = {
