@@ -41,7 +41,7 @@ import { extractGrabPdfText, merchantIdFromFileName, parseGrabReportText, parseG
 import { type CloudStore, type StorePlatformAccount } from "@/lib/inventory-store";
 import { dataUrlToBlob, isPdfReceipt, prepareReceiptFile, readFileAsDataUrl, RECEIPT_MAX_BYTES, RECEIPT_MAX_FILES, RECEIPT_UAT_MAX_BYTES } from "@/lib/receipt-image";
 import { buildStoreLedger, type LedgerHistory } from "@/lib/store-ledger";
-import { ATTRIBUTION_LABELS, attributeOrder, defaultOutletId, foldSignal, outletsOf, outletsOpenOn, storeForReport, storeFromExpenseName, unclaimedSignals, type StoreAttributionSource } from "@/lib/store-scope";
+import { ATTRIBUTION_LABELS, accountInSapoOn, attributeOrder, defaultOutletId, foldSignal, outletsOf, outletsOpenOn, storeForReport, storeFromExpenseName, unclaimedSignals, type StoreAttributionSource } from "@/lib/store-scope";
 import { type IngredientMaster, type ProductMaster as MasterProduct, type RecipeVersion } from "@/lib/master-data";
 import { loadCogsCatalog } from "@/lib/master-data-store";
 import { buildSanCogsBook, emptySanCogsBook, sanLineUnitCogs, type SanCogsBook } from "@/lib/san-cogs";
@@ -1319,7 +1319,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     const account = accounts.find((entry) => report.merchantId && entry.merchantId && foldSignal(entry.merchantId) === foldSignal(report.merchantId)) || (accounts.length === 1 ? accounts[0] : undefined);
     // Same rule as storeForReport: a branch with no account on this sàn yet is
     // outside SAPO unless it is the default outlet.
-    return { storeId, account, inSapo: account ? account.inSapo : storeId === homeOutletId };
+    return { storeId, account, inSapo: account ? accountInSapoOn(account, report.reportDate) : storeId === homeOutletId };
   };
   /// Sàn orders that never reach SAPO (N2's sàn stores): every order of their
   /// report becomes a read-only invoice + đối soát row, so revenue, sàn costs,
@@ -1490,7 +1490,9 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const grabReconciliationRows = useMemo(() => viewReconciliations.filter((entry) => inRange(entry.orderDate, bounds)).sort((a, b) => b.orderDate.localeCompare(a.orderDate) || a.orderCode.localeCompare(b.orderCode, "vi")), [viewReconciliations, bounds]);
   const reconciledGrabOrderCodes = new Set(grabReconciliationRows.map((entry) => entry.platformOrderId || `${entry.orderDate}:${entry.orderCode.toLocaleLowerCase("vi")}`));
   const unreconciledGrabOrders = grabOrderOptions.filter((order) => !reconciledGrabOrderCodes.has(order.id) && !reconciledGrabOrderCodes.has(`${order.orderDate}:${order.orderCode.toLocaleLowerCase("vi")}`));
-  const selectedGrabOrder = grabForm.platformOrderId ? state.platformOrders.find((order) => order.id === grabForm.platformOrderId) : undefined;
+  // ordersById also holds the read-only orders built from sàn reports outside SAPO.
+  const selectedGrabOrder = grabForm.platformOrderId ? ordersById.get(grabForm.platformOrderId) : undefined;
+  const grabReadOnly = isNonSapoId(grabForm.platformOrderId);
   const platformOrderList = useMemo(() => [...marketplaceOrders].sort((a, b) => b.orderDate.localeCompare(a.orderDate) || a.orderCode.localeCompare(b.orderCode, "vi")), [marketplaceOrders]);
 
   function selectRevenueSubTab(nextTab: RevenueSubTab) {
@@ -2579,8 +2581,23 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   }
 
   function editGrabReconciliation(entry: GrabReconciliationRecord) {
-    // Orders that never reached SAPO are read straight from the sàn report.
-    if (isNonSapoId(entry.platformOrderId)) return;
+    // Orders that never reached SAPO are read straight from the sàn report:
+    // the sheet opens to show the money journey, with nothing to edit or save.
+    if (isNonSapoId(entry.platformOrderId)) {
+      setGrabForm({
+        id: entry.id,
+        platformOrderId: entry.platformOrderId || "",
+        orderCode: entry.orderCode,
+        orderDate: entry.orderDate,
+        reportedAmount: amountInput(String(entry.reportedAmount)),
+        receivedAmount: amountInput(String(entry.receivedAmount)),
+        discounts: seedDiscountForms(entry, undefined),
+        counterPrice: "",
+        note: entry.note || "",
+      });
+      setShowGrabReconciliationModal(true);
+      return;
+    }
     setGrabForm({
       id: entry.id,
       platformOrderId: entry.platformOrderId || state.platformOrders.find((order) => order.orderDate === entry.orderDate && order.orderCode.toLocaleLowerCase("vi") === entry.orderCode.toLocaleLowerCase("vi"))?.id || "",
@@ -2775,6 +2792,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     const orderCode = grabForm.orderCode.trim();
     const reportedAmount = parseAmount(grabForm.reportedAmount);
     const receivedAmount = parseAmount(grabForm.receivedAmount);
+    if (isNonSapoId(grabForm.platformOrderId)) return;
     if (!grabForm.platformOrderId || !orderCode || !grabForm.orderDate || receivedAmount < 0 || reportedAmount < 0) {
       window.alert("Vui lòng chọn đơn sàn từ file SAPO và nhập số tiền thực nhận hợp lệ.");
       return;
@@ -2832,8 +2850,8 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   /// single-store behaviour (default store, via SAPO). Before migration
   /// 20261030000100 a report of another branch is held back rather than
   /// written under N1, where it would have to be cleaned up later.
-  function resolveReportStore(platform: string, merchantId?: string, storeName?: string): { storeId: string; inSapo: boolean; merchantId?: string } | undefined {
-    const found = storeForReport(stores, platform, merchantId, storeName);
+  function resolveReportStore(platform: string, merchantId: string | undefined, storeName: string | undefined, reportDate: string): { storeId: string; inSapo: boolean; merchantId?: string } | undefined {
+    const found = storeForReport(stores, platform, merchantId, storeName, reportDate);
     if (found && !financeConfigured && found.store.id !== fallbackStoreId) return undefined;
     if (found) return { storeId: found.store.id, inSapo: found.inSapo, merchantId: found.merchantId };
     const configured = stores.some((store) => (store.platformAccounts || []).some((account) => account.platform === platform));
@@ -2861,9 +2879,14 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       };
       return { records: [] as GrabReconciliationRecord[], daily };
     }
+    // Two outlets can sell on the same sàn into one SAPO: an invoice another
+    // store's report already settled is not up for grabs, or a same-amount
+    // order of the second shop would silently take it over.
+    const settledElsewhere = new Set(existingRecords.filter((entry) => entry.platformOrderId && (entry.platform || "grab") === platform && (entry.storeId || fallbackStoreId) !== target.storeId).map((entry) => entry.platformOrderId as string));
     const dayOrders = platformOrders.filter((order) =>
       order.orderDate === report.reportDate
       && marketplaceKey(`${order.channelName} ${order.paymentMethod || ""} ${order.deliveryPartner || ""}`) === platform
+      && !settledElsewhere.has(order.id)
       && !/huy|cancel/.test(normalizedHeader(order.status)));
     const marketingShare = report.orders.length ? Math.round(report.totalMarketing / report.orders.length) : 0;
     const toMinutes = (time: string) => Number(time.slice(0, 2)) * 60 + Number(time.slice(3, 5));
@@ -3000,7 +3023,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       }
       const platform = report.platform ?? "grab";
       const merchantId = report.merchantId || merchantIdFromFileName(fileName);
-      const target = resolveReportStore(platform, merchantId, report.storeName);
+      const target = resolveReportStore(platform, merchantId, report.storeName, report.reportDate);
       if (!target) {
         unknownMerchants.set(`${platform}:${merchantId || report.storeName || fileName}`, `${MARKETPLACE_LABELS[platform] || platform} ${merchantId ? `ID ${merchantId}` : ""}${report.storeName ? ` “${report.storeName}”` : ""} ${dateLabel(report.reportDate)}`.trim());
         continue;
@@ -3116,7 +3139,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       // invoice was imported recorded 0 matches and then blocked every retry.
       const fresh = reports.flatMap((report) => splitReportByStore(report)).filter((report) => {
         if (force) return true;
-        const target = resolveReportStore(report.platform ?? "grab", report.merchantId || merchantIdFromFileName(report.fileName), report.storeName);
+        const target = resolveReportStore(report.platform ?? "grab", report.merchantId || merchantIdFromFileName(report.fileName), report.storeName, report.reportDate);
         if (!target) return true;
         const existing = state.grabDailyReports.find((entry) => (entry.platform || "grab") === (report.platform ?? "grab") && (entry.storeId || fallbackStoreId) === target.storeId && entry.reportDate === report.reportDate && entry.fileName === report.fileName);
         // Outside SAPO nothing ever matches: done once the full order list is stored.
@@ -3892,7 +3915,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           <p className={styles.metricDisclaimer}>Quán tự nhận và tự giao, không mất phí sàn và không cần đối soát, nên các đơn này không tính vào KPI, AOV hay biểu đồ của nhóm Sàn ở trên.</p>
         </article>}
         {showGrabReconciliationModal && <div className={styles.backdrop} role="presentation" onMouseDown={() => !savingGrabReconciliation && setShowGrabReconciliationModal(false)}><form className={`${styles.sheet} ${styles.grabReconciliationSheet}`} onSubmit={(event) => void saveGrabReconciliation(event)} onMouseDown={(event) => event.stopPropagation()}><div className={styles.sheetHandle} /><div className={styles.sheetTitle}><div><span>{selectedGrabOrder?.channelName || "ĐƠN SÀN"}{selectedGrabOrder ? ` · ${dateLabel(selectedGrabOrder.orderDate)}` : ""}</span><h2>{selectedGrabOrder?.orderCode || "Đối soát"}</h2></div><button type="button" disabled={savingGrabReconciliation} onClick={() => setShowGrabReconciliationModal(false)}>×</button></div>{selectedGrabOrder ? (() => {
-          const saved = grabForm.id ? state.grabReconciliations.find((entry) => entry.id === grabForm.id) : undefined;
+          const saved = grabForm.id ? allReconciliations.find((entry) => entry.id === grabForm.id) : undefined;
           const hasReceived = grabForm.receivedAmount.trim().length > 0;
           const base: GrabReconciliationRecord = saved || {
             id: "", orderCode: selectedGrabOrder.orderCode, orderDate: selectedGrabOrder.orderDate,
@@ -3920,7 +3943,9 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           return <>
             <div className={styles.orderIdentity}>
               <div><span>Mã đơn {sanLabel}</span><b>{j.settlement?.grabOrderCode || "—"}</b><small>{j.settlement ? `giao ${j.settlement.deliveryTime || "—"}` : `chưa có báo cáo ${sanLabel}`}</small></div>
-              <div><span>Mã hoá đơn SAPO</span><b>{selectedGrabOrder.orderCode}</b><small>tạo {selectedGrabOrder.orderCreatedAt ? selectedGrabOrder.orderCreatedAt.slice(11, 16) : "—"}</small></div>
+              {grabReadOnly
+                ? <div><span>Hoá đơn SAPO</span><b>Ngoài SAPO</b><small>{storeLabel(storeOfOrder(selectedGrabOrder.id))}</small></div>
+                : <div><span>Mã hoá đơn SAPO</span><b>{selectedGrabOrder.orderCode}</b><small>tạo {selectedGrabOrder.orderCreatedAt ? selectedGrabOrder.orderCreatedAt.slice(11, 16) : "—"}</small></div>}
               <div><span>Giá trên sàn</span><b>{money(j.listPrice)}</b><small>giá niêm yết {sanLabel}</small></div>
               <div><span>Giá quầy</span><b>{j.counterPrice == null ? "—" : money(j.counterPrice)}</b><small>{j.counterPrice == null ? "chưa có giá" : counterPriceFromItems(selectedGrabOrder)?.covered ? "tính từ món trong đơn" : "nhập tay"}</small></div>
             </div>
@@ -3934,7 +3959,9 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
               const basket = counterPriceFromItems(selectedGrabOrder);
               const basketCogs = cogsFromItems(selectedGrabOrder);
               if (!selectedGrabOrder.items?.length) {
-                return <p className={styles.grabReportNotice}>Chưa có chi tiết món cho đơn này. Import file SAPO <b>Doanh thu theo danh sách mặt hàng</b> để biết đơn gồm món gì và tính đúng giá quầy.</p>;
+                return grabReadOnly
+                  ? <p className={styles.grabReportNotice}>Đơn này không qua SAPO và báo cáo {sanLabel} không ghi món, nên chưa biết đơn gồm món gì — <b>chưa tính được giá quầy và giá vốn</b>.</p>
+                  : <p className={styles.grabReportNotice}>Chưa có chi tiết món cho đơn này. Import file SAPO <b>Doanh thu theo danh sách mặt hàng</b> để biết đơn gồm món gì và tính đúng giá quầy.</p>;
               }
               return <>
                 <div className={styles.journeyStage}><b>0</b><span>Món trong đơn · {selectedGrabOrder.items.length} dòng</span></div>
@@ -3988,10 +4015,15 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
             </>}
 
             <div className={styles.journeyChecks}>
-              <div className={Math.abs(j.sapoGap) < 1 ? styles.checkOk : styles.checkWarn}>
-                <span>SAPO ghi nhận</span><b>{money(base.reportedAmount)}</b>
-                <small>{Math.abs(j.sapoGap) < 1 ? "khớp thực nhận sàn" : `lệch ${j.sapoGap >= 0 ? "+" : "−"}${money(Math.abs(j.sapoGap))} · ${percent(Math.abs(j.sapoGapRate))} so thực nhận sàn`}</small>
-              </div>
+              {grabReadOnly
+                ? <div>
+                  <span>Nguồn số liệu</span><b>Báo cáo {sanLabel}</b>
+                  <small>{j.settlement?.fileName || "—"}</small>
+                </div>
+                : <div className={Math.abs(j.sapoGap) < 1 ? styles.checkOk : styles.checkWarn}>
+                  <span>SAPO ghi nhận</span><b>{money(base.reportedAmount)}</b>
+                  <small>{Math.abs(j.sapoGap) < 1 ? "khớp thực nhận sàn" : `lệch ${j.sapoGap >= 0 ? "+" : "−"}${money(Math.abs(j.sapoGap))} · ${percent(Math.abs(j.sapoGapRate))} so thực nhận sàn`}</small>
+                </div>}
               {(() => {
                 // Same basis as the list columns: what is left after the day's
                 // marketing allocation, live from the form field.
@@ -3999,7 +4031,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 const vsCounter = j.counterPrice == null ? undefined : netLive - j.counterPrice;
                 return <div className={vsCounter === undefined ? "" : vsCounter >= 0 ? styles.checkOk : styles.checkWarn}>
                   <span>So với giá quầy</span><b>{vsCounter === undefined ? "—" : `${vsCounter >= 0 ? "+" : "−"}${money(Math.abs(vsCounter))}`}</b>
-                  <small>{j.counterPrice == null ? "nhập giá quầy bên dưới" : `${j.counterPrice ? percent(Math.abs(vsCounter! / j.counterPrice * 100)) : "—"} · còn lại sau MKT ${money(netLive)} · quầy ${money(j.counterPrice)}`}</small>
+                  <small>{j.counterPrice == null ? grabReadOnly ? "chưa biết món trong đơn" : "nhập giá quầy bên dưới" :`${j.counterPrice ? percent(Math.abs(vsCounter! / j.counterPrice * 100)) : "—"} · còn lại sau MKT ${money(netLive)} · quầy ${money(j.counterPrice)}`}</small>
                 </div>;
               })()}
               {(() => {
@@ -4018,7 +4050,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 </div>;
               })()}
             </div>
-            <details className={styles.journeyEdit}>
+            {!grabReadOnly && <details className={styles.journeyEdit}>
               <summary>Sửa số liệu</summary>
               <div className={styles.reconciliationStatement}>
                 <div className={styles.discountStack}>
@@ -4036,9 +4068,9 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 <label className={styles.statementInput}><span>Giá quầy<small>Tính từ giá bán tại quầy của từng món trong đơn</small></span><input inputMode="numeric" value={grabForm.counterPrice} onChange={(event) => setGrabForm((current) => ({ ...current, counterPrice: amountInput(event.target.value) }))} placeholder="Giá bán tại quầy" /></label>
               </div>
               <label className={styles.modalField}>Ghi chú<input value={grabForm.note} onChange={(event) => setGrabForm((current) => ({ ...current, note: event.target.value }))} placeholder="Kỳ thanh toán, lý do lệch..." /></label>
-            </details>
-            {!hasReceived && <p className={styles.grabReportNotice}>Chưa có tiền thực nhận — mở “Sửa số liệu” để nhập.</p>}
-            <div className={styles.grabFormActions}><button type="button" disabled={savingGrabReconciliation} onClick={() => setShowGrabReconciliationModal(false)}>Đóng</button><button type="submit" disabled={savingGrabReconciliation}>{savingGrabReconciliation ? "Đang lưu..." : grabForm.id ? "Lưu thay đổi" : "Lưu đối soát"}</button></div>
+            </details>}
+            {!hasReceived && !grabReadOnly && <p className={styles.grabReportNotice}>Chưa có tiền thực nhận — mở “Sửa số liệu” để nhập.</p>}
+            <div className={styles.grabFormActions}><button type="button" disabled={savingGrabReconciliation} onClick={() => setShowGrabReconciliationModal(false)}>Đóng</button>{!grabReadOnly && <button type="submit" disabled={savingGrabReconciliation}>{savingGrabReconciliation ? "Đang lưu..." : grabForm.id ? "Lưu thay đổi" : "Lưu đối soát"}</button>}</div>
           </>;
         })() : <div className={styles.panelEmpty}>Chọn một đơn sàn để bắt đầu đối soát.</div>}</form></div>}
       </>}
@@ -4152,7 +4184,7 @@ function StoreConfigSheet({ stores, onClose, onSave }: { stores: CloudStore[]; o
     setSavingId(store.id);
     setNotice(undefined);
     try {
-      await onSave({ ...store, kind: draft.kind, openedOn: draft.openedOn || undefined, sapoAreas: list(draft.areas), sapoCashiers: list(draft.cashiers), platformAccounts: draft.accounts.filter((account) => account.merchantId?.trim() || account.name?.trim()).map((account) => ({ ...account, merchantId: account.merchantId?.trim() || undefined, name: account.name?.trim() || undefined })) });
+      await onSave({ ...store, kind: draft.kind, openedOn: draft.openedOn || undefined, sapoAreas: list(draft.areas), sapoCashiers: list(draft.cashiers), platformAccounts: draft.accounts.filter((account) => account.merchantId?.trim() || account.name?.trim()).map((account) => ({ ...account, merchantId: account.merchantId?.trim() || undefined, name: account.name?.trim() || undefined, inSapoFrom: account.inSapo && account.inSapoFrom ? account.inSapoFrom : undefined })) });
       setNotice(`Đã lưu cấu hình ${store.name}.`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không lưu được cấu hình điểm bán.");
@@ -4184,7 +4216,7 @@ function StoreConfigSheet({ stores, onClose, onSave }: { stores: CloudStore[]; o
               {draft.accounts.map((account, index) => <div className={styles.storeAccountRow} key={index}>
                 <select aria-label="Sàn" value={account.platform} onChange={(event) => updateAccount(store.id, index, { platform: event.target.value as StorePlatformAccount["platform"] })}><option value="grab">GrabFood</option><option value="shopee">ShopeeFood</option><option value="greensm">GreenSM</option></select>
                 <input aria-label="Mã merchant / ID cửa hàng" placeholder="Mã merchant / ID cửa hàng" value={account.merchantId || ""} onChange={(event) => updateAccount(store.id, index, { merchantId: event.target.value })} />
-                <label className={styles.storeAccountCheck}><input type="checkbox" checked={account.inSapo} onChange={(event) => updateAccount(store.id, index, { inSapo: event.target.checked })} />Đơn vào SAPO</label>
+                <label className={styles.storeAccountCheck} title="Ngày nhân viên bắt đầu lên đơn sàn này trong SAPO. Báo cáo sàn trước ngày đó vẫn đọc thẳng từ file sàn; để trống = mọi ngày."><input type="checkbox" checked={account.inSapo} onChange={(event) => updateAccount(store.id, index, { inSapo: event.target.checked })} />Đơn vào SAPO{account.inSapo && <> từ <input type="date" aria-label="Vào SAPO từ ngày" value={account.inSapoFrom || ""} onChange={(event) => updateAccount(store.id, index, { inSapoFrom: event.target.value || undefined })} /></>}</label>
                 <button type="button" aria-label="Bỏ tài khoản sàn" onClick={() => update(store.id, { accounts: draft.accounts.filter((_, position) => position !== index) })}>×</button>
               </div>)}
               <button type="button" className={styles.storeAccountAdd} onClick={() => update(store.id, { accounts: [...draft.accounts, { platform: "grab", inSapo: false }] })}>＋ Thêm tài khoản sàn</button>

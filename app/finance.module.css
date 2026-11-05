@@ -1083,6 +1083,8 @@
 .storeAccountRow select, .storeAccountRow input:not([type="checkbox"]) { min-width: 0; padding: 7px 8px; border: 1px solid #d7d0c3; border-radius: 8px; background: #fff; font: 11px Arial, sans-serif; }
 .storeAccountRow > button { width: 26px; height: 26px; padding: 0; border: 0; border-radius: 50%; color: #c2412d; background: transparent; font: 700 15px/1 Arial, sans-serif; cursor: pointer; }
 .storeAccountCheck { display: flex !important; margin: 0 !important; gap: 5px; align-items: center; color: var(--muted); font: 10px Arial, sans-serif; white-space: nowrap; }
+.storeAccountCheck input[type="checkbox"] { width: auto; padding: 0; flex: none; }
+.storeAccountCheck input[type="date"] { width: 124px; flex: none; }
 .storeAccountAdd { justify-self: start; padding: 6px 10px; border: 1px dashed #abc2ae; border-radius: 99px; color: #1e4b3f; background: transparent; font: 700 10px Arial, sans-serif; cursor: pointer; }
 @media (max-width: 520px) {
   .storeAccountRow { grid-template-columns: 1fr 26px; }

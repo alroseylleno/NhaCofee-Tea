@@ -10,7 +10,9 @@ export type CloudInventoryState = { items: CloudItem[]; lotMeta: Record<string, 
 export type CloudInventoryImport = { item: CloudItem; event: CloudHistory; meta?: CloudLotMeta };
 /// A sàn merchant account of one store. `inSapo` says whether its orders land in
 /// SAPO (then đối soát matches them to invoices) or exist only in the sàn report.
-export type StorePlatformAccount = { platform: "grab" | "shopee" | "greensm"; merchantId?: string; name?: string; inSapo: boolean };
+/// `inSapoFrom` (ISO day) is when staff started entering them in SAPO: reports
+/// before it stay outside SAPO, so switching an account over keeps its history.
+export type StorePlatformAccount = { platform: "grab" | "shopee" | "greensm"; merchantId?: string; name?: string; inSapo: boolean; inSapoFrom?: string };
 /// Finance fields (migration 20261030000100) are optional so a store row from an
 /// older schema still loads: kind defaults to "outlet", lists to empty.
 export type CloudStore = { id: string; code: string; name: string; status: "active" | "inactive"; isDefault: boolean; kind?: "outlet" | "warehouse"; openedOn?: string; sapoAreas?: string[]; sapoCashiers?: string[]; platformAccounts?: StorePlatformAccount[] };
@@ -164,7 +166,8 @@ function platformAccountsFrom(value: unknown): StorePlatformAccount[] {
     const account = entry as Record<string, unknown>;
     const platform = String(account?.platform || "");
     if (platform !== "grab" && platform !== "shopee" && platform !== "greensm") return [];
-    return [{ platform, merchantId: account.merchantId ? String(account.merchantId) : undefined, name: account.name ? String(account.name) : undefined, inSapo: account.inSapo !== false }];
+    const inSapoFrom = /^\d{4}-\d{2}-\d{2}$/.test(String(account.inSapoFrom || "")) ? String(account.inSapoFrom) : undefined;
+    return [{ platform, merchantId: account.merchantId ? String(account.merchantId) : undefined, name: account.name ? String(account.name) : undefined, inSapo: account.inSapo !== false, ...(inSapoFrom ? { inSapoFrom } : {}) }];
   });
 }
 

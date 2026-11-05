@@ -99,7 +99,7 @@ export function attributeOrder(order: OrderForAttribution, input: {
   if (input.marketplace) {
     if (input.reconciledStoreId) return { storeId: input.reconciledStoreId, source: "doi-soat" };
     // Not settled yet: the outlet whose account on this sàn feeds SAPO.
-    const viaSapo = open.filter((store) => (store.platformAccounts || []).some((account) => account.platform === input.marketplace && account.inSapo));
+    const viaSapo = open.filter((store) => (store.platformAccounts || []).some((account) => account.platform === input.marketplace && accountInSapoOn(account, order.orderDate)));
     if (viaSapo.length === 1) return { storeId: viaSapo[0].id, source: "san-merchant" };
     return { storeId: fallback, source: "mac-dinh" };
   }
@@ -114,6 +114,12 @@ export function storeLocationKey(name: string) {
   return foldSignal(String(name || "").replace(/^\s*N\s*\d+\s*[-–:]\s*/i, ""));
 }
 
+/// Whether a merchant account's orders of that day are in SAPO: ticked, and on
+/// or after the day staff started entering them (no date = always).
+export function accountInSapoOn(account: StorePlatformAccount, day?: string) {
+  return account.inSapo && (!account.inSapoFrom || !day || day >= account.inSapoFrom);
+}
+
 export type ReportStore = { store: CloudStore; inSapo: boolean; merchantId?: string; via: "id" | "branch" | "name" };
 
 /// The store that produced a sàn report (or one row of it).
@@ -125,7 +131,8 @@ export type ReportStore = { store: CloudStore; inSapo: boolean; merchantId?: str
 /// 3. An account name configured verbatim, when exactly one store claims it.
 /// A branch with no account configured for that sàn yet counts as outside SAPO
 /// unless it is the default outlet (N2's sàn stores are not linked to SAPO).
-export function storeForReport(stores: CloudStore[], platform: string, merchantId?: string, storeName?: string): ReportStore | undefined {
+/// `reportDate` decides `inSapo` for an account that moved into SAPO later.
+export function storeForReport(stores: CloudStore[], platform: string, merchantId?: string, storeName?: string, reportDate?: string): ReportStore | undefined {
   const accountsOf = (store: CloudStore) => (store.platformAccounts || []).filter((account) => account.platform === platform);
   const nameKey = foldSignal(storeName);
   const branches = nameKey ? outletsOf(stores).filter((store) => { const key = storeLocationKey(store.name); return key.length >= 4 && nameKey.includes(key); }) : [];
@@ -133,13 +140,13 @@ export function storeForReport(stores: CloudStore[], platform: string, merchantI
   const idKey = foldSignal(merchantId);
   const byId = idKey ? stores.flatMap((store) => accountsOf(store).filter((account) => foldSignal(account.merchantId) === idKey).map((account) => ({ store, account }))) : [];
   const idHit = branch ? byId.find((entry) => entry.store.id === branch.id) : byId[0];
-  if (idHit) return { store: idHit.store, inSapo: idHit.account.inSapo, merchantId: merchantId || idHit.account.merchantId, via: "id" };
+  if (idHit) return { store: idHit.store, inSapo: accountInSapoOn(idHit.account, reportDate), merchantId: merchantId || idHit.account.merchantId, via: "id" };
   if (branch) {
     const account = accountsOf(branch)[0];
-    return { store: branch, inSapo: account ? account.inSapo : branch.id === defaultOutletId(stores), merchantId: merchantId || account?.merchantId, via: "branch" };
+    return { store: branch, inSapo: account ? accountInSapoOn(account, reportDate) : branch.id === defaultOutletId(stores), merchantId: merchantId || account?.merchantId, via: "branch" };
   }
   const byName = nameKey ? stores.flatMap((store) => accountsOf(store).filter((account) => account.name && foldSignal(account.name) === nameKey).map((account) => ({ store, account }))) : [];
-  if (byName.length === 1) return { store: byName[0].store, inSapo: byName[0].account.inSapo, merchantId: merchantId || byName[0].account.merchantId, via: "name" };
+  if (byName.length === 1) return { store: byName[0].store, inSapo: accountInSapoOn(byName[0].account, reportDate), merchantId: merchantId || byName[0].account.merchantId, via: "name" };
   return undefined;
 }
 
