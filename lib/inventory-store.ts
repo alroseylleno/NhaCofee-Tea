@@ -1,4 +1,5 @@
 import { supabase } from "@/lib/supabase";
+import { selectAll } from "@/lib/select-all";
 
 export type CloudReceipt = { name: string; dataUrl?: string; path?: string };
 export type CloudHistory = { id: string; at: string; action: "created" | "updated"; changes: unknown[] };
@@ -28,12 +29,12 @@ function lifecycleTableMissing(error: { code?: string; message?: string } | null
 
 export async function loadInventory(): Promise<CloudInventoryState> {
   const client = requireClient();
-  const { data: rows, error } = await client.from("inventory_receipts").select("*").order("purchased_on", { ascending: false });
+  const { data: rows, error } = await selectAll((from, to) => client.from("inventory_receipts").select("*").order("purchased_on", { ascending: false }).order("id").range(from, to));
   if (error) throw error;
   const ids = rows.map((row) => row.id);
-  const { data: historyRows, error: historyError } = ids.length ? await client.from("inventory_history").select("*").in("inventory_receipt_id", ids).order("created_at", { ascending: false }) : { data: [], error: null };
+  const { data: historyRows, error: historyError } = ids.length ? await selectAll((from, to) => client.from("inventory_history").select("*").in("inventory_receipt_id", ids).order("created_at", { ascending: false }).order("id").range(from, to)) : { data: [], error: null };
   if (historyError) throw historyError;
-  const { data: activeRows, error: activeError } = await client.from("inventory_active_sessions").select("*").order("activated_at", { ascending: false });
+  const { data: activeRows, error: activeError } = await selectAll((from, to) => client.from("inventory_active_sessions").select("*").order("activated_at", { ascending: false }).order("id").range(from, to));
   if (activeError && !lifecycleTableMissing(activeError)) throw activeError;
   const lifecycleReady = !activeError;
   const histories = new Map<string, CloudHistory[]>();

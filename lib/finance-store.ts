@@ -1,4 +1,5 @@
 import { supabase } from "@/lib/supabase";
+import { selectAll } from "@/lib/select-all";
 
 export type FinanceImportType = "revenue" | "products" | "service" | "orders" | "prices";
 
@@ -518,17 +519,17 @@ function supabaseFailure(error: unknown, context: string) {
 export async function loadFinanceImports(): Promise<FinanceCloudState> {
   const client = requireClient();
   const [expensesResult, importsResult, revenueResult, productsResult, servicesResult, platformOrdersResult, grabResult, dailyReportsResult, counterPricesResult, counterOrdersResult, assignmentsResult] = await Promise.all([
-    client.from("finance_expenses").select("*").order("incurred_on", { ascending: false }),
-    client.from("finance_imports").select("*").order("imported_at", { ascending: false }),
-    client.from("finance_revenue_rows").select("*").order("report_date", { ascending: false }),
-    client.from("finance_product_rows").select("*").order("source_row", { ascending: true }),
-    client.from("finance_service_rows").select("*").order("source_row", { ascending: true }),
-    client.from("finance_platform_order_rows").select("*").order("order_date", { ascending: false }),
-    client.from("finance_grab_reconciliations").select("*").order("order_date", { ascending: false }),
-    client.from("finance_grab_daily_reports").select("*").order("report_date", { ascending: false }),
-    client.from("finance_counter_prices").select("*").order("name", { ascending: true }),
-    client.from("finance_counter_order_rows").select("*").order("order_date", { ascending: false }),
-    client.from("finance_order_store_assignments").select("*"),
+    selectAll((from, to) => client.from("finance_expenses").select("*").order("incurred_on", { ascending: false }).order("id").range(from, to)),
+    selectAll((from, to) => client.from("finance_imports").select("*").order("imported_at", { ascending: false }).order("data_type").range(from, to), (row) => String(row.data_type)),
+    selectAll((from, to) => client.from("finance_revenue_rows").select("*").order("report_date", { ascending: false }).order("id").range(from, to)),
+    selectAll((from, to) => client.from("finance_product_rows").select("*").order("source_row", { ascending: true }).order("id").range(from, to)),
+    selectAll((from, to) => client.from("finance_service_rows").select("*").order("source_row", { ascending: true }).order("id").range(from, to)),
+    selectAll((from, to) => client.from("finance_platform_order_rows").select("*").order("order_date", { ascending: false }).order("id").range(from, to)),
+    selectAll((from, to) => client.from("finance_grab_reconciliations").select("*").order("order_date", { ascending: false }).order("id").range(from, to)),
+    selectAll((from, to) => client.from("finance_grab_daily_reports").select("*").order("report_date", { ascending: false }).order("id").range(from, to)),
+    selectAll((from, to) => client.from("finance_counter_prices").select("*").order("name", { ascending: true }).order("size").range(from, to), (row) => `${row.name}|${row.size}`),
+    selectAll((from, to) => client.from("finance_counter_order_rows").select("*").order("order_date", { ascending: false }).order("id").range(from, to)),
+    selectAll((from, to) => client.from("finance_order_store_assignments").select("*").order("order_id").range(from, to), (row) => String(row.order_id)),
   ]);
   if (counterOrdersResult.error && !missingTable(counterOrdersResult.error)) throw supabaseFailure(counterOrdersResult.error, "Không thể tải hoá đơn tại quầy");
   if (assignmentsResult.error && !missingTable(assignmentsResult.error)) throw supabaseFailure(assignmentsResult.error, "Không thể tải đơn đã chuyển điểm bán");

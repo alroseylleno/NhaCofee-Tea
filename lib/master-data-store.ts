@@ -1,4 +1,5 @@
 import { loadFinanceImports, type FinanceProductRecord } from "@/lib/finance-store";
+import { selectAll } from "@/lib/select-all";
 import {
   DEFAULT_STORE,
   type AuditEvent,
@@ -55,7 +56,7 @@ export async function loadCloudMasterData(inventoryLots: InventorySourceLot[]): 
   const storeId = String(store.id);
   const finance = await loadFinanceSource();
   const [ingredientsResult] = await Promise.all([
-    client.from("ingredient_master").select("*").eq("store_id", storeId),
+    selectAll((from, to) => client.from("ingredient_master").select("*").eq("store_id", storeId).order("id").range(from, to)),
   ]);
   if (ingredientsResult.error) throw ingredientsResult.error;
   const syncedIngredients = mergeInventoryDrafts((ingredientsResult.data || []).map((row) => toIngredient(row)), inventoryLots);
@@ -71,11 +72,11 @@ export async function loadCloudMasterData(inventoryLots: InventorySourceLot[]): 
   const { error: reconcileError } = await client.rpc("reconcile_product_master_from_finance", { p_store_id: storeId });
   if (reconcileError) console.warn("Product Master catalog reconciliation skipped", reconcileError);
   const [freshIngredients, freshProducts, versionsResult, eventsResult] = await Promise.all([
-    client.from("ingredient_master").select("*").eq("store_id", storeId),
-    client.from("product_master").select("*").eq("store_id", storeId),
+    selectAll((from, to) => client.from("ingredient_master").select("*").eq("store_id", storeId).order("id").range(from, to)),
+    selectAll((from, to) => client.from("product_master").select("*").eq("store_id", storeId).order("id").range(from, to)),
     // A prepared component also references a recipe version. Specify the
     // owning recipe-version relationship so PostgREST does not see an ambiguity.
-    client.from("product_recipe_versions").select("*, product_recipe_items!product_recipe_items_recipe_version_id_fkey(*)"),
+    selectAll((from, to) => client.from("product_recipe_versions").select("*, product_recipe_items!product_recipe_items_recipe_version_id_fkey(*)").order("id").range(from, to)),
     client.from("product_audit_events").select("*").order("created_at", { ascending: false }).limit(250),
   ]);
   if (freshIngredients.error || freshProducts.error || versionsResult.error || eventsResult.error) throw freshIngredients.error || freshProducts.error || versionsResult.error || eventsResult.error;
@@ -99,9 +100,9 @@ export async function loadCogsCatalog(): Promise<{ products: ProductMaster[]; re
   if (storeError || !store) return { products: [], recipeVersions: [], ingredients: [] };
   const storeId = String(store.id);
   const [ingredientsResult, productsResult, versionsResult] = await Promise.all([
-    client.from("ingredient_master").select("*").eq("store_id", storeId),
-    client.from("product_master").select("*").eq("store_id", storeId),
-    client.from("product_recipe_versions").select("*, product_recipe_items!product_recipe_items_recipe_version_id_fkey(*)"),
+    selectAll((from, to) => client.from("ingredient_master").select("*").eq("store_id", storeId).order("id").range(from, to)),
+    selectAll((from, to) => client.from("product_master").select("*").eq("store_id", storeId).order("id").range(from, to)),
+    selectAll((from, to) => client.from("product_recipe_versions").select("*, product_recipe_items!product_recipe_items_recipe_version_id_fkey(*)").order("id").range(from, to)),
   ]);
   if (ingredientsResult.error || productsResult.error || versionsResult.error) throw ingredientsResult.error || productsResult.error || versionsResult.error;
   const products = (productsResult.data || []).map((row) => toProduct(row));
