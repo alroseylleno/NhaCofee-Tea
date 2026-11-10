@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { ChangeEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   deleteFinanceExpense,
   deleteFinanceGrabReconciliation,
@@ -48,6 +48,8 @@ import { buildSanCogsBook, emptySanCogsBook, sanLineUnitCogs, type SanCogsBook }
 import { isSupabaseConfigured } from "@/lib/supabase";
 import { useUrlState } from "@/lib/use-url-state";
 import styles from "./finance.module.css";
+import { RevenueStatement, TrendChart, storeShortName, type LedgerChannel, type LedgerEntry, type StatementStore } from "./revenue-overview";
+import overviewStyles from "./revenue-overview.module.css";
 
 export type FinanceInventoryLot = {
   id: string;
@@ -276,6 +278,10 @@ const MARKETPLACE_LABELS: Record<string, string> = { grab: "GrabFood", shopee: "
 // The three sàn Long tracks always get a row, even with no order in the period,
 // so a missing sàn reads as "no orders" instead of silently vanishing.
 const TRACKED_MARKETPLACES = ["grab", "shopee", "greensm"];
+/// Outlet colours follow the outlet (its position in the store list), never its rank.
+const OUTLET_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#4a3aa7"];
+const OFFLINE_COLOR = "#008300";
+const ONLINE_COLOR = "#4a3aa7";
 /// Grab appends the billing date to every campaign line ("Automatic Keywords -
 /// 2026-08-26"), so strip it to aggregate one campaign across days.
 function campaignLabel(description: string) {
@@ -1431,6 +1437,60 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [scope, state.revenues, state.platformOrders, state.counterOrders, nonSapo, orderStores, stores]);
 
+  /// Doanh thu → Tổng quan: every đồng of revenue and of money received, dated
+  /// and placed on an outlet and a channel — both outlets, whole history, no
+  /// store chip and no period. Counter and Website money lands at once; a sàn
+  /// pays what its daily report says (payout − the day's ads); a sàn invoice
+  /// whose day has no report yet is "pending", never guessed.
+  const revenueLedger = useMemo((): LedgerEntry[] => {
+    const entries: LedgerEntry[] = [];
+    const sanChannel = (key: string): LedgerChannel => (["grab", "shopee", "greensm", "befood", "gofood"].includes(key) ? key : "other") as LedgerChannel;
+    const channelOf = (order: PlatformOrderRecord): LedgerChannel => isMarketplacePlatformOrder(order)
+      ? sanChannel(marketplaceKey(`${order.channelName} ${order.paymentMethod || ""} ${order.deliveryPartner || ""}`))
+      : /website/.test(platformSignal(order.channelName)) ? "website" : "quay";
+    const reportDays = new Set(state.grabDailyReports.map((report) => `${report.platform || "grab"}|${report.storeId || fallbackStoreId}|${report.reportDate}`));
+    for (const order of [...state.platformOrders, ...state.counterOrders]) {
+      if (isCancelledOrder(order)) continue;
+      const channel = channelOf(order);
+      const storeId = storeOfOrder(order.id);
+      const san = channel !== "quay" && channel !== "website";
+      entries.push({ date: revenueDayOf(order), storeId, channel, revenue: order.reportedAmount, received: san ? 0 : order.reportedAmount, pending: san && !reportDays.has(`${channel}|${storeId}|${order.orderDate}`) ? order.reportedAmount : 0 });
+    }
+    for (const order of nonSapo.orders) entries.push({ date: revenueDayOf(order), storeId: nonSapo.storeByOrder.get(order.id) || homeOutletId, channel: channelOf(order), revenue: order.reportedAmount });
+    for (const report of state.grabDailyReports) entries.push({ date: report.reportDate, storeId: report.storeId || fallbackStoreId, channel: sanChannel(report.platform || "grab"), received: report.totalPayout - report.totalMarketing, ads: report.totalMarketing });
+    // Section 1 must equal the P&L's Doanh thu thuần: whatever the overview
+    // holds that the invoice list does not becomes "Chưa tách được".
+    const invoiced = new Map<string, number>();
+    for (const entry of entries) if (entry.revenue) invoiced.set(entry.date, (invoiced.get(entry.date) || 0) + entry.revenue);
+    for (const row of revenueRowsFor("all")) {
+      const gap = row.storeRevenue + row.appRevenue - row.discounts - (invoiced.get(row.date) || 0);
+      if (Math.abs(gap) >= 1) entries.push({ date: row.date, storeId: "", channel: "unsplit", revenue: gap });
+    }
+    return entries;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.platformOrders, state.counterOrders, state.grabDailyReports, state.revenues, nonSapo, orderStores, stores, fallbackStoreId, homeOutletId]);
+  const statementStores = useMemo((): StatementStore[] => outlets.map((store, index) => ({ id: store.id, name: store.name, openedOn: store.openedOn, color: OUTLET_COLORS[index % OUTLET_COLORS.length] })), [outlets]);
+  const outletColor = (id?: string) => statementStores.find((store) => store.id === id)?.color || OUTLET_COLORS[0];
+  /// Newest day with revenue: marks the running month/quarter/year.
+  const revenueLatestDate = useMemo(() => revenueLedger.filter((entry) => entry.revenue).map((entry) => entry.date).sort().pop(), [revenueLedger]);
+  /// Columns start at the first month the shop has any record (the P&L by
+  /// month Long keeps starts at T5 with dashes before the first sale).
+  const statementFirstDate = useMemo(() => [
+    ...revenueLedger.map((entry) => entry.date),
+    ...state.expenses.map((expense) => expense.incurredOn),
+    ...inventoryLots.map((lot) => lot.purchasedOn),
+  ].filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date || "") && date <= today).sort()[0], [revenueLedger, state.expenses, inventoryLots, today]);
+  const revenueTrendSeries = useMemo(() => {
+    const byStore = (storeId: string, pick: (entry: LedgerEntry) => boolean) => revenueLedger.filter((entry) => entry.storeId === storeId && entry.revenue && pick(entry)).map((entry) => ({ date: entry.date, value: entry.revenue || 0 }));
+    return {
+      perStore: statementStores.map((store) => ({ store, series: [
+        { key: "offline", name: "Offline", color: OFFLINE_COLOR, from: store.openedOn, entries: byStore(store.id, (entry) => entry.channel === "quay") },
+        { key: "online", name: "Online", color: ONLINE_COLOR, from: store.openedOn, entries: byStore(store.id, (entry) => entry.channel !== "quay") },
+      ] })),
+      compare: statementStores.map((store) => ({ key: store.id, name: storeShortName(store.name), color: store.color, from: store.openedOn, entries: byStore(store.id, () => true) })),
+    };
+  }, [revenueLedger, statementStores]);
+
   const scopedExpenses = useMemo(() => scope === "all" ? activeExpenses : activeExpenses.filter((expense) => expense.storeId === scope), [activeExpenses, scope]);
   const ledger = useMemo(() => buildStoreLedger(inventoryLots, inventorySessions, stores, fallbackStoreId), [inventoryLots, inventorySessions, stores, fallbackStoreId]);
   const lotStoreId = (lot: FinanceInventoryLot) => lot.storeId || fallbackStoreId;
@@ -1736,7 +1796,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   /// can show done and pending side by side. Pending rows carry the reason they
   /// cannot be settled yet — the usual cause is simply a missing Grab PDF.
   function buildReconciliationRows(orderOptions: PlatformOrderRecord[], reconciliations: GrabReconciliationRecord[], range?: typeof bounds) {
-    const reportDays = new Set(viewDailyReports.map((report) => `${report.platform || "grab"}:${report.reportDate}`));
+    const reportDays = new Set(state.grabDailyReports.map((report) => `${report.platform || "grab"}:${report.reportDate}`));
     const byOrderId = new Map<string, GrabReconciliationRecord>();
     const byCodeDate = new Map<string, GrabReconciliationRecord>();
     for (const entry of reconciliations) {
@@ -1781,55 +1841,37 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     }
     return [...unique.values()].sort((left, right) => right.order.orderDate.localeCompare(left.order.orderDate) || left.order.orderCode.localeCompare(right.order.orderCode, "vi"));
   }
+  /// The đối soát panel shows both outlets whatever the store chip says (Long,
+  /// 11/11): each row carries its outlet badge instead.
+  const doiSoatOrders = useMemo(() => allPlatformOrders.filter((entry) => inRange(entry.orderDate, bounds) && isMarketplacePlatformOrder(entry) && !isCancelledOrder(entry)).sort((a, b) => b.orderDate.localeCompare(a.orderDate) || a.orderCode.localeCompare(b.orderCode, "vi")), [allPlatformOrders, bounds]);
+  const doiSoatReconciliations = useMemo(() => allReconciliations.filter((entry) => inRange(entry.orderDate, bounds)), [allReconciliations, bounds]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const reconciliationRowsView = useMemo(() => buildReconciliationRows(grabOrderOptions, grabReconciliationRows, bounds), [grabOrderOptions, grabReconciliationRows, viewDailyReports, ordersById, bounds]);
+  const reconciliationRowsView = useMemo(() => buildReconciliationRows(doiSoatOrders, doiSoatReconciliations, bounds), [doiSoatOrders, doiSoatReconciliations, state.grabDailyReports, ordersById, bounds]);
   /// The same rows with no period: a món picked from the all-history loss
   /// dashboard must show its losing orders wherever they fall, not only the
   /// ones inside the selected month.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const allTimeReconciliationRows = useMemo(() => buildReconciliationRows(
-    viewPlatformOrders.filter((entry) => isMarketplacePlatformOrder(entry) && !/huy|cancel/.test(normalizedHeader(entry.status))),
-    viewReconciliations,
-  ), [viewPlatformOrders, viewReconciliations, viewDailyReports, ordersById]);
+    allPlatformOrders.filter((entry) => isMarketplacePlatformOrder(entry) && !/huy|cancel/.test(normalizedHeader(entry.status))),
+    allReconciliations,
+  ), [allPlatformOrders, allReconciliations, state.grabDailyReports, ordersById]);
   /// Months that actually contain sàn orders. The global period picker defaults
   /// to the current month, which is routinely empty because the SAPO export lags
   /// behind — without this the panel just looks broken.
   const marketplaceMonths = useMemo(() => {
     const grouped = new Map<string, number>();
-    for (const order of viewPlatformOrders) {
+    for (const order of allPlatformOrders) {
       if (!isMarketplacePlatformOrder(order) || /huy|cancel/.test(normalizedHeader(order.status))) continue;
       const month = order.orderDate.slice(0, 7);
       grouped.set(month, (grouped.get(month) || 0) + 1);
     }
     return [...grouped.entries()].map(([month, count]) => ({ month, count })).sort((left, right) => right.month.localeCompare(left.month));
-  }, [viewPlatformOrders]);
+  }, [allPlatformOrders]);
 
   /// Per-order averages across the reconciled orders of the period. These are
   /// the numbers Long negotiates with: what each sàn order actually costs in
   /// fee, ads and discount, not the period totals.
   const reconciledEntries = useMemo(() => reconciliationRowsView.map((row) => row.reconciliation).filter((entry): entry is GrabReconciliationRecord => Boolean(entry)), [reconciliationRowsView]);
-  const settledEntries = reconciledEntries.filter((entry) => entry.settlement);
-  const avgListPrice = settledEntries.length ? settledEntries.reduce((sum, entry) => sum + (entry.settlement!.orderValue || 0), 0) / settledEntries.length : 0;
-  const avgPlatformFee = settledEntries.length ? settledEntries.reduce((sum, entry) => sum + entry.settlement!.grabCommission + entry.settlement!.vatTax + entry.settlement!.incomeTax + entry.settlement!.shippingSupport, 0) / settledEntries.length : 0;
-  const avgMarketing = settledEntries.length ? settledEntries.reduce((sum, entry) => sum + (entry.settlement!.marketingAllocated || 0), 0) / settledEntries.length : 0;
-  const avgDiscount = settledEntries.length ? settledEntries.reduce((sum, entry) => sum + (entry.settlement!.merchantPromo || 0), 0) / settledEntries.length : 0;
-  /// What the sàn itself says the order was worth ("Trị giá đơn hàng" on Grab's
-  /// report), before merchant promo. Only sàn that publish a report contribute —
-  /// Shopee and GreenSM send nothing, so they are named as missing rather than
-  /// silently counted as zero.
-  const platformRecordedRevenue = settledEntries.reduce((sum, entry) => sum + (entry.settlement!.orderValue || 0), 0);
-  const platformRecordedChannels = useMemo(() => {
-    const covered = new Set<string>();
-    for (const entry of settledEntries) {
-      const order = entry.platformOrderId ? ordersById.get(entry.platformOrderId) : undefined;
-      covered.add(MARKETPLACE_LABELS[marketplaceKey(`${order?.channelName || ""} ${order?.deliveryPartner || ""}`)] || "Grab");
-    }
-    // Any sàn that sold in the period but contributed no settlement is missing a
-    // report; naming it keeps the tile from reading as a complete total.
-    const selling = new Set(grabOrderOptions.map((order) => MARKETPLACE_LABELS[marketplaceKey(`${order.channelName} ${order.paymentMethod || ""} ${order.deliveryPartner || ""}`)] || "Sàn khác"));
-    const missing = [...selling].filter((name) => !covered.has(name));
-    return { covered: [...covered], missing };
-  }, [settledEntries, ordersById, grabOrderOptions]);
   const receivedRevenue = reconciledEntries.reduce((sum, entry) => sum + entry.receivedAmount, 0);
   const reportedRevenue = reconciledEntries.reduce((sum, entry) => sum + entry.reportedAmount, 0);
   const gapRateAverage = reportedRevenue ? (reportedRevenue - receivedRevenue) / reportedRevenue * 100 : 0;
@@ -3455,26 +3497,34 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   /// is split across its lines by each line's share of the basket, then the
   /// line's own COGS is subtracted; a negative line is a losing line. Lines
   /// without a recipe are skipped and named, never priced at zero.
+  /// The losing lines of one reconciled order (empty when nothing lost).
+  const lossLinesOf = (reconciliation: GrabReconciliationRecord, uncovered?: Set<string>) => {
+    const order = reconciliation.platformOrderId ? ordersById.get(reconciliation.platformOrderId) : undefined;
+    if (!order?.items?.length) return { order, lines: [] as Array<{ name: string; quantity: number; loss: number }> };
+    const net = reconciliationJourney(reconciliation).netAfterMarketing;
+    const basket = order.items.reduce((sum, item) => sum + Math.max(0, item.amount || 0), 0);
+    const lines: Array<{ name: string; quantity: number; loss: number }> = [];
+    if (!basket) return { order, lines };
+    for (const item of order.items) {
+      const unitCost = sanLineUnitCogs(cogsBook, item.name, item.option);
+      if (unitCost === undefined) { uncovered?.add(item.name); continue; }
+      const quantity = item.quantity || 1;
+      const result = net * Math.max(0, item.amount || 0) / basket - unitCost * quantity;
+      if (result < 0) lines.push({ name: item.name, quantity, loss: -result });
+    }
+    return { order, lines };
+  };
   const itemLossHistory = (() => {
     const items = new Map<string, { key: string; name: string; lossCups: number; lossAmount: number; lastLoss: string; lossIds: Set<string> }>();
     const uncovered = new Set<string>();
     for (const reconciliation of viewReconciliations) {
-      const order = reconciliation.platformOrderId ? ordersById.get(reconciliation.platformOrderId) : undefined;
-      if (!order?.items?.length) continue;
-      const net = reconciliationJourney(reconciliation).netAfterMarketing;
-      const basket = order.items.reduce((sum, item) => sum + Math.max(0, item.amount || 0), 0);
-      if (!basket) continue;
-      for (const item of order.items) {
-        const unitCost = sanLineUnitCogs(cogsBook, item.name, item.option);
-        if (unitCost === undefined) { uncovered.add(item.name); continue; }
-        const quantity = item.quantity || 1;
-        const result = net * Math.max(0, item.amount || 0) / basket - unitCost * quantity;
-        if (result >= 0) continue;
-        const key = normalizedHeader(item.name);
-        const current = items.get(key) || { key, name: item.name, lossCups: 0, lossAmount: 0, lastLoss: "", lossIds: new Set<string>() };
-        current.lossCups += quantity;
-        current.lossAmount += -result;
-        if (order.orderDate > current.lastLoss) current.lastLoss = order.orderDate;
+      const { order, lines } = lossLinesOf(reconciliation, uncovered);
+      for (const line of lines) {
+        const key = normalizedHeader(line.name);
+        const current = items.get(key) || { key, name: line.name, lossCups: 0, lossAmount: 0, lastLoss: "", lossIds: new Set<string>() };
+        current.lossCups += line.quantity;
+        current.lossAmount += line.loss;
+        if (order && order.orderDate > current.lastLoss) current.lastLoss = order.orderDate;
         current.lossIds.add(reconciliation.id);
         items.set(key, current);
       }
@@ -3487,6 +3537,27 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       uncovered: [...uncovered],
     };
   })();
+  /// Total lost against COGS per outlet, over every reconciled order of both
+  /// outlets (the món table above follows the store chip; the chart shows both).
+  const lossTrendSeries = (() => {
+    const perStore = new Map<string, Array<{ date: string; value: number }>>();
+    for (const reconciliation of allReconciliations) {
+      const { order, lines } = lossLinesOf(reconciliation);
+      if (!order || !lines.length) continue;
+      const storeId = storeOfReconciliation(reconciliation);
+      const list = perStore.get(storeId) || [];
+      list.push({ date: order.orderDate, value: lines.reduce((sum, line) => sum + line.loss, 0) });
+      perStore.set(storeId, list);
+    }
+    return statementStores.map((store) => ({ key: store.id, name: storeShortName(store.name), color: store.color, from: store.openedOn, entries: perStore.get(store.id) || [] }));
+  })();
+  /// Marketing the sàn billed per day (Grab's Marketing table: keywords,
+  /// GrabNgonRẻ, co-fund fees), per outlet that owns the merchant account.
+  const marketingTrendSeries = useMemo(() => statementStores.map((store) => ({
+    key: store.id, name: storeShortName(store.name), color: store.color, from: store.openedOn,
+    entries: state.grabDailyReports.filter((report) => (report.storeId || fallbackStoreId) === store.id && report.totalMarketing).map((report) => ({ date: report.reportDate, value: report.totalMarketing })),
+  })), [statementStores, state.grabDailyReports, fallbackStoreId]);
+  const outletsWithoutGrab = outlets.filter((store) => !(store.platformAccounts || []).some((account) => account.platform === "grab"));
   /// The order table is grouped by day. Each day header reads what actually
   /// landed in the pocket two ways: "PDF" is the sàn's own day total (payout −
   /// the day's ads, i.e. Grab's "Tổng thu nhập"); "đối soát" is the sum of the
@@ -3501,12 +3572,12 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     const days = new Map<string, {
       date: string; orders: number; byPlatform: Record<"grab" | "shopee" | "greensm", number>;
       reconciled: number; reconciledReceived: number; pdfReports: number; pdfPayout: number; marketing: number;
-      counter: number; counterOrders: number; cogs: number; cogsOrders: number; rows: Row[];
+      counter: number; counterOrders: number; cogs: number; cogsOrders: number; rows: Row[]; byStore: Map<string, number>;
     }>();
     const dayOf = (date: string) => {
       let current = days.get(date);
       if (!current) {
-        current = { date, orders: 0, byPlatform: { grab: 0, shopee: 0, greensm: 0 }, reconciled: 0, reconciledReceived: 0, pdfReports: 0, pdfPayout: 0, marketing: 0, counter: 0, counterOrders: 0, cogs: 0, cogsOrders: 0, rows: [] };
+        current = { date, orders: 0, byPlatform: { grab: 0, shopee: 0, greensm: 0 }, reconciled: 0, reconciledReceived: 0, pdfReports: 0, pdfPayout: 0, marketing: 0, counter: 0, counterOrders: 0, cogs: 0, cogsOrders: 0, rows: [], byStore: new Map<string, number>() };
         days.set(date, current);
       }
       return current;
@@ -3521,6 +3592,8 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       if (reconciliationPlatform !== "all" && row.platformKey !== reconciliationPlatform) continue;
       const day = dayOf(row.order.orderDate);
       day.orders += 1;
+      const rowStore = row.reconciliation ? storeOfReconciliation(row.reconciliation) : storeOfOrder(row.order.id);
+      day.byStore.set(rowStore, (day.byStore.get(rowStore) || 0) + 1);
       if (row.platformKey === "grab" || row.platformKey === "shopee" || row.platformKey === "greensm") day.byPlatform[row.platformKey] += 1;
       const entry: Row = { ...row };
       if (row.reconciliation) {
@@ -3536,7 +3609,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       const itemOk = !pickedLossIds || Boolean(row.reconciliation && pickedLossIds.has(row.reconciliation.id));
       if (statusOk && lossOk && itemOk) day.rows.push(entry);
     }
-    for (const report of viewDailyReports) {
+    for (const report of state.grabDailyReports) {
       if (!pickedDays && !inRange(report.reportDate, bounds)) continue;
       if (reconciliationPlatform !== "all" && platformOf(report) !== reconciliationPlatform) continue;
       const day = days.get(report.reportDate);
@@ -3566,19 +3639,28 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       ? sign * left.date.localeCompare(right.date)
       : byValue(key === "counter" ? left.counterValue : left.cogsValue, key === "counter" ? right.counterValue : right.cogsValue) || right.date.localeCompare(left.date));
   })();
-  /// What the sàn actually transferred in the period, straight from the three
-  /// sàn's report emails: payout minus the day's ads ("Tổng thu nhập"). Unlike
-  /// summing reconciled orders it also counts orders SAPO never recorded.
-  const sanReportReceived = (() => {
-    const byPlatform = { grab: 0, shopee: 0, greensm: 0 } as Record<string, number>;
-    let marketing = 0;
-    for (const report of periodGrabReports) {
-      const key = report.platform || "grab";
-      byPlatform[key] = (byPlatform[key] || 0) + report.totalPayout - report.totalMarketing;
-      marketing += report.totalMarketing;
+  /// The three boxes above the đối soát table: period + sàn chip, both outlets.
+  /// Gap is measured on reconciled orders only, so an order still waiting for
+  /// its report never reads as money the sàn kept.
+  const reconciliationTotals = (() => {
+    const rows = reconciliationRowsView.filter((row) => reconciliationPlatform === "all" || row.platformKey === reconciliationPlatform);
+    const totals = { orders: rows.length, revenue: 0, pendingOrders: 0, pendingRevenue: 0, reconciledRevenue: 0, received: 0, commission: 0, tax: 0, settled: 0, ads: 0, byStore: new Map<string, number>() };
+    for (const row of rows) {
+      const reported = row.reconciliation ? row.reconciliation.reportedAmount : row.order.reportedAmount;
+      const storeId = row.reconciliation ? storeOfReconciliation(row.reconciliation) : storeOfOrder(row.order.id);
+      totals.revenue += reported;
+      totals.byStore.set(storeId, (totals.byStore.get(storeId) || 0) + reported);
+      if (!row.reconciliation) { totals.pendingOrders += 1; totals.pendingRevenue += reported; continue; }
+      totals.reconciledRevenue += reported;
+      totals.received += row.reconciliation.receivedAmount;
+      const settlement = row.reconciliation.settlement;
+      if (settlement) { totals.settled += 1; totals.commission += settlement.grabCommission || 0; totals.tax += (settlement.vatTax || 0) + (settlement.incomeTax || 0); }
     }
-    const missingDays = [...new Set(reconciliationRowsView.filter((row) => !row.reconciliation && row.reason?.startsWith("Chưa có báo cáo")).map((row) => `${MARKETPLACE_LABELS[row.platformKey] || row.platformKey} ${dateLabel(row.order.orderDate)}`))];
-    return { total: Object.values(byPlatform).reduce((sum, value) => sum + value, 0), byPlatform, marketing, reports: periodGrabReports.length, missingDays };
+    for (const report of state.grabDailyReports) if (inRange(report.reportDate, bounds) && (reconciliationPlatform === "all" || (report.platform || "grab") === reconciliationPlatform)) totals.ads += report.totalMarketing;
+    const gap = totals.reconciledRevenue - totals.received;
+    // Measured: gap = commission + tax to the đồng on every settled order; ship
+    // support is already inside SAPO's amount, so it is not a further deduction.
+    return { ...totals, gap, other: gap - totals.commission - totals.tax };
   })();
   function toggleReconciliationDaySort(key: "counter" | "cogs") {
     setReconciliationDaySort((current) => current.key !== key ? { key, dir: "asc" } : current.dir === "asc" ? { key, dir: "desc" } : { key: "date", dir: "desc" });
@@ -3606,7 +3688,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   /// Invoices of multi-outlet days, grouped by day × Khu vực × Thu ngân, so a
   /// whole group can be moved to another outlet in one go.
   const invoiceGroups = useMemo(() => {
-    if (!multiOutlet || scope !== "all") return [];
+    if (!multiOutlet) return [];
     const groups = new Map<string, { key: string; date: string; area: string; cashier: string; ids: string[]; revenue: number; stores: Set<string>; sources: Set<StoreAttributionSource> }>();
     for (const order of [...state.counterOrders, ...state.platformOrders.filter((entry) => !isMarketplacePlatformOrder(entry))]) {
       const date = revenueDayOf(order);
@@ -3726,64 +3808,15 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
 
       {revenueSubTab === "overview" && <>
         <div className={styles.revenueHeader}>
-          <div><span>DOANH THU TỔNG QUAN</span><h2>{bounds.label}</h2><p>Chỉ hiển thị doanh thu phát sinh trong kỳ đang lọc.</p></div>
+          <div><span>DOANH THU TỔNG QUAN</span><h2>Cả chuỗi · toàn bộ lịch sử</h2><p>Bảng và biểu đồ dưới đây đọc mọi điểm bán và mọi kỳ — không theo chip chi nhánh hay bộ lọc kỳ phía trên; mỗi cái có nút Tháng / Quý / Năm riêng.</p></div>
         </div>
-        {!revenueDataset.length && !periodServices.length ? <div className={styles.revenueEmpty}><div>DT</div><h3>Chưa có báo cáo doanh thu</h3><p>Chọn file tại Import Center phía trên. Hệ thống sẽ tự đưa báo cáo vào tab Tổng quan.</p></div> : <>
-          <div className={styles.revenueKpis}>
-            <article className={styles.primaryRevenueKpi}><span>DOANH THU THỰC</span><strong>{money(datasetRevenue)}</strong><small>{importedRevenueRows.length.toLocaleString("vi-VN")} dòng báo cáo</small></article>
-            <article><span>Đơn thành công</span><strong>{successfulOrders.toLocaleString("vi-VN")}</strong><small>/ {totalReportedOrders.toLocaleString("vi-VN")} tổng đơn</small></article>
-            <article><span>Số lượng hàng</span><strong>{datasetItems.toLocaleString("vi-VN")}</strong><small>{averageItemsPerOrder.toLocaleString("vi-VN", { maximumFractionDigits: 2 })} SP/đơn</small></article>
-            <article><span>Trung bình/đơn</span><strong>{money(averagePerOrder)}</strong><small>trên đơn thành công</small></article>
-            <article><span>Trung bình/sản phẩm</span><strong>{money(averagePerItem)}</strong><small>doanh thu thực / số lượng hàng</small></article>
-            <article className={cancellationRate > 3 ? styles.warningKpi : ""}><span>Tỷ lệ hủy</span><strong>{percent(cancellationRate)}</strong><small>{cancelledOrders.toLocaleString("vi-VN")} đơn · {money(reportedCancelledAmount)}</small></article>
+        {!revenueLedger.length ? <div className={styles.revenueEmpty}><div>DT</div><h3>Chưa có báo cáo doanh thu</h3><p>Chọn file tại Import Center phía trên. Hệ thống sẽ tự đưa báo cáo vào tab Tổng quan.</p></div> : <>
+          <RevenueStatement entries={revenueLedger} stores={statementStores} firstDate={statementFirstDate} latestDate={revenueLatestDate} today={today} />
+          <div className={overviewStyles.trendGrid}>
+            {revenueTrendSeries.perStore.map(({ store, series }) => <TrendChart key={store.id} title={`${store.name.toLocaleUpperCase("vi")} · ONLINE VS OFFLINE`} note={store.openedOn ? `mở ${dateLabel(store.openedOn)}` : undefined} series={series} latestDate={revenueLatestDate} empty="Điểm bán này chưa có doanh thu." />)}
           </div>
-          <div className={styles.revenueInsightGrid}>
-            <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>GROSS-TO-NET</span><strong>{money(reportedGoodsAmount)} tiền hàng</strong></div><small>{percent(discountRate)} giảm giá</small></div><div className={styles.adjustmentList}>{revenueAdjustments.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>-{money(entry.value)}</b></div><div className={styles.adjustmentTrack}><i style={{ width: `${entry.value / maxRevenueAdjustment * 100}%` }} /></div></div>)}<div className={styles.netRevenueRow}><span>Doanh thu thực</span><b>{money(datasetRevenue)}</b></div></div></article>
-            {outletRevenue && <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>THEO ĐIỂM BÁN</span><strong>{money(outletRevenue.total)}</strong></div><small>{Math.abs(outletRevenue.gap) < 1 ? "✓ khớp SAPO tổng quan" : `lệch ${money(outletRevenue.gap)} so với SAPO`}</small></div><div className={styles.categoryBars}>{outletRevenue.rows.map((row) => <div key={row.store.id}><div><span><b>{row.store.name}</b><small>{row.orders.toLocaleString("vi-VN")} đơn · {row.cups.toLocaleString("vi-VN")} SP · {percent(outletRevenue.total ? row.revenue / outletRevenue.total * 100 : 0)}</small></span><strong>{money(row.revenue)}</strong></div><div><i style={{ width: `${outletRevenue.total ? row.revenue / outletRevenue.total * 100 : 0}%` }} /></div></div>)}</div><p className={styles.metricDisclaimer}>Ngày chỉ một điểm bán mở lấy nguyên SAPO tổng quan. Ngày nhiều điểm bán mở lấy từ Danh sách hoá đơn, gán theo khu vực → thu ngân → {storeLabel(homeOutletId)}; đơn sàn theo merchant đã đối soát; sàn ngoài SAPO lấy thẳng từ báo cáo sàn.{Math.abs(outletRevenue.gap) >= 1 ? " Lệch thường do file hoá đơn chưa phủ hết kỳ của file tổng quan — nạp lại bộ file SAPO mới nhất." : ""}</p></article>}
-            <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>ĐỐI SOÁT HAI BÁO CÁO</span><strong>{periodProducts.length ? money(Math.abs(revenueProductGap)) : "Chờ file mặt hàng"}</strong></div><small>Chênh lệch</small></div>{periodProducts.length ? <div className={styles.reconciliation}><div><span>Doanh thu thực</span><b>{money(datasetRevenue)}</b><i style={{ width: "100%" }} /></div><div><span>Tổng tiền mặt hàng</span><b>{money(productNetAmount)}</b><i style={{ width: `${datasetRevenue ? Math.min(100, productNetAmount / datasetRevenue * 100) : 0}%` }} /></div><p>Chênh lệch có thể đến từ đơn hủy, phí hoặc cấu hình báo cáo Sapo. Dùng ô này để kiểm tra hai file cùng kỳ.</p></div> : <div className={styles.panelEmpty}>Import thêm Báo cáo mặt hàng để đối soát doanh thu và cơ cấu sản phẩm.</div>}</article>
-          </div>
-          {invoiceGroups.length > 0 && <details className={`${styles.revenuePanel} ${styles.invoiceGroups}`}>
-            <summary><span>ĐƠN TẠI QUẦY THEO ĐIỂM BÁN · {bounds.label}</span><strong>{invoiceGroups.length} nhóm · {invoiceGroups.reduce((sum, group) => sum + group.ids.length, 0)} đơn</strong></summary>
-            <p className={styles.metricDisclaimer}>Mỗi dòng là một nhóm đơn cùng ngày, cùng khu vực, cùng thu ngân. Chọn điểm bán để chuyển cả nhóm; lựa chọn được giữ qua mọi lần import lại. “Theo luật” bỏ lựa chọn tay.</p>
-            <div className={styles.storeTableWrap}><table className={styles.storeTable}><thead><tr><th>Ngày</th><th>Khu vực</th><th>Thu ngân</th><th className={styles.numberCell}>Đơn</th><th className={styles.numberCell}>Doanh thu</th><th>Điểm bán</th></tr></thead><tbody>
-              {invoiceGroups.map((group) => {
-                const uniform = group.stores.size === 1 ? [...group.stores][0] : "";
-                const manual = group.sources.has("manual");
-                return <tr key={group.key}><td>{dateLabel(group.date)}</td><td>{group.area || "—"}</td><td>{group.cashier || "—"}</td><td className={styles.numberCell}>{group.ids.length}</td><td className={styles.numberCell}>{money(group.revenue)}</td><td><select disabled={assigningOrders} value={uniform} aria-label={`Điểm bán của nhóm ${dateLabel(group.date)} ${group.area} ${group.cashier}`} onChange={(event) => void assignOrdersToStore(group.ids, event.target.value === "__rule" ? "" : event.target.value)}>{!uniform && <option value="">Nhiều điểm bán</option>}{outlets.map((store) => <option value={store.id} key={store.id}>{store.name}</option>)}{manual && <option value="__rule">Theo luật</option>}</select><small>{[...group.sources].map((source) => ATTRIBUTION_LABELS[source]).join(", ")}</small></td></tr>;
-              })}
-            </tbody></table></div>
-          </details>}
+          {statementStores.length > 1 && <TrendChart title={`${statementStores.map((store) => storeShortName(store.name)).join(" VS ")} · DOANH THU THUẦN`} series={revenueTrendSeries.compare} latestDate={revenueLatestDate} footer={<p className={styles.metricDisclaimer}>Online = GrabFood + ShopeeFood + GreenSM + Website; Offline = bán tại quầy. Điểm bán của từng đơn theo luật ở ⚙ Cấu hình điểm bán. Kỳ có * là kỳ đang chạy, vẽ nét đứt.</p>} />}
         </>}
-      </>}
-
-      {revenueSubTab === "products" && <>
-        <div className={styles.revenueHeader}>
-          <div><span>BÁO CÁO MẶT HÀNG</span><h2>{bounds.label}</h2><p>Hiển thị dữ liệu của file có kỳ báo cáo giao với bộ lọc đang chọn.</p></div>
-        </div>
-        {!periodProducts.length ? <div className={styles.revenueEmpty}><div>MH</div><h3>Chưa có báo cáo mặt hàng</h3><p>Chọn file tại Import Center phía trên. Hệ thống sẽ tự đưa báo cáo vào tab Mặt hàng.</p></div> : <>
-          <div className={styles.productKpis}><article><span>TỔNG TIỀN MẶT HÀNG</span><strong>{money(productNetAmount)}</strong><small>sau giảm giá</small></article><article><span>SẢN PHẨM BÁN</span><strong>{productQuantity.toLocaleString("vi-VN")}</strong><small>{periodProducts.length} SKU</small></article><article><span>DANH MỤC</span><strong>{categoryPerformance.length}</strong><small>nhóm sản phẩm</small></article><article><span>GIẢM GIÁ</span><strong>{money(productDiscountAmount)}</strong><small>{percent(productDiscountRate)} tiền hàng</small></article><article><span>TB/SẢN PHẨM</span><strong>{money(averageProductValue)}</strong><small>sau giảm giá</small></article></div>
-          <div className={styles.productVisualGrid}>
-            <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>DOANH THU THEO DANH MỤC</span><strong>{categoryPerformance.length} danh mục</strong></div></div><div className={styles.categoryBars}>{categoryPerformance.map((entry) => <div key={entry.name}><div><span><b>{entry.name}</b><small>{entry.quantity.toLocaleString("vi-VN")} SP · {entry.skuCount} SKU</small></span><strong>{money(entry.revenue)}</strong></div><div><i style={{ width: `${entry.revenue / maxCategoryRevenue * 100}%` }} /></div></div>)}</div></article>
-            <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>TOP MẶT HÀNG</span><strong>Theo tổng tiền</strong></div></div><div className={styles.topRevenueList}>{topProducts.map((entry, index) => <div key={entry.id}><i>{index + 1}</i><span><b>{entry.name} {entry.variant ? `· ${entry.variant}` : ""}</b><small>{entry.category} · {entry.quantity.toLocaleString("vi-VN")} SP</small></span><strong>{money(entry.totalAmount)}</strong></div>)}</div></article>
-          </div>
-          <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>MẶT HÀNG GIẢM GIÁ CAO</span><strong>Cần kiểm tra biên lợi nhuận</strong></div><small>% trên tiền hàng</small></div><div className={styles.discountProductList}>{highDiscountProducts.map((entry) => <div key={entry.id}><span><b>{entry.name} {entry.variant ? `· ${entry.variant}` : ""}</b><small>{entry.sku} · {money(entry.goodsAmount)} tiền hàng</small></span><strong>{percent(entry.goodsAmount ? entry.discountAmount / entry.goodsAmount * 100 : 0)}<small>{money(entry.discountAmount)}</small></strong></div>)}</div></article>
-        </>}
-      </>}
-
-      {revenueSubTab === "platform" && <>
-        <div className={styles.revenueHeader}>
-          <div><span>SÀN & ĐỐI SOÁT</span><h2>{bounds.label}</h2><p>Chỉ tính đơn sàn — Grab, ShopeeFood và Xanh/Green Food. Website và các kênh tự bán được tách riêng ở mục Kênh khác vì không chịu phí sàn và không phải đối soát. Đối soát tự đọc báo cáo quyết toán của từng sàn — Grab (PDF), ShopeeFood (CSV), GreenSM (xlsx); vẫn đối soát tay được từng đơn.</p></div>
-        </div>
-        <div className={styles.revenueKpis}>
-          <article className={styles.primaryRevenueKpi}><span>DOANH THU SÀN GHI NHẬN</span><strong>{settledEntries.length ? money(platformRecordedRevenue) : "-"}</strong><small>{settledEntries.length ? `${platformRecordedChannels.covered.join(", ")} · ${settledEntries.length.toLocaleString("vi-VN")} đơn${platformRecordedChannels.missing.length ? ` · chưa có báo cáo ${platformRecordedChannels.missing.join(", ")}` : ""}` : "chờ báo cáo từ sàn"}</small></article>
-          <article className={styles.primaryRevenueKpi}><span>DOANH THU SÀN · SAPO</span><strong>{money(platformOrderRevenue)}</strong><small>{successfulPlatformOrders.length.toLocaleString("vi-VN")} đơn sàn thành công · {channelPerformance.length.toLocaleString("vi-VN")} sàn</small></article>
-          <article className={styles.primaryRevenueKpi} title={sanReportReceived.missingDays.length ? `Chưa có báo cáo: ${sanReportReceived.missingDays.join(", ")}` : "Đủ báo cáo cho mọi ngày có đơn sàn"}><span>DOANH THU SÀN · THỰC NHẬN</span><strong>{sanReportReceived.reports ? money(sanReportReceived.total) : "-"}</strong><small>{sanReportReceived.reports ? `Theo email sàn · Grab ${money(sanReportReceived.byPlatform.grab || 0)} · Shopee ${money(sanReportReceived.byPlatform.shopee || 0)} · GreenSM ${money(sanReportReceived.byPlatform.greensm || 0)} · đã trừ QC ${money(sanReportReceived.marketing)}${sanReportReceived.missingDays.length ? ` · thiếu ${sanReportReceived.missingDays.length} báo cáo` : ""}` : "chờ báo cáo từ sàn"}</small></article>
-          <article><span>Trung bình/đơn</span><strong>{money(platformAverageOrder)}</strong><small>theo Danh sách hóa đơn</small></article>
-          <article><span>Giảm giá sàn</span><strong>{money(platformDiscountAmount)}</strong><small>{percent(platformDiscountRate)} tiền hàng</small></article>
-          <article><span>Phí sàn trung bình</span><strong>{settledEntries.length ? money(avgPlatformFee) : "-"}</strong><small>{settledEntries.length ? `${percent(avgListPrice ? avgPlatformFee / avgListPrice * 100 : 0)} giá bán · mỗi đơn` : "chờ báo cáo sàn"}</small></article>
-          <article><span>Quảng cáo trung bình</span><strong>{settledEntries.length ? money(avgMarketing) : "-"}</strong><small>{settledEntries.length ? `${percent(avgListPrice ? avgMarketing / avgListPrice * 100 : 0)} giá bán · mỗi đơn` : "chờ báo cáo sàn"}</small></article>
-          <article><span>Giảm giá trung bình</span><strong>{settledEntries.length ? money(avgDiscount) : "-"}</strong><small>{settledEntries.length ? `${percent(avgListPrice ? avgDiscount / avgListPrice * 100 : 0)} giá bán · mỗi đơn` : "chờ báo cáo sàn"}</small></article>
-        </div>
         <div className={styles.revenueInsightGrid}>
           <article className={`${styles.revenuePanel} ${styles.fullSpanPanel}`}>
             <div className={styles.revenuePanelTitle}><div><span>DOANH THU THEO SÀN</span><strong>{channelPerformance.length ? `${channelPerformance.length} sàn đang bán` : "Chờ Danh sách hóa đơn"}</strong></div><small>Theo Nguồn đơn</small></div>
@@ -3866,6 +3899,26 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
             <p className={styles.metricDisclaimer}>CPO trung bình = chi quảng cáo ÷ số đơn. CPO biên = (chi kỳ này − chi kỳ trước) ÷ (đơn kỳ này − đơn kỳ trước); khi chi tăng mà đơn không tăng thì không có số nào chia được, kỳ đó được đánh dấu BÃO HOÀ kèm số tiền đã đốt thêm — con số quyết định có nên tăng ngân sách hay không; còn lãi chừng nào nó nằm dưới ngưỡng hoà vốn. Ngưỡng hoà vốn = tiền sàn thực chuyển về mỗi đơn (quyết toán {money(adsTotals.avgOrderValue)}/đơn, trước quảng cáo) trừ giá vốn thật của giỏ hàng {money(adsCogs.perOrder)}/đơn, lấy từ công thức ở tab Sản phẩm ({adsCogs.ordersPriced}/{adsCogs.ordersSeen} đơn có giá vốn · {percent(adsCogs.coverage)} số món đã có công thức; món chưa có công thức được bỏ qua nên giá vốn này là mức sàn, sẽ sát hơn khi bạn nhập đủ công thức). Cột nền là trần quảng cáo bạn đặt trong Grab Ads — báo cáo quyết toán không chứa con số này nên phải khai ở ô Trần/ngày. Chỉ tính các dòng quảng cáo thật trong bảng Marketing — Automatic/Manual Keywords, mã ADS-xxx và Image Ads; phí dịch vụ co-fund (Đồng tài trợ đa tầng), GrabNgonRẻ và Thúc Đẩy Doanh Số bị loại vì là chi phí khuyến mãi, không phải quảng cáo. ShopeeFood và GreenSM không tính phí quảng cáo theo ngày nên không góp mặt.</p>
           </article>
         </div>
+      </>}
+
+      {revenueSubTab === "products" && <>
+        <div className={styles.revenueHeader}>
+          <div><span>BÁO CÁO MẶT HÀNG</span><h2>{bounds.label}</h2><p>Hiển thị dữ liệu của file có kỳ báo cáo giao với bộ lọc đang chọn.</p></div>
+        </div>
+        {!periodProducts.length ? <div className={styles.revenueEmpty}><div>MH</div><h3>Chưa có báo cáo mặt hàng</h3><p>Chọn file tại Import Center phía trên. Hệ thống sẽ tự đưa báo cáo vào tab Mặt hàng.</p></div> : <>
+          <div className={styles.productKpis}><article><span>TỔNG TIỀN MẶT HÀNG</span><strong>{money(productNetAmount)}</strong><small>sau giảm giá</small></article><article><span>SẢN PHẨM BÁN</span><strong>{productQuantity.toLocaleString("vi-VN")}</strong><small>{periodProducts.length} SKU</small></article><article><span>DANH MỤC</span><strong>{categoryPerformance.length}</strong><small>nhóm sản phẩm</small></article><article><span>GIẢM GIÁ</span><strong>{money(productDiscountAmount)}</strong><small>{percent(productDiscountRate)} tiền hàng</small></article><article><span>TB/SẢN PHẨM</span><strong>{money(averageProductValue)}</strong><small>sau giảm giá</small></article></div>
+          <div className={styles.productVisualGrid}>
+            <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>DOANH THU THEO DANH MỤC</span><strong>{categoryPerformance.length} danh mục</strong></div></div><div className={styles.categoryBars}>{categoryPerformance.map((entry) => <div key={entry.name}><div><span><b>{entry.name}</b><small>{entry.quantity.toLocaleString("vi-VN")} SP · {entry.skuCount} SKU</small></span><strong>{money(entry.revenue)}</strong></div><div><i style={{ width: `${entry.revenue / maxCategoryRevenue * 100}%` }} /></div></div>)}</div></article>
+            <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>TOP MẶT HÀNG</span><strong>Theo tổng tiền</strong></div></div><div className={styles.topRevenueList}>{topProducts.map((entry, index) => <div key={entry.id}><i>{index + 1}</i><span><b>{entry.name} {entry.variant ? `· ${entry.variant}` : ""}</b><small>{entry.category} · {entry.quantity.toLocaleString("vi-VN")} SP</small></span><strong>{money(entry.totalAmount)}</strong></div>)}</div></article>
+          </div>
+          <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>MẶT HÀNG GIẢM GIÁ CAO</span><strong>Cần kiểm tra biên lợi nhuận</strong></div><small>% trên tiền hàng</small></div><div className={styles.discountProductList}>{highDiscountProducts.map((entry) => <div key={entry.id}><span><b>{entry.name} {entry.variant ? `· ${entry.variant}` : ""}</b><small>{entry.sku} · {money(entry.goodsAmount)} tiền hàng</small></span><strong>{percent(entry.goodsAmount ? entry.discountAmount / entry.goodsAmount * 100 : 0)}<small>{money(entry.discountAmount)}</small></strong></div>)}</div></article>
+        </>}
+      </>}
+
+      {revenueSubTab === "platform" && <>
+        <div className={styles.revenueHeader}>
+          <div><span>SÀN & ĐỐI SOÁT</span><h2>{bounds.label}</h2><p>Chỉ tính đơn sàn — Grab, ShopeeFood và Xanh/Green Food. Website và các kênh tự bán được tách riêng ở mục Kênh khác vì không chịu phí sàn và không phải đối soát. Đối soát tự đọc báo cáo quyết toán của từng sàn — Grab (PDF), ShopeeFood (CSV), GreenSM (xlsx); vẫn đối soát tay được từng đơn.</p></div>
+        </div>
         <div className={styles.revenueInsightGrid}>
           <article className={`${styles.revenuePanel} ${styles.marketplaceFeeCard}`}>
             <div className={styles.revenuePanelTitle}><div><span>PHÍ SÀN THEO NỀN TẢNG</span><strong>{marketplaceReconciledReported ? `${percent(marketplaceBlendedFeeRate)} bình quân` : "Chưa có đối soát"}</strong></div><small>{money(marketplaceMeasuredFee)} phí đo được</small></div>
@@ -3890,7 +3943,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
             </div>)}</div>
             <p className={styles.metricDisclaimer}>Phí sàn không có trong file hóa đơn SAPO — cột Phí dịch vụ và Phí GH của đơn sàn đều bằng 0. Con số ở đây đo bằng chính đối soát: SAPO ghi nhận trừ tiền thực nhận. Đối soát càng nhiều đơn thì tỷ lệ càng đúng.</p>
           </article>
-          <article className={styles.revenuePanel}>
+          <article className={`${styles.revenuePanel} ${overviewStyles.matchSiblingHeight}`}>
             <div className={styles.revenuePanelTitle}><div><span>CHI PHÍ MARKETING GRAB</span><strong>{periodGrabReports.length ? money(grabMarketingTotal) : "Chờ báo cáo PDF"}</strong></div><small>{periodGrabReports.filter((report) => (report.platform || "grab") === "grab").length.toLocaleString("vi-VN")} ngày có báo cáo</small></div>
             {periodGrabReports.length ? <>
               <div className={styles.marketplaceFeeStats}>
@@ -3907,8 +3960,9 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
             <p className={styles.metricDisclaimer}>Grab tính phí quảng cáo theo ngày cho cả cửa hàng, không gắn với đơn nào — nên bảng này chỉ nhìn ở mức chiến dịch và ngày. Phần chia về từng đơn nằm trong chi tiết đơn.</p>
           </article>
         </div>
-        <article className={styles.revenuePanel}>
-          <div className={styles.revenuePanelTitle}><div><span>MÓN ĐÃ TỪNG LỖ SO VỚI GIÁ VỐN · TOÀN BỘ LỊCH SỬ</span><strong>{itemLossHistory.rows.length ? `${itemLossHistory.rows.length} món · ${itemLossHistory.cups.toLocaleString("vi-VN")} ly lỗ · lỗ ${money(itemLossHistory.amount)}` : "Chưa có món nào lỗ so với giá vốn"}</strong></div><small>bấm một món để lọc đơn ở bảng đối soát</small></div>
+        <TrendChart title="CHI PHÍ MARKETING SÀN · THEO ĐIỂM BÁN" series={marketingTrendSeries} latestDate={state.grabDailyReports.map((report) => report.reportDate).sort().pop()} note={multiOutlet && outletsWithoutGrab.length ? `${outletsWithoutGrab.map((store) => storeShortName(store.name)).join(", ")} chưa có tài khoản Grab` : undefined} empty="Chưa có báo cáo sàn nào có chi phí marketing." footer={<p className={styles.metricDisclaimer}>Bảng Marketing trong báo cáo quyết toán Grab mỗi ngày (quảng cáo từ khoá, GrabNgonRẻ, phí đồng tài trợ), theo điểm bán của tài khoản Grab. ShopeeFood và GreenSM không tính phí quảng cáo theo ngày. Quảng cáo Facebook ghi ở Chi phí không nằm trong biểu đồ này. Không theo bộ lọc kỳ phía trên.</p>} />
+        <details className={`${styles.revenuePanel} ${overviewStyles.lossDetails}`} open={Boolean(reconciliationItemFilter) || undefined}>
+          <summary className={styles.revenuePanelTitle}><div><span>MÓN ĐÃ TỪNG LỖ SO VỚI GIÁ VỐN · TOÀN BỘ LỊCH SỬ{scope !== "all" ? ` · ${scopeLabel}` : ""}</span><strong>{itemLossHistory.rows.length ? `${itemLossHistory.rows.length} món · ${itemLossHistory.cups.toLocaleString("vi-VN")} ly lỗ · lỗ ${money(itemLossHistory.amount)}` : "Chưa có món nào lỗ so với giá vốn"}</strong></div><small>{itemLossHistory.rows.length ? "bấm để xem từng món" : ""}<i aria-hidden="true">›</i></small></summary>
           {itemLossHistory.rows.length > 0 && <div className={styles.itemLossTable}>
             <div className={styles.itemLossHead}><span>Món</span><span>Số ly lỗ</span><span>Tiền lỗ</span><span>Lỗ TB / ly</span><span>Lần lỗ gần nhất</span></div>
             {itemLossHistory.rows.map((item) => <button type="button" key={item.key} className={`${styles.itemLossRow} ${reconciliationItemFilter?.key === item.key ? styles.selected : ""}`} onClick={() => setReconciliationItemFilter(reconciliationItemFilter?.key === item.key ? undefined : { key: item.key, name: item.name })}>
@@ -3921,9 +3975,15 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
             <div className={`${styles.itemLossRow} ${styles.itemLossTotal}`}><span><b>Tổng {itemLossHistory.rows.length} món</b></span><span><b>{itemLossHistory.cups.toLocaleString("vi-VN")}</b></span><span className={styles.negativeCell}><b>−{money(itemLossHistory.amount)}</b></span><span className={styles.negativeCell}>−{money(itemLossHistory.amount / itemLossHistory.cups)}</span><span /></div>
           </div>}
           <p className={styles.metricDisclaimer}>Tính trên MỌI đơn sàn đã đối soát từ trước tới nay, không theo kỳ đang chọn. Mỗi đơn: tiền CÒN LẠI SAU MARKETING (thực nhận trừ quảng cáo phân bổ của ngày — cùng cơ sở với cột So với giá vốn) được chia cho từng món theo tỷ lệ tiền dòng trong giỏ, rồi trừ giá vốn của món đó (ly nền + size + topping khách chọn); món nào ra âm là một lần lỗ. Bấm một món để bảng đối soát bên dưới hiện mọi đơn LỖ có món đó, ở mọi tháng; bấm lại hoặc ✕ để quay về tháng đang chọn.{itemLossHistory.uncovered.length ? <> Chưa có giá vốn, không tính: <b>{itemLossHistory.uncovered.join(", ")}</b>.</> : null}</p>
-        </article>
+        </details>
+        <TrendChart title="TỔNG TIỀN LỖ SO VỚI GIÁ VỐN · THEO ĐIỂM BÁN" series={lossTrendSeries} latestDate={allReconciliations.map((entry) => entry.orderDate).sort().pop()} empty="Chưa có đơn nào lỗ so với giá vốn." footer={<p className={styles.metricDisclaimer}>Cùng cách tính bảng món lỗ ở trên, cộng theo ngày đặt đơn và điểm bán của đơn, trên mọi đơn đã đối soát của cả hai nhà. Bấm tên nhà ở chú thích để ẩn / hiện đường.</p>} />
         <article className={`${styles.revenuePanel} ${styles.grabReconciliationPanel}`}>
           <div className={styles.revenuePanelTitle}><div><span>ĐỐI SOÁT ĐƠN SÀN · {RECONCILIATION_BUILD} · {bounds.label}</span><strong>{reconciliationDoneCount.toLocaleString("vi-VN")}/{reconciliationRowsView.length.toLocaleString("vi-VN")} đơn đã đối soát</strong></div><small>{percent(reconciliationRowsView.length ? reconciliationDoneCount / reconciliationRowsView.length * 100 : 0)} coverage</small></div>
+          <div className={overviewStyles.reconBoxes}>
+            <article className={overviewStyles.reconLead}><span>TỔNG DOANH THU SÀN</span><strong>{money(reconciliationTotals.revenue)}</strong><small>{reconciliationTotals.orders.toLocaleString("vi-VN")} đơn{multiOutlet ? ` · ${statementStores.map((store) => `${storeShortName(store.name)} ${money(reconciliationTotals.byStore.get(store.id) || 0)}`).join(" · ")}` : ""}{reconciliationTotals.pendingOrders ? ` · ${reconciliationTotals.pendingOrders} đơn chưa đối soát ${money(reconciliationTotals.pendingRevenue)}` : ""}</small></article>
+            <article><span>TỔNG THỰC NHẬN</span><strong>{money(reconciliationTotals.received)}</strong><small>{(reconciliationTotals.orders - reconciliationTotals.pendingOrders).toLocaleString("vi-VN")}/{reconciliationTotals.orders.toLocaleString("vi-VN")} đơn đã đối soát · sau quảng cáo {money(reconciliationTotals.received - reconciliationTotals.ads)}</small></article>
+            <article className={overviewStyles.reconGap}><span>GAP</span><strong>{reconciliationTotals.gap > 0 ? "−" : ""}{money(Math.abs(reconciliationTotals.gap))}</strong><small>{reconciliationTotals.reconciledRevenue ? `${percent(reconciliationTotals.gap / reconciliationTotals.reconciledRevenue * 100)} doanh thu đơn đã đối soát` : "chưa có đơn đối soát"} · chiết khấu {money(reconciliationTotals.commission)} · thuế {money(reconciliationTotals.tax)}{Math.abs(reconciliationTotals.other) >= 1000 ? ` · khác ${reconciliationTotals.other < 0 ? "−" : ""}${money(Math.abs(reconciliationTotals.other))}` : ""} · chưa gồm quảng cáo {money(reconciliationTotals.ads)}</small></article>
+          </div>
           <div className={styles.grabIngestRow}>
             <label className={`${styles.grabPdfUpload} ${importingGrabReport ? styles.importing : ""}`}><input type="file" accept="application/pdf,.pdf,.csv,.xlsx" multiple disabled={importingGrabReport} onChange={(event) => void importGrabReportPdf(event)} /><span>{importingGrabReport ? "Đang đọc báo cáo…" : "⇧ Upload báo cáo sàn (Grab PDF · Shopee CSV · GreenSM xlsx)"}</span></label>
             {onLocalMachine
@@ -3948,7 +4008,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
               <button type="button" key={value} className={reconciliationPlatform === value ? styles.selected : ""} onClick={() => setReconciliationPlatform(value)}>{label}<b>{(value === "all" ? reconciliationRowsView.length : reconciliationRowsView.filter((row) => row.platformKey === value).length).toLocaleString("vi-VN")}</b></button>
             ))}
           </div>
-          <div className={styles.filterSummary}>[{RECONCILIATION_BUILD}] kỳ {bounds.start}→{bounds.end} · SAPO {viewPlatformOrders.length} đơn ({new Set(viewPlatformOrders.map((entry) => entry.id)).size} id duy nhất){scope !== "all" ? ` · ${scopeLabel}` : ""} · ngoài kỳ lọt vào: {reconciliationRowsView.filter((row) => !inRange(row.order.orderDate, bounds)).length} · Đang hiện <b>{reconciliationDayGroups.reduce((sum, day) => sum + day.rows.length, 0).toLocaleString("vi-VN")}</b>{reconciliationItemFilter ? "" : ` / ${reconciliationRowsView.length.toLocaleString("vi-VN")}`} đơn · {reconciliationFilter === "all" ? "tất cả" : reconciliationFilter === "done" ? "đã đối soát" : "chưa đối soát"}{reconciliationLossOnly ? " · chỉ đơn lỗ so với giá vốn" : ""}{reconciliationItemFilter ? ` · đơn lỗ có món ${reconciliationItemFilter.name} · TOÀN BỘ LỊCH SỬ (bỏ qua kỳ)` : ` · ${bounds.label}`}</div>
+          <div className={styles.filterSummary}>[{RECONCILIATION_BUILD}] kỳ {bounds.start}→{bounds.end} · SAPO {allPlatformOrders.length} đơn ({new Set(allPlatformOrders.map((entry) => entry.id)).size} id duy nhất) · mọi điểm bán · ngoài kỳ lọt vào: {reconciliationRowsView.filter((row) => !inRange(row.order.orderDate, bounds)).length} · Đang hiện <b>{reconciliationDayGroups.reduce((sum, day) => sum + day.rows.length, 0).toLocaleString("vi-VN")}</b>{reconciliationItemFilter ? "" : ` / ${reconciliationRowsView.length.toLocaleString("vi-VN")}`} đơn · {reconciliationFilter === "all" ? "tất cả" : reconciliationFilter === "done" ? "đã đối soát" : "chưa đối soát"}{reconciliationLossOnly ? " · chỉ đơn lỗ so với giá vốn" : ""}{reconciliationItemFilter ? ` · đơn lỗ có món ${reconciliationItemFilter.name} · TOÀN BỘ LỊCH SỬ (bỏ qua kỳ)` : ` · ${bounds.label}`}</div>
           {reconciliationDayGroups.length ? <div className={styles.reconciliationTableWrap}><div className={styles.reconciliationTable}>
             <div className={styles.reconciliationTableHead}><span>Đơn</span><span>Doanh thu sàn</span><span>Sàn ghi nhận sau trừ</span><span>SAPO ghi nhận</span><span>Thực nhận</span>
               {([["counter", "So với quầy"], ["cogs", "So với giá vốn"]] as const).map(([key, label]) => (
@@ -3963,7 +4023,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                   <span className={styles.reconciliationDayCell}><b><i>{open ? "▾" : "▸"}</i>{dateLabel(day.date)}</b><small>{day.reconciled}/{day.orders} đã đối soát</small></span>
                   <span className={styles.reconciliationDayCounts}>
                     <b>{day.orders.toLocaleString("vi-VN")} đơn</b>
-                    <small>XanhSM <b>{day.byPlatform.greensm}</b> · Grab <b>{day.byPlatform.grab}</b> · Shopee <b>{day.byPlatform.shopee}</b></small>
+                    <small>XanhSM <b>{day.byPlatform.greensm}</b> · Grab <b>{day.byPlatform.grab}</b> · Shopee <b>{day.byPlatform.shopee}</b>{multiOutlet ? <> · {statementStores.filter((store) => day.byStore.get(store.id)).map((store) => `${storeShortName(store.name)} ${day.byStore.get(store.id)}`).join(" · ")}</> : null}</small>
                   </span>
                   <span className={styles.reconciliationDayMoney} title={day.pdfReports ? `Chi trả ${money(day.pdfPayout)} − quảng cáo ${money(day.marketing)}` : "Chưa có báo cáo sàn cho ngày này"}><small>Thực nhận (PDF)</small><b>{day.pdfNet === undefined ? "—" : money(day.pdfNet)}</b></span>
                   <span className={styles.reconciliationDayMoney} title={day.reconciled ? `Thực nhận ${day.reconciled} đơn ${money(day.reconciledReceived)} − quảng cáo ngày ${money(day.marketing)}` : "Chưa đối soát đơn nào"}><small>Thực nhận (đối soát)</small><b>{day.reconciledNet === undefined ? "—" : money(day.reconciledNet)}</b></span>
@@ -3983,7 +4043,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
                 {open && day.rows.map(({ order, reconciliation, reason }) => {
               if (!reconciliation) {
                 return <div className={`${styles.reconciliationTableRow} ${styles.pendingRow}`} key={order.id}>
-                  <button type="button" onClick={() => openPlatformReconciliation(order)}><b>{order.orderCode}</b><small>{dateLabel(order.orderDate)} · {order.channelName}</small></button>
+                  <button type="button" onClick={() => openPlatformReconciliation(order)}><b>{multiOutlet && <i className={overviewStyles.storeBadge} style={{ background: outletColor(storeOfOrder(order.id)) }}>{storeShortName(storeLabel(storeOfOrder(order.id)))}</i>}{order.orderCode}</b><small>{dateLabel(order.orderDate)} · {order.channelName}</small></button>
                   <span>{order.goodsAmount ? money(order.goodsAmount) : "—"}</span>
                   <span className={styles.pendingReason} title={reason}>{reason}</span>
                   <span>{money(order.reportedAmount)}</span>
@@ -3995,7 +4055,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
               }
               const journey = reconciliationJourney(reconciliation);
               return <div className={styles.reconciliationTableRow} key={reconciliation.id}>
-                <button type="button" onClick={() => editGrabReconciliation(reconciliation)}><b>{reconciliation.orderCode}</b><small>{multiOutlet && scope === "all" ? `${storeLabel(storeOfReconciliation(reconciliation))} · ` : ""}{isNonSapoId(reconciliation.platformOrderId) ? "ngoài SAPO · " : ""}{(reconciliation.settlement?.platform || reconciliation.platform || "grab") !== "grab" ? `${MARKETPLACE_LABELS[reconciliation.settlement?.platform || reconciliation.platform || "grab"]} · ` : ""}{reconciliation.settlement?.grabOrderCode ? `${reconciliation.settlement.grabOrderCode} · ` : ""}{dateLabel(reconciliation.orderDate)}{reconciliation.settlement ? (reconciliation.settlement.matchQuality === "amount-only" ? " · ⚠ khớp lỏng" : "") : " · tay"}</small></button>
+                <button type="button" onClick={() => editGrabReconciliation(reconciliation)}><b>{multiOutlet && <i className={overviewStyles.storeBadge} style={{ background: outletColor(storeOfReconciliation(reconciliation)) }}>{storeShortName(storeLabel(storeOfReconciliation(reconciliation)))}</i>}{reconciliation.orderCode}</b><small>{isNonSapoId(reconciliation.platformOrderId) ? "ngoài SAPO · " : ""}{(reconciliation.settlement?.platform || reconciliation.platform || "grab") !== "grab" ? `${MARKETPLACE_LABELS[reconciliation.settlement?.platform || reconciliation.platform || "grab"]} · ` : ""}{reconciliation.settlement?.grabOrderCode ? `${reconciliation.settlement.grabOrderCode} · ` : ""}{dateLabel(reconciliation.orderDate)}{reconciliation.settlement ? (reconciliation.settlement.matchQuality === "amount-only" ? " · ⚠ khớp lỏng" : "") : " · tay"}</small></button>
                 <span>{journey.listPrice ? money(journey.listPrice) : "—"}</span>
                 <span>{journey.settlement ? money(journey.grabPayout) : "—"}</span>
                 <span>{money(reconciliation.reportedAmount)}</span>
@@ -4271,7 +4331,19 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       <div className={styles.chartGrid}><article className={styles.costMixCard}><div><span>CƠ CẤU CHI PHÍ · {bounds.label.toUpperCase()}</span><strong>{money(totalPeriodExpense)}</strong></div><div className={styles.donut} style={{ background: `conic-gradient(#171916 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste) / totalPeriodExpense * 100 : 0}%, #887a5d 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste + fixedCost) / totalPeriodExpense * 100 : 0}%, #c9b896 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste + fixedCost + operatingCost) / totalPeriodExpense * 100 : 0}%, #e9dfca 0 100%)` }}><i>{grossMargin.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%<small>gross margin</small></i></div><div className={styles.legend}><span><i className={styles.legendDark} />NVL {money(inventoryCogs + inventoryWaste)}</span><span><i className={styles.legendBrown} />Cố định {money(fixedCost)}</span><span><i className={styles.legendSand} />Vận hành {money(operatingCost)}</span><span><i className={styles.legendCream} />Bán hàng {money(salesCost)}</span></div></article><article className={styles.forecastCard}><span>ĐỐI SOÁT & SỨC KHỎE</span><strong>{periodProducts.length && revenueDataset.length ? money(Math.abs(revenueProductGap)) : "Chưa đủ dữ liệu"}</strong><p>Chênh lệch giữa Doanh thu thực và Tổng tiền mặt hàng.</p><div><span>Doanh thu thực</span><b>{money(datasetRevenue)}</b></div><div><span>Tổng tiền mặt hàng</span><b>{money(productNetAmount)}</b></div><div><span>EBITDA {bounds.label}</span><b className={ebitda < 0 ? styles.redText : ""}>{money(ebitda)}</b></div><div><span>Tồn kho hiện tại</span><b>{money(closingInventory)}</b></div></article></div>
     </section>}
 
-    {showStoreConfig && onSaveStore && <StoreConfigSheet stores={stores} onClose={() => setShowStoreConfig(false)} onSave={onSaveStore} />}
+    {showStoreConfig && onSaveStore && <StoreConfigSheet stores={stores} onClose={() => setShowStoreConfig(false)} onSave={onSaveStore}>
+      {invoiceGroups.length > 0 && <details className={`${styles.revenuePanel} ${styles.invoiceGroups}`}>
+            <summary><span>ĐƠN TẠI QUẦY THEO ĐIỂM BÁN · {bounds.label}</span><strong>{invoiceGroups.length} nhóm · {invoiceGroups.reduce((sum, group) => sum + group.ids.length, 0)} đơn</strong></summary>
+            <p className={styles.metricDisclaimer}>Mỗi dòng là một nhóm đơn cùng ngày, cùng khu vực, cùng thu ngân. Chọn điểm bán để chuyển cả nhóm; lựa chọn được giữ qua mọi lần import lại. “Theo luật” bỏ lựa chọn tay.</p>
+            <div className={styles.storeTableWrap}><table className={styles.storeTable}><thead><tr><th>Ngày</th><th>Khu vực</th><th>Thu ngân</th><th className={styles.numberCell}>Đơn</th><th className={styles.numberCell}>Doanh thu</th><th>Điểm bán</th></tr></thead><tbody>
+              {invoiceGroups.map((group) => {
+                const uniform = group.stores.size === 1 ? [...group.stores][0] : "";
+                const manual = group.sources.has("manual");
+                return <tr key={group.key}><td>{dateLabel(group.date)}</td><td>{group.area || "—"}</td><td>{group.cashier || "—"}</td><td className={styles.numberCell}>{group.ids.length}</td><td className={styles.numberCell}>{money(group.revenue)}</td><td><select disabled={assigningOrders} value={uniform} aria-label={`Điểm bán của nhóm ${dateLabel(group.date)} ${group.area} ${group.cashier}`} onChange={(event) => void assignOrdersToStore(group.ids, event.target.value === "__rule" ? "" : event.target.value)}>{!uniform && <option value="">Nhiều điểm bán</option>}{outlets.map((store) => <option value={store.id} key={store.id}>{store.name}</option>)}{manual && <option value="__rule">Theo luật</option>}</select><small>{[...group.sources].map((source) => ATTRIBUTION_LABELS[source]).join(", ")}</small></td></tr>;
+              })}
+            </tbody></table></div>
+          </details>}
+    </StoreConfigSheet>}
     {showExpenseForm && <div className={styles.backdrop} role="presentation" onMouseDown={() => !savingExpense && setShowExpenseForm(false)}><form className={styles.sheet} onSubmit={saveExpense} onMouseDown={(event) => event.stopPropagation()}><div className={styles.sheetHandle} /><div className={styles.sheetTitle}><div><span>{editingExpenseId ? "CẬP NHẬT" : "GHI NHẬN"}</span><h2>{categoryLabels[expenseForm.category]}</h2></div><button disabled={savingExpense} type="button" onClick={() => setShowExpenseForm(false)}>×</button></div><label>Category<select value={expenseForm.category} onChange={(event) => setExpenseForm((current) => ({ ...current, category: event.target.value as ExpenseCategory, recurrence: event.target.value === "fixed" ? "monthly" : "once" }))}>{(Object.keys(categoryLabels) as ExpenseCategory[]).map((category) => <option value={category} key={category}>{categoryLabels[category]}</option>)}</select></label>{stores.length > 1 && <label>Ghi nhận cho<select value={expenseForm.storeId} onChange={(event) => setExpenseForm((current) => ({ ...current, storeId: event.target.value }))}><option value="">Toàn chuỗi (dùng chung, chia theo doanh thu)</option>{outlets.map((store) => <option value={store.id} key={store.id}>{store.name}</option>)}{expenseForm.storeId && !isOutletId(expenseForm.storeId) && <option value={expenseForm.storeId}>{storeLabel(expenseForm.storeId)}</option>}</select></label>}<label>Tên chi phí / tài sản<input autoFocus required value={expenseForm.name} onChange={(event) => { const name = event.target.value; setExpenseForm((current) => ({ ...current, name, storeId: current.storeId || storeFromExpenseName(stores, name) || "" })); }} placeholder="Ví dụ: Tiền thuê mặt bằng" /></label><div className={styles.formRow}><label>Subcategory<select required value={expenseForm.subcategoryIsCustom ? "__other" : expenseForm.subcategory} onChange={(event) => { const value = event.target.value; setExpenseForm((current) => ({ ...current, subcategoryIsCustom: value === "__other", subcategory: value === "__other" ? "" : value })); }}><option value="">Chọn subcategory</option>{subcategories.map((subcategory) => <option value={subcategory} key={subcategory}>{subcategory}</option>)}<option value="__other">Khác</option></select>{expenseForm.subcategoryIsCustom && <input required value={expenseForm.subcategory} onChange={(event) => setExpenseForm((current) => ({ ...current, subcategory: event.target.value }))} placeholder="Nhập subcategory mới" />}</label><label>Số tiền<input required inputMode="numeric" value={expenseForm.amount} onChange={(event) => setExpenseForm((current) => ({ ...current, amount: amountInput(event.target.value) }))} placeholder="15,000,000" /></label></div><div className={styles.formRow}><label>Ngày ghi nhận<VietnameseDateInput required value={expenseForm.incurredOn} onChange={(incurredOn) => setExpenseForm((current) => ({ ...current, incurredOn }))} /></label>{expenseForm.category !== "investment" && <label>Chu kỳ<select value={expenseForm.recurrence} onChange={(event) => setExpenseForm((current) => ({ ...current, recurrence: event.target.value as Recurrence }))}>{(Object.keys(recurrenceLabels) as Recurrence[]).map((recurrence) => <option value={recurrence} key={recurrence}>{recurrenceLabels[recurrence]}</option>)}</select></label>}</div>{expenseForm.category === "investment" && <><div className={styles.formRow}><label>Ngày sử dụng<VietnameseDateInput value={expenseForm.inServiceOn} onChange={(inServiceOn) => setExpenseForm((current) => ({ ...current, inServiceOn }))} /></label><label>Khấu hao (tháng)<input min="1" type="number" value={expenseForm.usefulLifeMonths} onChange={(event) => setExpenseForm((current) => ({ ...current, usefulLifeMonths: event.target.value }))} /></label></div><label>Giá trị thu hồi<input inputMode="numeric" value={expenseForm.salvageValue} onChange={(event) => setExpenseForm((current) => ({ ...current, salvageValue: amountInput(event.target.value) }))} /></label></>}<div className={styles.formRow}><label>Thanh toán<select value={expenseForm.paymentStatus} onChange={(event) => setExpenseForm((current) => ({ ...current, paymentStatus: event.target.value as PaymentStatus }))}>{(Object.keys(paymentLabels) as PaymentStatus[]).map((status) => <option value={status} key={status}>{paymentLabels[status]}</option>)}</select></label>{(expenseForm.paymentStatus === "paid" || expenseForm.recurrence !== "once") && <label>{expenseForm.recurrence === "once" ? "Ngày thanh toán" : "Ngày thanh toán theo chu kỳ"}<VietnameseDateInput required={expenseForm.recurrence !== "once"} value={expenseForm.paymentDate} onChange={(paymentDate) => setExpenseForm((current) => ({ ...current, paymentDate }))} /></label>}</div><div className={styles.formRow}><label>Mã hóa đơn<input value={expenseForm.invoiceCode} onChange={(event) => setExpenseForm((current) => ({ ...current, invoiceCode: event.target.value }))} /></label><label>Nhà cung cấp<select required value={expenseForm.vendorIsCustom ? "__other" : expenseForm.vendor} onChange={(event) => { const value = event.target.value; setExpenseForm((current) => ({ ...current, vendorIsCustom: value === "__other", vendor: value === "__other" ? "" : value })); }}><option value="">Chọn nhà cung cấp</option>{vendors.map((vendor) => <option value={vendor} key={vendor}>{vendor}</option>)}<option value="__other">Khác</option></select>{expenseForm.vendorIsCustom && <input required value={expenseForm.vendor} onChange={(event) => setExpenseForm((current) => ({ ...current, vendor: event.target.value }))} placeholder="Nhập nhà cung cấp mới" />}</label></div><fieldset className={styles.receiptField}><legend><span>Đính kèm hóa đơn{receiptPeriodText && <em className={styles.receiptPeriod}>{receiptPeriodText}</em>}</span><small>{receiptPeriodText ? `Khoản định kỳ: mỗi kỳ có hoá đơn riêng, tối đa ${RECEIPT_MAX_FILES} file mỗi kỳ. Hoá đơn kỳ khác: mở dòng của kỳ đó.` : `ảnh hoặc PDF, tối đa ${RECEIPT_MAX_FILES} file — để đối chiếu số tiền, nhà cung cấp và mã hoá đơn sau này`}</small></legend><div className={styles.receiptOptions}><label className={`${styles.receiptChoice} ${styles.receiptCamera}`}><input type="file" accept="image/*" capture="environment" disabled={savingExpense || preparingReceipts || expenseReceipts.length >= RECEIPT_MAX_FILES} onChange={(event) => void attachExpenseReceipts(event)} /><span aria-hidden="true">◎</span><b>Chụp bằng camera</b><small>Mỗi lần chụp thêm 1 ảnh</small></label><label className={styles.receiptChoice}><input type="file" accept="image/*,.pdf" multiple disabled={savingExpense || preparingReceipts || expenseReceipts.length >= RECEIPT_MAX_FILES} onChange={(event) => void attachExpenseReceipts(event)} /><span aria-hidden="true">⇧</span><b>Chọn ảnh / PDF</b><small>Chọn được nhiều file cùng lúc</small></label></div>{(expenseReceipts.length > 0 || preparingReceipts) && <div className={styles.receiptListHead}><b>{expenseReceipts.length}/{RECEIPT_MAX_FILES} file hoá đơn</b><small>{preparingReceipts ? "Đang xử lý ảnh…" : expenseReceipts.some((receipt) => receipt.file) ? `${expenseReceipts.filter((receipt) => receipt.file).length} file chưa lưu · lưu cùng chi phí khi bấm “${editingExpenseId ? "Lưu thay đổi" : "Ghi nhận chi phí"}”` : "Đã lưu cùng chi phí · chạm ảnh để mở"}</small></div>}{expenseReceipts.length > 0 && <ul className={styles.receiptList}>{expenseReceipts.map((receipt) => { const pdf = isPdfReceipt(receipt); const status = receipt.file ? "Chưa lưu" : receipt.viewError ? receipt.viewError : receiptRecurring && !receipt.period ? "Gắn chung mọi kỳ (trước đây)" : !receipt.dataUrl && uatMode ? "Chỉ có trên Production" : receipt.viewUrl ? "Đã lưu" : "Đang tải…"; return <li className={receipt.file ? styles.receiptPending : undefined} key={receipt.key}>{receipt.viewUrl ? <a className={pdf ? styles.receiptFileBadge : styles.receiptThumb} href={receipt.viewUrl} target="_blank" rel="noreferrer" title={`Mở ${receipt.name}`}>{pdf ? "PDF" : <img src={receipt.viewUrl} alt={`Hoá đơn ${receipt.name}`} />}</a> : <span className={styles.receiptFileBadge} title={status}>{pdf ? "PDF" : "ẢNH"}</span>}<b title={receipt.name}>{receipt.name}</b><small title={status}>{status}</small><button type="button" className={styles.receiptRemove} disabled={savingExpense} aria-label={`Bỏ hoá đơn ${receipt.name}`} title="Bỏ hoá đơn này" onClick={() => removeExpenseReceipt(receipt.key)}>×</button></li>; })}</ul>}</fieldset><label>Note<textarea value={expenseForm.note} onChange={(event) => setExpenseForm((current) => ({ ...current, note: event.target.value }))} placeholder="Ghi chú nội bộ" /></label><button disabled={savingExpense || preparingReceipts} className={styles.primaryButton} type="submit">{savingExpense ? "Đang lưu…" : preparingReceipts ? "Đang xử lý ảnh…" : editingExpenseId ? "Lưu thay đổi" : "Ghi nhận chi phí"}</button></form></div>}
 
   </div>;
@@ -4284,7 +4356,7 @@ function FinancialAccordion({ rows, revenueBase }: { rows: PnlRow[]; revenueBase
 /// "Cấu hình điểm bán": which stores sell, since when, which SAPO Khu vực /
 /// Thu ngân belong to them, and their sàn merchant accounts. Each store saves
 /// on its own so a typo in one never blocks another.
-function StoreConfigSheet({ stores, onClose, onSave }: { stores: CloudStore[]; onClose: () => void; onSave: (store: CloudStore) => Promise<void> }) {
+function StoreConfigSheet({ stores, onClose, onSave, children }: { stores: CloudStore[]; onClose: () => void; onSave: (store: CloudStore) => Promise<void>; children?: ReactNode }) {
   type Draft = { kind: "outlet" | "warehouse"; openedOn: string; areas: string; cashiers: string; accounts: StorePlatformAccount[] };
   const toDraft = (store: CloudStore): Draft => ({ kind: store.kind || "outlet", openedOn: store.openedOn || "", areas: (store.sapoAreas || []).join(", "), cashiers: (store.sapoCashiers || []).join(", "), accounts: (store.platformAccounts || []).map((account) => ({ ...account })) });
   const [drafts, setDrafts] = useState<Record<string, Draft>>(() => Object.fromEntries(stores.map((store) => [store.id, toDraft(store)])));
@@ -4339,6 +4411,7 @@ function StoreConfigSheet({ stores, onClose, onSave }: { stores: CloudStore[]; o
           <button type="button" className={styles.primaryButton} disabled={Boolean(savingId)} onClick={() => void save(store)}>{savingId === store.id ? "Đang lưu…" : `Lưu ${store.name}`}</button>
         </section>;
       })}
+      {children}
     </div>
   </div>;
 }
