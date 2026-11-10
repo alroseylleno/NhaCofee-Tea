@@ -258,10 +258,10 @@ export function RevenueStatement({ entries, stores, firstDate, latestDate, today
     if (totals.unsplit.some((value) => Math.abs(value) >= 1)) rows.push({ key: "d-unsplit", level: 2, label: "Chưa tách được (file hoá đơn chưa phủ kỳ này)", values: totals.unsplit });
     section("r", "2. Tiền thực nhận", received, totals.received);
     const fees = totals.san.map((value, position) => value - totals.pending[position] - totals.sanReceived[position] - totals.ads[position]);
-    rows.push({ key: "gap", level: 0, tone: "section", label: "3. Chưa về túi (1 − 2)", values: totals.revenue.map((value, position) => value - totals.received[position]) });
+    rows.push({ key: "gap", level: 0, tone: "section", label: "3. Sàn giữ lại (1 − 2)", values: totals.revenue.map((value, position) => value - totals.received[position]) });
     rows.push({ key: "gap-fees", level: 2, label: "Phí & thuế sàn", values: fees });
     rows.push({ key: "gap-ads", level: 2, label: "Quảng cáo sàn", values: totals.ads });
-    if (totals.pending.some((value) => value >= 1)) rows.push({ key: "gap-pending", level: 2, label: "Chờ báo cáo sàn (chưa biết thực nhận)", values: totals.pending });
+    if (totals.pending.some((value) => value >= 1)) rows.push({ key: "gap-pending", level: 2, label: "Chờ báo cáo sàn (tạm — báo cáo về thì chuyển lên dòng 2 và phí)", values: totals.pending });
     if (totals.unsplit.some((value) => Math.abs(value) >= 1)) rows.push({ key: "gap-unsplit", level: 2, label: "Chưa tách được", values: totals.unsplit });
     const ratio = (top: number[], bottom: number[]) => top.map((value, position) => bottom[position] ? value / bottom[position] * 100 : undefined);
     const sum = (row: number[]) => row.reduce((acc, value) => acc + value, 0);
