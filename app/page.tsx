@@ -5,6 +5,7 @@ import Image from "next/image";
 import type { Session } from "@supabase/supabase-js";
 import FinanceModule from "@/app/finance-module";
 import ProductMaster from "@/app/product-master";
+import StaffModule from "@/app/staff-module";
 import { ALL_RECIPE_UNITS, unitDefinition } from "@/lib/master-data";
 import { isSupabaseConfigured, supabase } from "@/lib/supabase";
 import { useUrlState } from "@/lib/use-url-state";
@@ -255,7 +256,7 @@ export default function Home() {
   const [settlementUsed, setSettlementUsed] = useState("");
   const [settlingPeriod, setSettlingPeriod] = useState(false);
   const [showForm, setShowForm] = useState(false);
-  const [workspace, setWorkspace] = useUrlState<"inventory" | "finance" | "products">("w", "inventory", ["inventory", "finance", "products"]);
+  const [workspace, setWorkspace] = useUrlState<"inventory" | "finance" | "products" | "staff">("w", "inventory", ["inventory", "finance", "products", "staff"]);
   const [tab, setTab] = useUrlState<"inventory" | "active" | "report">("kt", "inventory", ["inventory", "active", "report"]);
   const [inventoryView, setInventoryView] = useUrlState<"stock" | "active" | "used" | "wasted" | "unconverted">("kv", "stock", ["stock", "active", "used", "wasted", "unconverted"]);
   const [lifecycleFilter, setLifecycleFilter] = useState<LifecycleFilter>("active");
@@ -1344,7 +1345,7 @@ export default function Home() {
   // Same chip strip as Category, rendered inside each tab so it shares the content gutter.
   const storeChips = multiStore ? <div className="inventory-category-tabs" role="tablist" aria-label="Chọn kho">{activeStores.map((store) => <button type="button" role="tab" aria-selected={storeScope === store.id} className={storeScope === store.id ? "selected" : ""} onClick={() => setSelectedStore(store.id)} key={store.id}>{store.name}</button>)}<button type="button" role="tab" aria-selected={storeScope === "all"} className={storeScope === "all" ? "selected" : ""} onClick={() => setSelectedStore("all")}>Tất cả kho</button><button type="button" onClick={() => void addStore()}>＋ Thêm kho</button>{storeScope !== "all" && <button type="button" aria-label="Đổi tên kho đang chọn" title="Đổi tên kho đang chọn" onClick={() => void renameStore()}>✎</button>}</div> : null;
   return <main className="app-workspace">
-    {canAccessFinance && <nav className="module-switcher" aria-label="Khu vực quản lý"><button className={workspace === "inventory" ? "active" : ""} onClick={() => setWorkspace("inventory")}>Kho NVL</button><button className={workspace === "finance" ? "active" : ""} onClick={() => setWorkspace("finance")}>Tài chính</button><button className={workspace === "products" ? "active" : ""} onClick={() => setWorkspace("products")}>Sản phẩm</button></nav>}
+    {canAccessFinance && <nav className="module-switcher" aria-label="Khu vực quản lý"><button className={workspace === "inventory" ? "active" : ""} onClick={() => setWorkspace("inventory")}>Kho NVL</button><button className={workspace === "finance" ? "active" : ""} onClick={() => setWorkspace("finance")}>Tài chính</button><button className={workspace === "products" ? "active" : ""} onClick={() => setWorkspace("products")}>Sản phẩm</button><button className={workspace === "staff" ? "active" : ""} onClick={() => setWorkspace("staff")}>Chấm công</button></nav>}
     {workspace === "finance" && canAccessFinance ? <FinanceModule
       uatMode={isLocalUat}
       stores={stores}
@@ -1356,6 +1357,17 @@ export default function Home() {
     /> : workspace === "products" && canAccessFinance ? <ProductMaster
       uatMode={isLocalUat}
       inventoryLots={productInventoryLots}
+    /> : workspace === "staff" && canAccessFinance ? <StaffModule
+      uatMode={isLocalUat}
+      stores={stores}
+      onOpenFinance={() => {
+        // Lands on Ghi nhận chi phí › Chi phí vận hành, where the payroll rows are.
+        const url = new URL(window.location.href);
+        url.searchParams.delete("ft");
+        url.searchParams.set("fc", "operating");
+        window.history.replaceState(window.history.state, "", url);
+        setWorkspace("finance");
+      }}
     /> : <>
     <section className="hero">
       <div className="eyebrow">NHA COFFEE & TEA{multiStore ? ` · ${storeScope === "all" ? "TẤT CẢ KHO" : storeName(storeScope).toLocaleUpperCase("vi")}` : ""}</div>

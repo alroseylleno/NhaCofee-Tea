@@ -286,6 +286,11 @@ export type FinanceExpenseRecord = {
   /// Production keeps each file in the "bills" bucket (`path`); UAT keeps it in
   /// the browser (`dataUrl`).
   receipts?: FinanceExpenseReceipt[];
+  /// "payroll" = booked by Kết sổ in Chấm công (source_id = the closing). Its
+  /// amount, name, date and store belong to Chấm công: the database refuses
+  /// changing them here (migration 20261111000100). Absent = entered by hand.
+  source?: "manual" | "payroll";
+  sourceId?: string;
 };
 
 /// `period` ties a bill to one kỳ of a recurring cost (see expensePeriodOf); a
@@ -344,6 +349,12 @@ export type FinanceCloudState = {
   imports: FinanceImportMeta[];
 };
 
+/// Finance's UAT book. Chấm công (UAT) writes its payroll rows into it, the way
+/// close_staff_payroll writes finance_expenses on Production.
+export const FINANCE_UAT_STORAGE_KEY = "nha-ops-finance-uat-v2";
+
+export function isPayrollExpense(expense: Pick<FinanceExpenseRecord, "source">) { return expense.source === "payroll"; }
+
 function requireClient() {
   if (!supabase) throw new Error("Supabase chưa được cấu hình.");
   return supabase;
@@ -374,6 +385,8 @@ function expenseFromRow(row: Record<string, unknown>): FinanceExpenseRecord {
     status: row.status as FinanceExpenseRecord["status"],
     storeId: row.store_id ? String(row.store_id) : undefined,
     receipts: receiptsFromRow(row),
+    source: row.source === "payroll" ? "payroll" : undefined,
+    sourceId: row.source_id ? String(row.source_id) : undefined,
   };
 }
 
