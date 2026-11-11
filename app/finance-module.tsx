@@ -3835,6 +3835,26 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           </div>
           {statementStores.length > 1 && <TrendChart title={`${statementStores.map((store) => storeShortName(store.name)).join(" VS ")} · DOANH THU THUẦN`} series={revenueTrendSeries.compare} latestDate={revenueLatestDate} footer={<p className={styles.metricDisclaimer}>Online = GrabFood + ShopeeFood + GreenSM + Website; Offline = bán tại quầy. Điểm bán của từng đơn theo luật ở ⚙ Cấu hình điểm bán. Kỳ có * là kỳ đang chạy, vẽ nét đứt.</p>} />}
         </>}
+      </>}
+
+      {revenueSubTab === "products" && <>
+        <div className={styles.revenueHeader}>
+          <div><span>BÁO CÁO MẶT HÀNG</span><h2>{bounds.label}</h2><p>Hiển thị dữ liệu của file có kỳ báo cáo giao với bộ lọc đang chọn.</p></div>
+        </div>
+        {!periodProducts.length ? <div className={styles.revenueEmpty}><div>MH</div><h3>Chưa có báo cáo mặt hàng</h3><p>Chọn file tại Import Center phía trên. Hệ thống sẽ tự đưa báo cáo vào tab Mặt hàng.</p></div> : <>
+          <div className={styles.productKpis}><article><span>TỔNG TIỀN MẶT HÀNG</span><strong>{money(productNetAmount)}</strong><small>sau giảm giá</small></article><article><span>SẢN PHẨM BÁN</span><strong>{productQuantity.toLocaleString("vi-VN")}</strong><small>{periodProducts.length} SKU</small></article><article><span>DANH MỤC</span><strong>{categoryPerformance.length}</strong><small>nhóm sản phẩm</small></article><article><span>GIẢM GIÁ</span><strong>{money(productDiscountAmount)}</strong><small>{percent(productDiscountRate)} tiền hàng</small></article><article><span>TB/SẢN PHẨM</span><strong>{money(averageProductValue)}</strong><small>sau giảm giá</small></article></div>
+          <div className={styles.productVisualGrid}>
+            <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>DOANH THU THEO DANH MỤC</span><strong>{categoryPerformance.length} danh mục</strong></div></div><div className={styles.categoryBars}>{categoryPerformance.map((entry) => <div key={entry.name}><div><span><b>{entry.name}</b><small>{entry.quantity.toLocaleString("vi-VN")} SP · {entry.skuCount} SKU</small></span><strong>{money(entry.revenue)}</strong></div><div><i style={{ width: `${entry.revenue / maxCategoryRevenue * 100}%` }} /></div></div>)}</div></article>
+            <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>TOP MẶT HÀNG</span><strong>Theo tổng tiền</strong></div></div><div className={styles.topRevenueList}>{topProducts.map((entry, index) => <div key={entry.id}><i>{index + 1}</i><span><b>{entry.name} {entry.variant ? `· ${entry.variant}` : ""}</b><small>{entry.category} · {entry.quantity.toLocaleString("vi-VN")} SP</small></span><strong>{money(entry.totalAmount)}</strong></div>)}</div></article>
+          </div>
+          <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>MẶT HÀNG GIẢM GIÁ CAO</span><strong>Cần kiểm tra biên lợi nhuận</strong></div><small>% trên tiền hàng</small></div><div className={styles.discountProductList}>{highDiscountProducts.map((entry) => <div key={entry.id}><span><b>{entry.name} {entry.variant ? `· ${entry.variant}` : ""}</b><small>{entry.sku} · {money(entry.goodsAmount)} tiền hàng</small></span><strong>{percent(entry.goodsAmount ? entry.discountAmount / entry.goodsAmount * 100 : 0)}<small>{money(entry.discountAmount)}</small></strong></div>)}</div></article>
+        </>}
+      </>}
+
+      {revenueSubTab === "platform" && <>
+        <div className={styles.revenueHeader}>
+          <div><span>SÀN & ĐỐI SOÁT</span><h2>{bounds.label}</h2><p>Chỉ tính đơn sàn — Grab, ShopeeFood và Xanh/Green Food. Website và các kênh tự bán được tách riêng ở mục Kênh khác vì không chịu phí sàn và không phải đối soát. Đối soát tự đọc báo cáo quyết toán của từng sàn — Grab (PDF), ShopeeFood (CSV), GreenSM (xlsx); vẫn đối soát tay được từng đơn.</p></div>
+        </div>
         <div className={styles.revenueInsightGrid}>
           <article className={`${styles.revenuePanel} ${styles.fullSpanPanel}`}>
             <div className={styles.revenuePanelTitle}><div><span>DOANH THU THEO SÀN</span><strong>{channelPerformance.length ? `${channelPerformance.length} sàn đang bán` : "Chờ Danh sách hóa đơn"}</strong></div><small>Theo Nguồn đơn</small></div>
@@ -3916,26 +3936,6 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
             </> : <div className={styles.panelEmpty}>Chưa có báo cáo Grab nào trong khoảng đã chọn. Quét thư mục hoặc nới khoảng thời gian.</div>}
             <p className={styles.metricDisclaimer}>CPO trung bình = chi quảng cáo ÷ số đơn. CPO biên = (chi kỳ này − chi kỳ trước) ÷ (đơn kỳ này − đơn kỳ trước); khi chi tăng mà đơn không tăng thì không có số nào chia được, kỳ đó được đánh dấu BÃO HOÀ kèm số tiền đã đốt thêm — con số quyết định có nên tăng ngân sách hay không; còn lãi chừng nào nó nằm dưới ngưỡng hoà vốn. Ngưỡng hoà vốn = tiền sàn thực chuyển về mỗi đơn (quyết toán {money(adsTotals.avgOrderValue)}/đơn, trước quảng cáo) trừ giá vốn thật của giỏ hàng {money(adsCogs.perOrder)}/đơn, lấy từ công thức ở tab Sản phẩm ({adsCogs.ordersPriced}/{adsCogs.ordersSeen} đơn có giá vốn · {percent(adsCogs.coverage)} số món đã có công thức; món chưa có công thức được bỏ qua nên giá vốn này là mức sàn, sẽ sát hơn khi bạn nhập đủ công thức). Cột nền là trần quảng cáo bạn đặt trong Grab Ads — báo cáo quyết toán không chứa con số này nên phải khai ở ô Trần/ngày. Chỉ tính các dòng quảng cáo thật trong bảng Marketing — Automatic/Manual Keywords, mã ADS-xxx và Image Ads; phí dịch vụ co-fund (Đồng tài trợ đa tầng), GrabNgonRẻ và Thúc Đẩy Doanh Số bị loại vì là chi phí khuyến mãi, không phải quảng cáo. ShopeeFood và GreenSM không tính phí quảng cáo theo ngày nên không góp mặt.</p>
           </article>
-        </div>
-      </>}
-
-      {revenueSubTab === "products" && <>
-        <div className={styles.revenueHeader}>
-          <div><span>BÁO CÁO MẶT HÀNG</span><h2>{bounds.label}</h2><p>Hiển thị dữ liệu của file có kỳ báo cáo giao với bộ lọc đang chọn.</p></div>
-        </div>
-        {!periodProducts.length ? <div className={styles.revenueEmpty}><div>MH</div><h3>Chưa có báo cáo mặt hàng</h3><p>Chọn file tại Import Center phía trên. Hệ thống sẽ tự đưa báo cáo vào tab Mặt hàng.</p></div> : <>
-          <div className={styles.productKpis}><article><span>TỔNG TIỀN MẶT HÀNG</span><strong>{money(productNetAmount)}</strong><small>sau giảm giá</small></article><article><span>SẢN PHẨM BÁN</span><strong>{productQuantity.toLocaleString("vi-VN")}</strong><small>{periodProducts.length} SKU</small></article><article><span>DANH MỤC</span><strong>{categoryPerformance.length}</strong><small>nhóm sản phẩm</small></article><article><span>GIẢM GIÁ</span><strong>{money(productDiscountAmount)}</strong><small>{percent(productDiscountRate)} tiền hàng</small></article><article><span>TB/SẢN PHẨM</span><strong>{money(averageProductValue)}</strong><small>sau giảm giá</small></article></div>
-          <div className={styles.productVisualGrid}>
-            <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>DOANH THU THEO DANH MỤC</span><strong>{categoryPerformance.length} danh mục</strong></div></div><div className={styles.categoryBars}>{categoryPerformance.map((entry) => <div key={entry.name}><div><span><b>{entry.name}</b><small>{entry.quantity.toLocaleString("vi-VN")} SP · {entry.skuCount} SKU</small></span><strong>{money(entry.revenue)}</strong></div><div><i style={{ width: `${entry.revenue / maxCategoryRevenue * 100}%` }} /></div></div>)}</div></article>
-            <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>TOP MẶT HÀNG</span><strong>Theo tổng tiền</strong></div></div><div className={styles.topRevenueList}>{topProducts.map((entry, index) => <div key={entry.id}><i>{index + 1}</i><span><b>{entry.name} {entry.variant ? `· ${entry.variant}` : ""}</b><small>{entry.category} · {entry.quantity.toLocaleString("vi-VN")} SP</small></span><strong>{money(entry.totalAmount)}</strong></div>)}</div></article>
-          </div>
-          <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>MẶT HÀNG GIẢM GIÁ CAO</span><strong>Cần kiểm tra biên lợi nhuận</strong></div><small>% trên tiền hàng</small></div><div className={styles.discountProductList}>{highDiscountProducts.map((entry) => <div key={entry.id}><span><b>{entry.name} {entry.variant ? `· ${entry.variant}` : ""}</b><small>{entry.sku} · {money(entry.goodsAmount)} tiền hàng</small></span><strong>{percent(entry.goodsAmount ? entry.discountAmount / entry.goodsAmount * 100 : 0)}<small>{money(entry.discountAmount)}</small></strong></div>)}</div></article>
-        </>}
-      </>}
-
-      {revenueSubTab === "platform" && <>
-        <div className={styles.revenueHeader}>
-          <div><span>SÀN & ĐỐI SOÁT</span><h2>{bounds.label}</h2><p>Chỉ tính đơn sàn — Grab, ShopeeFood và Xanh/Green Food. Website và các kênh tự bán được tách riêng ở mục Kênh khác vì không chịu phí sàn và không phải đối soát. Đối soát tự đọc báo cáo quyết toán của từng sàn — Grab (PDF), ShopeeFood (CSV), GreenSM (xlsx); vẫn đối soát tay được từng đơn.</p></div>
         </div>
         <div className={styles.revenueInsightGrid}>
           <article className={`${styles.revenuePanel} ${styles.marketplaceFeeCard}`}>
