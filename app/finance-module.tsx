@@ -52,6 +52,7 @@ import { useUrlState } from "@/lib/use-url-state";
 import styles from "./finance.module.css";
 import { RevenueStatement, TrendChart, storeShortName, type LedgerChannel, type LedgerEntry, type StatementStore } from "./revenue-overview";
 import overviewStyles from "./revenue-overview.module.css";
+import { PnlStatement, type PnlEntry, type PnlStore } from "./pnl-statement";
 
 export type FinanceInventoryLot = {
   id: string;
@@ -973,6 +974,21 @@ function expenseOccurrences(expense: ExpenseRecord, bounds: PeriodBounds) {
   return dates;
 }
 
+/// The P&L line a period cost lands on (Báo cáo tài chính → Kết quả kinh
+/// doanh, Long 12/11/2026). The subcategory decides first — ice and other
+/// ingredients bought outside the kho ("NL pha chế") are cost of goods, rent,
+/// tax and advertising have their own lines — then the category. Compared on
+/// NFC lower case WITH diacritics: folded, "Thuế" and "Thuê" are the same word.
+export type PnlCostLine = "cogsRetail" | "rent" | "tax" | "ads" | "fixedOther" | "operating" | "salesOther";
+function pnlLineOf(expense: Pick<ExpenseRecord, "category" | "subcategory">): PnlCostLine {
+  const sub = String(expense.subcategory || "").normalize("NFC").trim().toLocaleLowerCase("vi");
+  if (sub === "nl pha chế" || sub === "nvl mua lẻ") return "cogsRetail";
+  if (sub === "thuê mặt bằng") return "rent";
+  if (sub.startsWith("thuế") || sub.includes("lệ phí")) return "tax";
+  if (sub.includes("quảng cáo")) return "ads";
+  return expense.category === "fixed" ? "fixedOther" : expense.category === "operating" ? "operating" : "salesOther";
+}
+
 function depreciationForAsset(asset: ExpenseRecord, bounds: PeriodBounds) {
   if (asset.category !== "investment" || asset.status === "voided" || !asset.inServiceOn || !asset.usefulLifeMonths) return 0;
   const monthly = Math.max(0, asset.amount - (asset.salvageValue || 0)) / asset.usefulLifeMonths;
@@ -1084,14 +1100,20 @@ function buildPlatformCostModel(dailyReports: FinanceGrabDailyReportRecord[], re
     // later zero-marketing report must never overwrite Grab's spend.
     if (inRange(report.reportDate, bounds)) marketingByDate.set(report.reportDate, (marketingByDate.get(report.reportDate) || 0) + report.totalMarketing);
   }
-  const settledByDate = new Map<string, { commission: number; tax: number; shipSupport: number }>();
+  // A reconciled day costs exactly what the sàn kept: SAPO's amount minus the
+  // money that landed. Commission and tax are named from the settlement; the
+  // rest of that gap is "other". The settlement's ship-support figure is NOT a
+  // further deduction: on 190 of 213 Grab orders carrying it, SAPO − received
+  // equals commission + tax to the đồng (it already sits inside SAPO's amount),
+  // so adding it counted it twice (T9/2026 +338.000đ).
+  const settledByDate = new Map<string, { commission: number; tax: number; measured: number }>();
   for (const entry of reconciliations) {
     const settlement = entry.settlement;
     if (!settlement || !inRange(entry.orderDate, bounds)) continue;
-    const current = settledByDate.get(entry.orderDate) || { commission: 0, tax: 0, shipSupport: 0 };
+    const current = settledByDate.get(entry.orderDate) || { commission: 0, tax: 0, measured: 0 };
     current.commission += settlement.grabCommission;
     current.tax += settlement.vatTax + settlement.incomeTax;
-    current.shipSupport += settlement.shippingSupport;
+    current.measured += entry.reportedAmount - entry.receivedAmount;
     settledByDate.set(entry.orderDate, current);
   }
   const dates = new Set<string>([...marketingByDate.keys(), ...settledByDate.keys(), ...revenueDataset.map((entry) => entry.date)]);
@@ -1099,23 +1121,23 @@ function buildPlatformCostModel(dailyReports: FinanceGrabDailyReportRecord[], re
     const settled = settledByDate.get(date);
     const marketing = marketingByDate.get(date) || 0;
     if (settled) {
-      return { date, source: "doi-soat" as const, commission: settled.commission, tax: settled.tax, shipSupport: settled.shipSupport, marketing };
+      return { date, source: "doi-soat" as const, commission: settled.commission, tax: settled.tax, other: settled.measured - settled.commission - settled.tax, marketing };
     }
     const sapoDay = revenueDataset.find((entry) => entry.date === date);
     const sapoFee = sapoDay?.platformFees || 0;
     if (sapoFee > 0 || marketing > 0) {
       // SAPO's fee column bundles commission and withheld tax; it cannot be
       // split, so it lands whole on the commission line, labelled an estimate.
-      return { date, source: "sapo" as const, commission: sapoFee, tax: 0, shipSupport: 0, marketing };
+      return { date, source: "sapo" as const, commission: sapoFee, tax: 0, other: 0, marketing };
     }
-    return { date, source: "none" as const, commission: 0, tax: 0, shipSupport: 0, marketing: 0 };
+    return { date, source: "none" as const, commission: 0, tax: 0, other: 0, marketing: 0 };
   }).filter((day) => day.source !== "none");
-  const total = (key: "commission" | "tax" | "shipSupport" | "marketing") => days.reduce((sum, day) => sum + day[key], 0);
+  const total = (key: "commission" | "tax" | "other" | "marketing") => days.reduce((sum, day) => sum + day[key], 0);
   return {
     days,
     commission: total("commission"),
     tax: total("tax"),
-    shipSupport: total("shipSupport"),
+    other: total("other"),
     marketing: total("marketing"),
     reconciledDays: days.filter((day) => day.source === "doi-soat").length,
   };
@@ -1656,23 +1678,26 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const inventoryIssued = inventoryEvents.filter((entry) => entry.kind === "cogs").reduce((sum, entry) => sum + entry.amount, 0);
   const inventoryWaste = inventoryEvents.filter((entry) => entry.kind === "waste").reduce((sum, entry) => sum + entry.amount, 0);
   const inventoryCogs = inventoryIssued - inventoryWaste;
-  const fixedCost = manualOccurrences.filter((entry) => entry.expense.category === "fixed").reduce((sum, entry) => sum + entry.amount, 0);
-  const operatingCost = manualOccurrences.filter((entry) => entry.expense.category === "operating").reduce((sum, entry) => sum + entry.amount, 0);
-  const salesManualCost = manualOccurrences.filter((entry) => entry.expense.category === "sales").reduce((sum, entry) => sum + entry.amount, 0);
+  // Ingredients bought outside the kho (ice: "NL pha chế") are cost of goods,
+  // whatever category they were entered under.
+  const retailNvlCost = manualOccurrences.filter((entry) => pnlLineOf(entry.expense) === "cogsRetail").reduce((sum, entry) => sum + entry.amount, 0);
+  const fixedCost = manualOccurrences.filter((entry) => entry.expense.category === "fixed" && pnlLineOf(entry.expense) !== "cogsRetail").reduce((sum, entry) => sum + entry.amount, 0);
+  const operatingCost = manualOccurrences.filter((entry) => entry.expense.category === "operating" && pnlLineOf(entry.expense) !== "cogsRetail").reduce((sum, entry) => sum + entry.amount, 0);
+  const salesManualCost = manualOccurrences.filter((entry) => entry.expense.category === "sales" && pnlLineOf(entry.expense) !== "cogsRetail").reduce((sum, entry) => sum + entry.amount, 0);
   /// The single source of truth for sàn costs in the P&L. Per day, prefer the
   /// reconciled Grab settlement (real money) and fall back to SAPO's day-level
   /// fee column; marketing exists only on the Grab side, SAPO never sees it.
   /// Marketing is taken at DAY level from grabDailyReports — never as the sum
   /// of per-order marketingAllocated, whose divisor includes unmatched orders.
   const platformCostModel = useMemo(() => buildPlatformCostModel(viewDailyReports, viewReconciliations, revenueDataset, bounds), [viewDailyReports, viewReconciliations, revenueDataset, bounds]);
-  const platformCostTotal = platformCostModel.commission + platformCostModel.tax + platformCostModel.shipSupport + platformCostModel.marketing;
+  const platformCostTotal = platformCostModel.commission + platformCostModel.tax + platformCostModel.other + platformCostModel.marketing;
   // platformCostModel REPLACES the old flat `platformFees` here — adding both
   // would double-count every reconciled day's commission.
   const salesCost = salesManualCost + platformCostTotal;
-  const grossProfit = netRevenue - inventoryCogs - inventoryWaste;
+  const grossProfit = netRevenue - inventoryCogs - inventoryWaste - retailNvlCost;
   const ebitda = grossProfit - fixedCost - operatingCost - salesCost;
   const operatingProfit = ebitda - depreciation;
-  const totalPeriodExpense = inventoryCogs + inventoryWaste + fixedCost + operatingCost + salesCost + depreciation;
+  const totalPeriodExpense = inventoryCogs + inventoryWaste + retailNvlCost + fixedCost + operatingCost + salesCost + depreciation;
   /// "Đã thanh toán" on a recurring cost describes the kỳ paid so far: a year
   /// view counted the November and December rent as already paid on 05/11.
   /// A kỳ whose payment date is still ahead is not money that left yet.
@@ -3285,8 +3310,8 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const discountDetails = periodRevenues.filter((entry) => entry.discounts).map((entry) => ({ label: "Giảm giá / voucher", date: entry.date, amount: -entry.discounts }));
   // One detail list per sàn-cost component, day by day, each row naming its
   // source so an estimated day is never mistaken for reconciled money.
-  const platformCostDetails = (key: "commission" | "tax" | "shipSupport" | "marketing", label: string): PnlDetail[] =>
-    platformCostModel.days.filter((day) => day[key] > 0).map((day) => ({
+  const platformCostDetails = (key: "commission" | "tax" | "other" | "marketing", label: string): PnlDetail[] =>
+    platformCostModel.days.filter((day) => Math.abs(day[key]) >= 1).map((day) => ({
       label: `${label} · ${day.source === "doi-soat" ? "đối soát" : "ước tính SAPO"}`,
       date: day.date,
       amount: -day[key],
@@ -3294,9 +3319,9 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const platformComponentRows = [
     { key: "commission" as const, label: "Chiết khấu sàn", value: platformCostModel.commission },
     { key: "tax" as const, label: "Thuế sàn nộp thay", value: platformCostModel.tax },
-    { key: "shipSupport" as const, label: "Tài trợ phí ship", value: platformCostModel.shipSupport },
+    { key: "other" as const, label: "Chênh khác (đo từ đối soát)", value: platformCostModel.other },
     { key: "marketing" as const, label: "Quảng cáo sàn", value: platformCostModel.marketing },
-  ].filter((component) => component.value > 0);
+  ].filter((component) => Math.abs(component.value) >= 1);
   const platformCostGroups: PnlGroup[] = platformComponentRows.map((component) => detailGroup(`${component.label} (${money(component.value)})`, platformCostDetails(component.key, component.label)));
   /// Every outlet's P&L plus the shared ("Toàn chuỗi") costs, for the
   /// comparison table and for the share of shared costs each outlet carries.
@@ -3320,15 +3345,16 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         if (wastedOn && inRange(wastedOn, bounds)) waste += lot.unitCost;
       }
       const occurrences = expenses.flatMap((expense) => expenseOccurrences(expense, bounds).map(() => expense));
-      const sumOf = (category: ExpenseCategory) => occurrences.filter((expense) => expense.category === category).reduce((sum, expense) => sum + expense.amount, 0);
+      const retail = occurrences.filter((expense) => pnlLineOf(expense) === "cogsRetail").reduce((sum, expense) => sum + expense.amount, 0);
+      const sumOf = (category: ExpenseCategory) => occurrences.filter((expense) => expense.category === category && pnlLineOf(expense) !== "cogsRetail").reduce((sum, expense) => sum + expense.amount, 0);
       const model = reports.length || reconciliations.length || rows.length ? buildPlatformCostModel(reports, reconciliations, rows, bounds) : undefined;
-      const platform = model ? model.commission + model.tax + model.shipSupport + model.marketing : 0;
+      const platform = model ? model.commission + model.tax + model.other + model.marketing : 0;
       const fixed = sumOf("fixed");
       const operating = sumOf("operating");
       const sales = sumOf("sales") + platform;
       const depreciation = expenses.filter((expense) => expense.category === "investment").reduce((sum, asset) => sum + depreciationForAsset(asset, bounds), 0);
-      // Same shape as the P&L lines: F = C − (issued − waste) − waste.
-      const grossProfit = net - issued;
+      // Same shape as the P&L lines: gross = revenue − (issued − waste) − waste − NVL mua lẻ.
+      const grossProfit = net - issued - retail;
       const ebitda = grossProfit - fixed - operating - sales;
       return { key, net, issued, fixed, operating, sales, depreciation, grossProfit, ebitda, operatingProfit: ebitda - depreciation };
     };
@@ -3358,6 +3384,79 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const sharedExpenseOccurrences = useMemo(() => activeExpenses.filter((expense) => !isOutletId(expense.storeId) && expense.category !== "investment").flatMap((expense) => expenseOccurrences(expense, bounds).map((date) => ({ expense, date, amount: expense.amount }))),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [activeExpenses, bounds, outlets]);
+
+  /// Báo cáo tài chính → Kết quả kinh doanh theo tháng: every đồng of the P&L
+  /// as a dated entry on one line, one outlet ("shared" = Toàn chuỗi costs and
+  /// kho that do not sell) and one group, over the whole history; the statement
+  /// buckets them. Always Toàn chuỗi with N1 / N2 inside every line (Long,
+  /// 12/11/2026). Same rules as the period P&L above: NVL by recognition month,
+  /// costs by occurrence, assets depreciated month by month, sàn costs from
+  /// each outlet's own reports and đối soát.
+  const pnlLedger = useMemo((): PnlEntry[] => {
+    const entries: PnlEntry[] = [];
+    const place = (id?: string) => isOutletId(id) ? id! : "shared";
+    const lastDay = `${today.slice(0, 7)}-${String(daysInMonth(Number(today.slice(0, 4)), Number(today.slice(5, 7)))).padStart(2, "0")}`;
+    const range: PeriodBounds = { start: "2000-01-01", end: lastDay, label: "", key: "all" };
+    const channelName: Record<string, string> = { website: "Website", grab: "GrabFood", shopee: "ShopeeFood", greensm: "GreenSM", befood: "beFood", gofood: "GoFood", other: "Sàn khác" };
+    for (const entry of revenueLedger) {
+      if (!entry.revenue) continue;
+      if (entry.channel === "unsplit") { entries.push({ date: entry.date, line: "revenue", storeId: "shared", group: "Chưa tách được (hoá đơn chưa phủ)", amount: entry.revenue }); continue; }
+      entries.push({ date: entry.date, line: "revenue", storeId: place(entry.storeId), group: entry.channel === "quay" ? "Offline · tại quầy" : "Online", item: entry.channel === "quay" ? undefined : channelName[entry.channel], amount: entry.revenue });
+    }
+    const lotsById = new Map(inventoryLots.map((lot) => [lot.id, lot]));
+    for (const session of inventorySessions) {
+      const lot = lotsById.get(session.sourceReceiptId);
+      if (!lot) continue;
+      const storeId = place(lotStoreId(lot));
+      const group = lot.category.trim() || "KHÁC";
+      const openedOn = session.costRecognitionMonth ? `${session.costRecognitionMonth}-01` : session.activatedAt.slice(0, 10);
+      const cost = session.recognizedCost ?? lot.unitCost;
+      entries.push({ date: openedOn, line: "cogsIssued", storeId, group, item: lot.name, amount: cost });
+      // A wasted unit moves its opening cost from Xuất dùng to Hao hụt in the
+      // month it was thrown away (inventoryCogs = issued − waste, as above).
+      const wastedOn = session.status === "wasted" ? session.closedAt?.slice(0, 10) : undefined;
+      if (wastedOn) {
+        entries.push({ date: wastedOn, line: "cogsIssued", storeId, group, item: lot.name, amount: -cost });
+        entries.push({ date: wastedOn, line: "cogsWaste", storeId, group, item: lot.name, amount: cost });
+      }
+    }
+    const firstMonth = (statementFirstDate || today).slice(0, 7);
+    const months: string[] = [];
+    for (let cursor = firstMonth, guard = 0; cursor <= today.slice(0, 7) && guard < 240; guard += 1) {
+      months.push(cursor);
+      const [year, month] = cursor.split("-").map(Number);
+      cursor = month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, "0")}`;
+    }
+    for (const expense of activeExpenses) {
+      if (expense.category === "investment") {
+        for (const month of months) {
+          const amount = depreciationForAsset(expense, { start: `${month}-01`, end: `${month}-28`, label: "", key: month });
+          if (amount) entries.push({ date: `${month}-01`, line: "depreciation", storeId: place(expense.storeId), group: expense.subcategory || "Khác", item: expense.name, amount });
+        }
+        continue;
+      }
+      const line = pnlLineOf(expense);
+      const grouped = line === "operating" || line === "salesOther" || line === "fixedOther";
+      for (const date of expenseOccurrences(expense, range)) entries.push({ date, line, storeId: place(expense.storeId), group: grouped ? expense.subcategory || "Khác" : expense.name, item: grouped ? expense.name : undefined, amount: expense.amount });
+    }
+    for (const store of outlets) {
+      const model = buildPlatformCostModel(
+        state.grabDailyReports.filter((report) => (report.storeId || fallbackStoreId) === store.id),
+        allReconciliations.filter((entry) => storeOfReconciliation(entry) === store.id),
+        multiOutlet ? revenueRowsFor(store.id) : revenueRowsFor("all"),
+        range,
+      );
+      for (const day of model.days) {
+        const push = (group: string, amount: number) => { if (Math.abs(amount) >= 0.5) entries.push({ date: day.date, line: "platform", storeId: store.id, group, amount }); };
+        if (day.source === "sapo") push("Phí sàn ước tính theo SAPO (ngày chưa đối soát)", day.commission);
+        else { push("Chiết khấu sàn", day.commission); push("Thuế sàn nộp thay", day.tax); push("Chênh khác (đo từ đối soát)", day.other); }
+        push("Quảng cáo sàn", day.marketing);
+      }
+    }
+    return entries;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revenueLedger, inventoryLots, inventorySessions, activeExpenses, state.grabDailyReports, allReconciliations, outlets, multiOutlet, orderStores, stores, statementFirstDate, today, fallbackStoreId]);
+  const pnlStores = useMemo((): PnlStore[] => statementStores.map((store) => ({ id: store.id, name: store.name, color: store.color })), [statementStores]);
 
   const pnlRows: PnlRow[] = [
     { code: "A", label: "Doanh thu gộp", value: grossRevenue, tone: "income", details: revenueDetails, groups: [detailGroup("Bán hàng", revenueDetails)], itemCount: revenueDetails.length },
@@ -4271,7 +4370,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     {tab === "report" && <section className={styles.content}>
       <div className={styles.reportHeader}><div><span>BÁO CÁO QUẢN TRỊ F&B</span><h2>{bounds.label}</h2></div><button className={currentPeriodClosed ? styles.reopenButton : styles.closePeriodButton} onClick={togglePeriodClose}>{currentPeriodClosed ? "Mở lại kỳ" : "Khóa sổ kỳ"}</button></div>
       <div className={styles.reportTabs}>{(["pnl", "cash", "inventory", "assets"] as ReportView[]).map((view) => <button className={reportView === view ? styles.selected : ""} key={view} onClick={() => setReportView(view)}>{view === "pnl" ? "P&L" : view === "cash" ? "Dòng tiền" : view === "inventory" ? "Tồn kho" : "Tài sản & khấu hao"}</button>)}</div>
-      {reportView === "pnl" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article className={styles.visualPrimary}><span>DOANH THU THUẦN</span><strong>{money(netRevenue)}</strong><small>{revenueDetails.length} dòng doanh thu</small></article><article><span>LỢI NHUẬN GỘP</span><strong>{money(grossProfit)}</strong><small>{percent(grossMargin)} gross margin</small></article><article className={operatingProfit < 0 ? styles.visualRisk : ""}><span>LỢI NHUẬN HOẠT ĐỘNG</span><strong>{money(operatingProfit)}</strong><small>{netRevenue ? percent(operatingProfit / netRevenue * 100) : "-"} doanh thu</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>CƠ CẤU CHI PHÍ</span><h3>Chi phí đang tập trung ở đâu?</h3></div><b>{money(totalPeriodExpense)}</b></div><div className={styles.visualBars}>{pnlCostMix.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxPnlCost * 100}%` }} /></i><small>{totalPeriodExpense ? percent(entry.value / totalPeriodExpense * 100) : "0%"} tổng chi phí</small></div>)}</div></article></section>}
+      {reportView === "pnl" && <PnlStatement entries={pnlLedger} stores={pnlStores} firstDate={statementFirstDate} latestDate={revenueLatestDate} today={today} footer={<p className={styles.metricDisclaimer}>Luôn là Toàn chuỗi, không theo chip chi nhánh hay bộ lọc kỳ phía trên; mỗi dòng xổ ra Nhà 1, Nhà 2 và <b>Dùng chung</b> (chi phí ghi cho Toàn chuỗi, NVL ở kho không bán). <b>Doanh thu</b> = hoá đơn SAPO (bỏ đơn huỷ) + đơn sàn chưa vào SAPO. <b>NVL xuất dùng</b> theo tháng ghi nhận chi phí của từng lần mở; <b>NVL mua lẻ ngoài kho</b> = chi phí nhóm con NL pha chế (đá viên). <b>Nhân sự &amp; vận hành</b> = nhóm Vận hành. <b>Phí &amp; quảng cáo sàn</b>: ngày đã đối soát = SAPO ghi nhận − tiền sàn chuyển về (đo thật) + quảng cáo ngày; ngày chưa đối soát dùng phí SAPO ước tính. <b>Quảng cáo Facebook</b> = chi phí có nhóm con chứa "quảng cáo"; <b>Thuế &amp; lệ phí</b> = nhóm con Thuế &amp; lệ phí. <b>Khấu hao</b> = tài sản nhóm Đầu tư chia đều theo tháng sử dụng. Kỳ có * là kỳ đang chạy.</p>} />}
       {reportView === "cash" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article className={styles.visualPrimary}><span>TIỀN VÀO</span><strong>{money(cashIn)}</strong><small>{cashInDetails.length} dòng thu</small></article><article><span>TIỀN RA</span><strong>{money(cashOut)}</strong><small>{cashOutDetails.length} dòng chi</small></article><article className={netCash < 0 ? styles.visualRisk : ""}><span>DÒNG TIỀN THUẦN</span><strong>{money(netCash)}</strong><small>{cashIn ? percent(netCash / cashIn * 100) : "-"} tiền vào</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>TIỀN RA THEO NHÓM</span><h3>Dòng tiền đang đi vào đâu?</h3></div><b>{money(cashOut)}</b></div><div className={styles.visualBars}>{cashComponents.length ? cashComponents.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxCashComponent * 100}%` }} /></i><small>{cashOut ? percent(entry.value / cashOut * 100) : "0%"} tiền ra</small></div>) : <p>Chưa có dòng tiền ra trong kỳ.</p>}</div></article></section>}
       {reportView === "inventory" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article><span>TỒN ĐẦU KỲ</span><strong>{money(openingInventory)}</strong><small>{openingInventoryEntries.length} lô</small></article><article className={styles.visualPrimary}><span>TỒN CUỐI KỲ</span><strong>{money(closingInventory)}</strong><small>{closingInventoryEntries.length} lô còn giá trị</small></article><article><span>XUẤT KHỎI KHO</span><strong>{money(inventoryIssued)}</strong><small>dùng {money(inventoryCogs)} · hao hụt {money(inventoryWaste)}</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>CƠ CẤU TỒN CUỐI KỲ</span><h3>Category giữ nhiều giá trị nhất</h3></div><b>{closingCategoryValues.length} category</b></div><div className={styles.visualBars}>{closingCategoryValues.length ? closingCategoryValues.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxClosingCategory * 100}%` }} /></i><small>{closingInventory ? percent(entry.value / closingInventory * 100) : "0%"} tồn cuối kỳ</small></div>) : <p>Chưa có tồn kho cuối kỳ.</p>}</div></article></section>}
       {reportView === "assets" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article className={styles.visualPrimary}><span>NGUYÊN GIÁ</span><strong>{money(assetOriginalValue)}</strong><small>{assetsOwned.length} tài sản</small></article><article><span>ĐÃ KHẤU HAO</span><strong>{money(assetAccumulatedValue)}</strong><small>{assetOriginalValue ? percent(assetAccumulatedValue / assetOriginalValue * 100) : "0%"} nguyên giá</small></article><article><span>GIÁ TRỊ CÒN LẠI</span><strong>{money(assetRemainingValue)}</strong><small>Khấu hao kỳ {money(depreciation)}</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>CƠ CẤU TÀI SẢN</span><h3>Nguyên giá theo nhóm tài sản</h3></div><b>{assetCategoryValues.length} nhóm</b></div><div className={styles.visualBars}>{assetCategoryValues.length ? assetCategoryValues.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxAssetCategory * 100}%` }} /></i><small>{assetOriginalValue ? percent(entry.value / assetOriginalValue * 100) : "0%"} nguyên giá</small></div>) : <p>Chưa có tài sản trong kỳ.</p>}</div><div className={styles.assetValueTrack}><span>Giá trị còn lại</span><i><b style={{ width: `${assetOriginalValue ? assetRemainingValue / assetOriginalValue * 100 : 0}%` }} /></i><strong>{assetOriginalValue ? percent(assetRemainingValue / assetOriginalValue * 100) : "0%"}</strong></div></article></section>}
@@ -4295,40 +4394,6 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           <p className={styles.metricDisclaimer}>Mỗi điểm bán: doanh thu và đơn sàn của chính nó, NVL mở dùng tại kho của nó, chi phí và tài sản ghi nhận cho nó. Toàn chuỗi (dùng chung) = khoản ghi nhận cho Toàn chuỗi + NVL mở/hao hụt ở kho không bán, chia cho các điểm bán theo tỷ trọng doanh thu thuần (dòng M). Cột Cộng dòng L = {money(totalL)}{Math.abs(totalL - operatingProfit) >= 1 ? ` — lệch ${money(totalL - operatingProfit)} so với P&L Toàn chuỗi bên dưới vì doanh thu điểm bán lấy từ hoá đơn, Toàn chuỗi lấy từ SAPO tổng quan` : " = lợi nhuận hoạt động Toàn chuỗi bên dưới"}.</p>
         </article>;
       })()}
-      {reportView === "pnl" && (() => {
-        // The A → A' bridge: what the sàn booked versus what actually lands,
-        // itemised by the same components the P&L charges. A' here is derived
-        // (A minus modelled costs), so on partially reconciled periods it is an
-        // estimate — the coverage line says exactly how much is measured.
-        const sanRecorded = platformOrderRevenue;
-        if (!sanRecorded) return null;
-        const deductions = [
-          { label: "Chiết khấu sàn", value: platformCostModel.commission, tone: styles.segCommission },
-          { label: "Thuế sàn nộp thay", value: platformCostModel.tax, tone: styles.segTax },
-          { label: "Tài trợ phí ship", value: platformCostModel.shipSupport, tone: styles.segShip },
-          { label: "Quảng cáo sàn", value: platformCostModel.marketing, tone: styles.segMarketing },
-        ].filter((entry) => entry.value > 0);
-        const sanNet = sanRecorded - platformCostTotal;
-        const offlineRevenuePart = Math.max(0, netRevenue - sanRecorded);
-        const rate = (value: number) => (sanRecorded ? value / sanRecorded * 100 : 0);
-        return <article className={`${styles.revenuePanel} ${styles.bridgePanel}`}>
-          <div className={styles.revenuePanelTitle}><div><span>TỪ DOANH THU SÀN ĐẾN TIỀN THỰC VỀ</span><strong>{money(sanRecorded)} → {money(sanNet)}</strong></div><small>{percent(rate(sanNet))} số ghi nhận</small></div>
-          <div className={styles.journeyBar} aria-label={`Thực về ${percent(rate(sanNet))}`}>
-            {deductions.map((entry) => <i key={entry.label} className={entry.tone} style={{ width: `${Math.max(0, rate(entry.value))}%` }} title={`${entry.label} ${money(entry.value)}`} />)}
-            <b style={{ width: `${Math.max(0, rate(sanNet))}%` }} title={`Thực về ${money(sanNet)}`} />
-          </div>
-          <div className={styles.journeyList}>
-            <div><span><i className={styles.lineCode}>A</i><b>Doanh thu sàn ghi nhận</b></span><b>{money(sanRecorded)}</b><em>100%</em></div>
-            {deductions.map((entry, index) => <div key={entry.label}><span><i className={`${styles.lineCode} ${entry.tone}`}>{index + 1}</i>{entry.label}</span><b>−{money(entry.value)}</b><em>{percent(rate(entry.value))}</em></div>)}
-            <div className={styles.journeyPayout}><span><i className={styles.lineCode}>A&apos;</i>Thực về từ sàn<em className={styles.lineFormula}>A&apos; = A − ({deductions.map((_, index) => index + 1).join(" + ")})</em></span><b>{money(sanNet)}</b><em>{percent(rate(sanNet))}</em></div>
-            <div><span><i className={styles.lineCode}>B</i><b>Doanh thu offline</b><em className={styles.lineFormula}>B = Doanh thu thuần (C) − A</em></span><b>{money(offlineRevenuePart)}</b><em /></div>
-            <div className={styles.journeyPayout}><span><i className={styles.lineCode}>T</i>Tổng tiền bán hàng thực về<em className={styles.lineFormula}>T = A&apos; + B</em></span><b>{money(offlineRevenuePart + sanNet)}</b><em /></div>
-            <div className={styles.journeyPayout}><span><i className={styles.lineCode}>L</i>Lợi nhuận hoạt động sau tất cả<em className={styles.lineFormula}>L = J − K trong P&amp;L bên dưới</em></span><b className={operatingProfit < 0 ? styles.negativeCell : ""}>{money(operatingProfit)}</b><em>{netRevenue ? percent(operatingProfit / netRevenue * 100) : "—"}</em></div>
-          </div>
-          <p className={styles.metricDisclaimer}>{platformCostModel.reconciledDays}/{platformCostModel.days.length} ngày lấy từ đối soát Grab; những ngày còn lại dùng phí theo SAPO và <b>chưa gồm quảng cáo</b>, nên A&apos; của các ngày đó là ước tính lạc quan. Doanh thu thuần và các mục tiêu không đổi — toàn bộ chênh lệch nằm ở chi phí bán hàng &amp; nền tảng.</p>
-        </article>;
-      })()}
-      {reportView === "pnl" && <FinancialAccordion rows={pnlRows} revenueBase={netRevenue} />}
       {reportView === "cash" && <FinancialAccordion rows={cashRows} />}
       {reportView === "inventory" && <FinancialAccordion rows={inventoryRows} />}
       {reportView === "assets" && <FinancialAccordion rows={assetRows} />}

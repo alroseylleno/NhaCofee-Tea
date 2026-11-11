@@ -1,0 +1,33 @@
+/* Báo cáo tài chính → Kết quả kinh doanh (app/pnl-statement.tsx). The table
+   itself reuses .statement from revenue-overview.module.css. */
+
+.legend { color: #77756d; font: 10px/1.5 Arial, sans-serif; }
+.legend b { color: #1e4b3f; }
+
+.pnl td:first-child { min-width: 260px; }
+.percent { color: #6b766e; border-left: 1px solid #e0e7dd; }
+
+.toggle, .leaf { display: inline-flex; gap: 6px; align-items: center; padding: 0; border: 0; color: inherit; background: none; font: inherit; text-align: left; }
+.toggle { cursor: pointer; }
+.toggle i { display: inline-grid; flex: 0 0 auto; width: 14px; height: 14px; place-items: center; border: 1px solid #c9d3c5; border-radius: 3px; color: #1e4b3f; background: #fff; font: 700 10px/1 Arial, sans-serif; font-style: normal; }
+.leaf { padding-left: 20px; }
+.toggle b, .leaf b { display: inline-block; flex: 0 0 auto; width: 8px; height: 8px; border-radius: 2px; }
+.toggle:focus-visible { outline: 2px solid #2a78d6; outline-offset: 2px; border-radius: 3px; }
+
+.depth0 td:first-child { padding-left: 10px; }
+.depth1 td:first-child { padding-left: 26px; }
+.depth2 td:first-child { padding-left: 46px; }
+.depth3 td:first-child { padding-left: 66px; }
+.depth4 td:first-child { padding-left: 86px; }
+
+.lead td, .subtotal td { font-weight: 700; font-size: 12px; }
+.band { background: #eaf2e6 !important; }
+.band td { font-weight: 700; font-size: 12px; }
+.grand { background: #1e4b3f !important; }
+.grand td { color: #fff; font-weight: 700; font-size: 12px; }
+.grand .percent { color: #cfe0d1; }
+.grand .toggle i { border-color: #4f7d6c; color: #fff; background: #285a4d; }
+.store td { color: #3d4a42; }
+.group td, .item td { color: #6b766e; }
+.item td { font-size: 10.5px; }
+.note td { color: #6b766e; font-style: italic; border-top: 1px dashed #d9e2d6; }
