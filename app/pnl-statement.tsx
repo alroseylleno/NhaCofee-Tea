@@ -68,6 +68,8 @@ const ROWS: RowDef[] = [
   { kind: "total", key: "profit", label: "LÃI (LỖ) HOẠT ĐỘNG", value: profitOf, tone: "grand" },
 ];
 
+const DEFAULT_OPEN = ["revenue", "cogs", "gross", "opex", "ebitda", "depreciation"];
+
 function bucketKey(date: string, grain: Grain) {
   const year = date.slice(0, 4);
   if (grain === "year") return year;
@@ -111,7 +113,10 @@ export function PnlStatement({ entries, stores, channelCost = [], firstDate, lat
   onOpenExpense?: (id: string, date: string) => void; onOpenLot?: (id: string) => void;
 }) {
   const [grain, setGrain] = useState<Grain>("month");
-  const [open, setOpen] = useState<Set<string>>(() => new Set());
+  // The standard view Long set (12/11/2026): every section open one level —
+  // Doanh thu / LN gộp / EBITDA / Khấu hao by outlet, Giá vốn and Chi phí hoạt
+  // động by line — and LÃI (LỖ) closed. Deeper levels stay closed.
+  const [open, setOpen] = useState<Set<string>>(() => new Set(DEFAULT_OPEN));
   const [detail, setDetail] = useState<Detail>();
   const years = useMemo(() => {
     const first = firstDate || entries.map((entry) => entry.date).sort()[0];
@@ -349,7 +354,7 @@ export function PnlStatement({ entries, stores, channelCost = [], firstDate, lat
             <span>{[row.note, row.count > 1 ? `${row.count.toLocaleString("vi-VN")} ${row.ref?.kind === "lot" ? "lần" : row.ref ? "kỳ" : "hoá đơn"}` : ""].filter(Boolean).join(" · ")}</span>
             <b>{amountText(detail.sign * row.amount)}</b>
             {row.ref?.kind === "expense" && onOpenExpense ? <button type="button" onClick={() => onOpenExpense(row.ref!.id, row.date)}>Mở phiếu</button>
-              : row.ref?.kind === "lot" && onOpenLot ? <button type="button" onClick={() => { setDetail(undefined); onOpenLot(row.ref!.id); }}>Mở lô</button>
+              : row.ref?.kind === "lot" && onOpenLot ? <button type="button" onClick={() => onOpenLot(row.ref!.id)}>Mở lô</button>
               : <i />}
           </div>)}
         </div>
