@@ -31,3 +31,28 @@
 .group td, .item td { color: #6b766e; }
 .item td { font-size: 10.5px; }
 .note td { color: #6b766e; font-style: italic; border-top: 1px dashed #d9e2d6; }
+
+/* Last row of a branch: opens the detail popup. */
+.leafButton { display: inline-flex; gap: 6px; align-items: center; max-width: 100%; padding: 0 0 0 20px; border: 0; color: inherit; background: none; font: inherit; text-align: left; cursor: pointer; }
+.leafButton b { display: inline-block; flex: 0 0 auto; width: 8px; height: 8px; border-radius: 2px; }
+.leafButton span { text-decoration: underline; text-decoration-color: #c9d3c5; text-underline-offset: 3px; }
+.leafButton em { color: #8a958c; font-style: normal; }
+.leafButton:hover span { color: #1e4b3f; text-decoration-color: #1e4b3f; }
+.leafButton:focus-visible { outline: 2px solid #2a78d6; outline-offset: 2px; border-radius: 3px; }
+
+.detailSheet.detailSheet { display: grid; gap: 10px; width: min(720px, 100%); max-height: min(82vh, 760px); }
+.detailTotal { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+.detailTotal b { font-size: 18px; font-variant-numeric: tabular-nums; }
+.detailTotal small { color: #77756d; font: 10px Arial, sans-serif; }
+.detailList { display: grid; min-height: 0; overflow-y: auto; border: 1px solid #e0e7dd; border-radius: 10px; overscroll-behavior: contain; }
+.detailRow { display: grid; grid-template-columns: 86px minmax(0, 1fr) auto 76px; gap: 10px; align-items: center; padding: 8px 10px; border-top: 1px solid #eef1ea; font: 11px Arial, sans-serif; }
+.detailRow:first-child { border-top: 0; }
+.detailRow > span:first-child { color: #6b766e; font-variant-numeric: tabular-nums; }
+.detailRow > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; }
+.detailRow > b { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.detailRow > button { padding: 4px 8px; border: 1px solid #c9d3c5; border-radius: 7px; color: #1e4b3f; background: #fff; font: 700 10px Arial, sans-serif; cursor: pointer; }
+.detailRow > button:hover { background: #eaf2e6; }
+@media (max-width: 520px) {
+  .detailRow { grid-template-columns: 74px minmax(0, 1fr) auto; }
+  .detailRow > button, .detailRow > i { grid-column: 1 / -1; justify-self: end; }
+}
