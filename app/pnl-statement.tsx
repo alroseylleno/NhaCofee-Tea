@@ -17,6 +17,10 @@ export type PnlLineKey = "revenue" | "cogsIssued" | "cogsWaste" | "cogsRetail" |
 /// `storeId` is an outlet id or "shared" (Toàn chuỗi costs, kho that does not sell).
 export type PnlEntry = { date: string; line: PnlLineKey; storeId: string; group: string; item?: string; amount: number };
 export type PnlStore = { id: string; name: string; color: string };
+/// One invoice whose items all have a recipe: its revenue and its recipe cost
+/// (Product Master). Used only as the WEIGHT that splits an outlet's real cost
+/// of goods between Online and Offline; the real cost still comes from the kho.
+export type PnlChannelCost = { date: string; storeId: string; channel: "online" | "offline"; revenue: number; cost: number };
 type Grain = "month" | "quarter" | "year";
 type Totals = Record<PnlLineKey, number>;
 
@@ -31,14 +35,16 @@ const profitOf = (t: Totals) => ebitdaOf(t) - t.depreciation;
 
 type RowDef =
   | { kind: "line"; line: PnlLineKey; label: string; level: 0 | 1; hideIfEmpty?: boolean }
-  | { kind: "total"; key: string; label: string; value: (t: Totals) => number; tone: "subtotal" | "band" | "grand" };
+  | { kind: "total"; key: string; label: string; value: (t: Totals) => number; tone: "subtotal" | "band" | "grand"; parts?: Array<{ label: string; value: (t: Totals) => number }>; byChannel?: boolean };
 const ROWS: RowDef[] = [
   { kind: "line", line: "revenue", label: "1. Doanh thu bán hàng thuần", level: 0 },
   { kind: "line", line: "cogsIssued", label: "NVL xuất dùng (kho)", level: 1 },
   { kind: "line", line: "cogsWaste", label: "Hao hụt NVL", level: 1 },
   { kind: "line", line: "cogsRetail", label: "NVL mua lẻ ngoài kho", level: 1 },
-  { kind: "total", key: "cogs", label: "2. Giá vốn hàng bán", value: (t) => -cogsOf(t), tone: "subtotal" },
-  { kind: "total", key: "gross", label: "Lợi nhuận gộp", value: grossOf, tone: "band" },
+  { kind: "total", key: "cogs", label: "2. Giá vốn hàng bán", value: (t) => -cogsOf(t), tone: "subtotal", parts: [
+    { label: "NVL xuất dùng (kho)", value: (t) => -t.cogsIssued }, { label: "Hao hụt NVL", value: (t) => -t.cogsWaste }, { label: "NVL mua lẻ ngoài kho", value: (t) => -t.cogsRetail },
+  ] },
+  { kind: "total", key: "gross", label: "Lợi nhuận gộp", value: grossOf, tone: "band", byChannel: true },
   { kind: "line", line: "rent", label: "Thuê mặt bằng", level: 1 },
   { kind: "line", line: "operating", label: "Nhân sự & vận hành (lương, điện, nước…)", level: 1 },
   { kind: "line", line: "platform", label: "Phí & quảng cáo sàn giao hàng", level: 1 },
@@ -46,10 +52,18 @@ const ROWS: RowDef[] = [
   { kind: "line", line: "salesOther", label: "Chi phí bán hàng khác", level: 1 },
   { kind: "line", line: "tax", label: "Thuế & lệ phí", level: 1 },
   { kind: "line", line: "fixedOther", label: "Chi phí cố định khác", level: 1, hideIfEmpty: true },
-  { kind: "total", key: "opex", label: "3. Chi phí hoạt động", value: (t) => -opexOf(t), tone: "subtotal" },
-  { kind: "total", key: "ebitda", label: "EBITDA (trước khấu hao)", value: ebitdaOf, tone: "band" },
+  { kind: "total", key: "opex", label: "3. Chi phí hoạt động", value: (t) => -opexOf(t), tone: "subtotal", parts: [
+    { label: "Thuê mặt bằng", value: (t) => -t.rent }, { label: "Nhân sự & vận hành (lương, điện, nước…)", value: (t) => -t.operating },
+    { label: "Phí & quảng cáo sàn giao hàng", value: (t) => -t.platform }, { label: "Quảng cáo Facebook", value: (t) => -t.ads },
+    { label: "Chi phí bán hàng khác", value: (t) => -t.salesOther }, { label: "Thuế & lệ phí", value: (t) => -t.tax }, { label: "Chi phí cố định khác", value: (t) => -t.fixedOther },
+  ] },
+  { kind: "total", key: "ebitda", label: "EBITDA (trước khấu hao)", value: ebitdaOf, tone: "band", parts: [
+    { label: "Lợi nhuận gộp", value: grossOf }, { label: "Chi phí hoạt động", value: (t) => -opexOf(t) },
+  ] },
   { kind: "line", line: "depreciation", label: "Khấu hao tài sản & setup", level: 1 },
-  { kind: "total", key: "profit", label: "LÃI (LỖ) HOẠT ĐỘNG", value: profitOf, tone: "grand" },
+  { kind: "total", key: "profit", label: "LÃI (LỖ) HOẠT ĐỘNG", value: profitOf, tone: "grand", parts: [
+    { label: "EBITDA", value: ebitdaOf }, { label: "Khấu hao tài sản & setup", value: (t) => -t.depreciation },
+  ] },
 ];
 
 function bucketKey(date: string, grain: Grain) {
@@ -88,7 +102,7 @@ const dayLabel = (date: string) => `${date.slice(8, 10)}/${date.slice(5, 7)}`;
 
 type Row = { key: string; depth: number; label: ReactNode; values: number[]; cumulative: number; percent?: number; tone?: string; toggle?: boolean; open?: boolean };
 
-export function PnlStatement({ entries, stores, firstDate, latestDate, today, footer }: { entries: PnlEntry[]; stores: PnlStore[]; firstDate?: string; latestDate?: string; today: string; footer?: ReactNode }) {
+export function PnlStatement({ entries, stores, channelCost = [], firstDate, latestDate, today, footer }: { entries: PnlEntry[]; stores: PnlStore[]; channelCost?: PnlChannelCost[]; firstDate?: string; latestDate?: string; today: string; footer?: ReactNode }) {
   const [grain, setGrain] = useState<Grain>("month");
   const [open, setOpen] = useState<Set<string>>(() => new Set());
   const years = useMemo(() => {
@@ -146,6 +160,43 @@ export function PnlStatement({ entries, stores, firstDate, latestDate, today, fo
       return sum;
     });
     const sumRow = (values: number[]) => values.reduce((acc, value) => acc + value, 0);
+    // Recipe cost and revenue of fully priced invoices, per outlet × channel × column.
+    const weights = new Map<string, { revenue: number[]; cost: number[] }>();
+    for (const entry of channelCost) {
+      const position = index.get(bucketKey(entry.date, grain));
+      if (position === undefined) continue;
+      const key = `${entry.storeId}|${entry.channel}`;
+      const bag = weights.get(key) || { revenue: new Array(width).fill(0), cost: new Array(width).fill(0) };
+      bag.revenue[position] += entry.revenue;
+      bag.cost[position] += entry.cost;
+      weights.set(key, bag);
+    }
+    /// An outlet's gross profit by channel: channel revenue minus the outlet's
+    /// REAL cost of goods (kho + hao hụt + mua lẻ) split in proportion to what
+    /// each channel's sales cost by recipe. A channel without priced invoices
+    /// borrows the outlet's overall recipe rate; with no recipe at all the split
+    /// follows revenue. Cost in a column with no revenue stays unassigned.
+    const grossByChannel = (storeId: string) => {
+      const totals = byStore.get(storeId)!;
+      const revenueOf = (group: string) => groups.get(`revenue|${storeId}|${group}`) || new Array(width).fill(0);
+      const online = revenueOf("Online");
+      const offline = revenueOf("Offline · tại quầy");
+      const on = weights.get(`${storeId}|online`), off = weights.get(`${storeId}|offline`);
+      const result = { online: new Array(width).fill(0), offline: new Array(width).fill(0), unassigned: new Array(width).fill(0) };
+      for (let position = 0; position < width; position += 1) {
+        const cogs = cogsOf(totals[position]);
+        const rate = (bag?: { revenue: number[]; cost: number[] }) => bag && bag.revenue[position] > 0 ? bag.cost[position] / bag.revenue[position] : undefined;
+        const coveredRevenue = (on?.revenue[position] || 0) + (off?.revenue[position] || 0);
+        const overall = coveredRevenue > 0 ? ((on?.cost[position] || 0) + (off?.cost[position] || 0)) / coveredRevenue : 1;
+        const estimateOnline = online[position] * (rate(on) ?? overall);
+        const estimateOffline = offline[position] * (rate(off) ?? overall);
+        const estimate = estimateOnline + estimateOffline;
+        if (estimate <= 0) { result.unassigned[position] = -cogs; result.online[position] = online[position]; result.offline[position] = offline[position]; continue; }
+        result.online[position] = online[position] - cogs * estimateOnline / estimate;
+        result.offline[position] = offline[position] - cogs * estimateOffline / estimate;
+      }
+      return { ...result, revenueOnline: online, revenueOffline: offline };
+    };
     const revenueTotal = sumRow(chain.map((t) => t.revenue));
     const percentOf = (cumulative: number, cost: boolean) => revenueTotal ? (cost ? Math.abs(cumulative) : cumulative) / revenueTotal * 100 : undefined;
     const storeName = (id: string, line?: PnlLineKey) => id === "shared" ? (line === "revenue" ? "Chưa tách theo nhà" : "Dùng chung (Toàn chuỗi)") : stores.find((store) => store.id === id)?.name || id;
@@ -187,8 +238,23 @@ export function PnlStatement({ entries, stores, firstDate, latestDate, today, fo
         rows.push({ key: def.key, depth: 0, values, cumulative, percent: percentOf(cumulative, def.tone === "subtotal"), tone: def.tone, label: label(def.key, def.label, storeOrder.length > 0) });
         if (!open.has(def.key)) continue;
         for (const storeId of storeOrder) {
+          const storeKey = `${def.key}|${storeId}`;
           const storeValues = byStore.get(storeId)!.map(def.value);
-          rows.push({ key: `${def.key}|${storeId}`, depth: 1, values: storeValues, cumulative: sumRow(storeValues), percent: percentOf(sumRow(storeValues), def.tone === "subtotal"), tone: "store", label: label(`${def.key}|${storeId}`, storeName(storeId), false, storeColor(storeId)) });
+          if (storeValues.every((value) => Math.abs(value) < 0.5)) continue;
+          const children: Array<{ label: string; values: number[] }> = [];
+          if (def.byChannel && storeId !== "shared") {
+            const split = grossByChannel(storeId);
+            // The % DT column says what share of revenue each channel's gross profit is.
+            children.push({ label: "Online", values: split.online });
+            children.push({ label: "Offline · tại quầy", values: split.offline });
+            children.push({ label: "Giá vốn chưa có doanh thu đi kèm", values: split.unassigned });
+          } else if (def.parts) {
+            for (const part of def.parts) children.push({ label: part.label, values: byStore.get(storeId)!.map(part.value) });
+          }
+          const shown = children.filter((child) => child.values.some((value) => Math.abs(value) >= 0.5));
+          rows.push({ key: storeKey, depth: 1, values: storeValues, cumulative: sumRow(storeValues), percent: percentOf(sumRow(storeValues), def.tone === "subtotal"), tone: "store", label: label(storeKey, storeName(storeId), shown.length > 0, storeColor(storeId)) });
+          if (!open.has(storeKey)) continue;
+          for (const child of shown) rows.push({ key: `${storeKey}|${child.label}`, depth: 2, values: child.values, cumulative: sumRow(child.values), percent: percentOf(sumRow(child.values), def.tone === "subtotal"), tone: "group", label: label(`${storeKey}|${child.label}`, child.label, false) });
         }
       }
     }
@@ -198,7 +264,7 @@ export function PnlStatement({ entries, stores, firstDate, latestDate, today, fo
     const gross = chain.map(grossOf);
     const partial = latestDate ? columns.findIndex((key) => key === bucketKey(latestDate, grain) && latestDate < bucketEnd(key, grain)) : -1;
     return { columns, rows, cumulativeProfit, grossMargin: chain.map((t, position) => t.revenue ? gross[position] / t.revenue * 100 : undefined), totalMargin: revenueTotal ? sumRow(gross) / revenueTotal * 100 : undefined, partial, totalProfit: sumRow(chain.map(profitOf)), revenueTotal };
-  }, [entries, stores, grain, year, firstDate, latestDate, today, open]);
+  }, [entries, stores, channelCost, grain, year, firstDate, latestDate, today, open]);
 
   return <article className={`${shell.revenuePanel} ${table.statementPanel}`}>
     <div className={table.trendHead}>
