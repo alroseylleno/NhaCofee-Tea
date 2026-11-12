@@ -181,9 +181,13 @@ export function buildStoreLedger(lots: LedgerLot[], sessions: LedgerSession[], s
   }
 
   /// Stock value per store at `date`, with the per-lot amounts for the report.
+  /// `adjustments` are the merge windows on the parent lot (− where the parent
+  /// is, + where the merged child was), so entries + adjustments per store add
+  /// up to byStore.
   function stockAt(date: string, inclusive: boolean) {
     const byStore = new Map<string, number>();
     const entries: Array<{ lot: LedgerLot; storeId: string; amount: number }> = [];
+    const adjustments: Array<{ lot: LedgerLot; storeId: string; amount: number }> = [];
     for (const lot of lots) {
       const amount = lotValueAt(lot, date, inclusive);
       if (amount <= 0) continue;
@@ -197,8 +201,9 @@ export function buildStoreLedger(lots: LedgerLot[], sessions: LedgerSession[], s
       if (parentStore === window.storeId) continue;
       byStore.set(parentStore, (byStore.get(parentStore) || 0) - window.value);
       byStore.set(window.storeId, (byStore.get(window.storeId) || 0) + window.value);
+      adjustments.push({ lot: window.parent, storeId: parentStore, amount: -window.value }, { lot: window.parent, storeId: window.storeId, amount: window.value });
     }
-    return { byStore, entries };
+    return { byStore, entries, adjustments };
   }
 
   /// Every change of location inside [start, end], valued at the lot's value as

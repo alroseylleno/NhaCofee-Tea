@@ -65,3 +65,7 @@
 .assetCard b { font-variant-numeric: tabular-nums; }
 .assetCard p { grid-column: 1 / -1; color: #6b766e; }
 .assetCard > button { grid-column: 1 / -1; justify-self: start; padding: 5px 10px; border: 1px solid #c9d3c5; border-radius: 7px; color: #1e4b3f; background: #fff; font: 700 10px Arial, sans-serif; cursor: pointer; }
+
+/* Tài sản: section headers (I. Hàng tồn kho, II. Tài sản cố định) and the lot card. */
+.section td { padding-top: 14px; color: #1e4b3f; font: 700 10px Arial, sans-serif; letter-spacing: .06em; text-transform: uppercase; border-bottom: 1px solid #c9d3c5; }
+.lotCard { flex: 0 0 auto; overflow: visible; }
