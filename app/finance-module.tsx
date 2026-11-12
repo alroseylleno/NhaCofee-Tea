@@ -53,6 +53,8 @@ import styles from "./finance.module.css";
 import { RevenueStatement, TrendChart, storeShortName, type LedgerChannel, type LedgerEntry, type StatementStore } from "./revenue-overview";
 import overviewStyles from "./revenue-overview.module.css";
 import { PnlStatement, type PnlChannelCost, type PnlEntry, type PnlStore } from "./pnl-statement";
+import { AssetStatement, type AssetRecord } from "./asset-statement";
+import { RevenuePace } from "./revenue-pace";
 
 export type FinanceInventoryLot = {
   id: string;
@@ -87,7 +89,7 @@ export type FinanceInventorySession = {
   recognizedCost?: number;
 };
 
-type FinanceTab = "entry" | "revenue" | "report" | "dashboard";
+type FinanceTab = "entry" | "revenue" | "report";
 type PeriodMode = "month" | "quarter" | "year";
 type ExpenseCategory = "fixed" | "operating" | "sales" | "investment";
 type Recurrence = "once" | "weekly" | "monthly" | "quarterly" | "yearly";
@@ -1150,7 +1152,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
   const storageKey = uatMode ? FINANCE_UAT_STORAGE_KEY : FINANCE_STORAGE_KEY;
   const [state, setState] = useState<FinanceState>(() => uatMode ? seedFinanceState() : emptyFinanceState());
   const [loaded, setLoaded] = useState(false);
-  const [tab, setTab] = useUrlState<FinanceTab>("ft", "entry", ["entry", "revenue", "report", "dashboard"]);
+  const [tab, setTab] = useUrlState<FinanceTab>("ft", "entry", ["entry", "revenue", "report"]);
   const [periodMode, setPeriodMode] = useState<PeriodMode>("month");
   const [selectedMonth, setSelectedMonth] = useState(today.slice(0, 7));
   const [selectedQuarter, setSelectedQuarter] = useState(Math.floor((Number(today.slice(5, 7)) - 1) / 3) + 1);
@@ -3460,6 +3462,27 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     return entries;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [revenueLedger, inventoryLots, inventorySessions, activeExpenses, state.grabDailyReports, allReconciliations, outlets, multiOutlet, orderStores, stores, statementFirstDate, today, fallbackStoreId]);
+  /// Báo cáo tài chính → Tài sản & khấu hao: every asset (nhóm Đầu tư) with
+  /// its depreciation month by month, from the same depreciationForAsset as
+  /// the P&L, so Khấu hao there equals C here.
+  const assetRecords = useMemo((): AssetRecord[] => {
+    const assets = activeExpenses.filter((expense) => expense.category === "investment");
+    if (!assets.length) return [];
+    const start = [...assets.map(assetOwnedOn), statementFirstDate || today].sort()[0].slice(0, 7);
+    const months: string[] = [];
+    for (let cursor = start, guard = 0; cursor <= today.slice(0, 7) && guard < 240; guard += 1) {
+      months.push(cursor);
+      const [year, month] = cursor.split("-").map(Number);
+      cursor = month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, "0")}`;
+    }
+    return assets.map((asset) => ({
+      id: asset.id, name: asset.name, group: asset.subcategory || "Khác", storeId: isOutletId(asset.storeId) ? asset.storeId! : "shared",
+      cost: asset.amount, ownedOn: assetOwnedOn(asset), usefulLifeMonths: asset.usefulLifeMonths,
+      note: [asset.vendor, paymentLabels[asset.paymentStatus], asset.invoiceCode ? `HĐ ${asset.invoiceCode}` : "", asset.note].filter(Boolean).join(" · "),
+      depreciation: Object.fromEntries(months.map((month) => [month, depreciationForAsset(asset, { start: `${month}-01`, end: `${month}-28`, label: "", key: month })]).filter(([, amount]) => Number(amount) > 0)),
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeExpenses, statementFirstDate, today, outlets]);
   const pnlStores = useMemo((): PnlStore[] => statementStores.map((store) => ({ id: store.id, name: store.name, color: store.color })), [statementStores]);
   /// Weights for Lợi nhuận gộp → Online / Offline: every invoice whose items
   /// all have a recipe, with its revenue and recipe cost. Only the ratio is
@@ -3869,7 +3892,6 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       <button className={tab === "entry" ? styles.active : ""} onClick={() => setTab("entry")}>Ghi nhận chi phí</button>
       <button className={tab === "revenue" ? styles.active : ""} onClick={() => setTab("revenue")}>Doanh thu</button>
       <button className={tab === "report" ? styles.active : ""} onClick={() => setTab("report")}>Báo cáo tài chính</button>
-      <button className={tab === "dashboard" ? styles.active : ""} onClick={() => setTab("dashboard")}>Dashboard</button>
     </nav>
 
     {tab === "entry" && <section className={styles.content}>
@@ -3948,6 +3970,7 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
           <div><span>DOANH THU TỔNG QUAN</span><h2>Cả chuỗi · toàn bộ lịch sử</h2><p>Bảng và biểu đồ dưới đây đọc mọi điểm bán và mọi kỳ — không theo chip chi nhánh hay bộ lọc kỳ phía trên; mỗi cái có nút Tháng / Quý / Năm riêng.</p></div>
         </div>
         {!revenueLedger.length ? <div className={styles.revenueEmpty}><div>DT</div><h3>Chưa có báo cáo doanh thu</h3><p>Chọn file tại Import Center phía trên. Hệ thống sẽ tự đưa báo cáo vào tab Tổng quan.</p></div> : <>
+          <RevenuePace daily={revenueLedger.filter((entry) => entry.revenue).map((entry) => ({ date: entry.date, revenue: entry.revenue || 0 }))} latestDate={revenueLatestDate} today={today} targetAmount={state.revenueTargetAmount} growthPercent={state.growthTargetPercent} onTargetAmount={(amount) => setState((current) => ({ ...current, revenueTargetAmount: amount }))} onGrowthPercent={(value) => setState((current) => ({ ...current, growthTargetPercent: value }))} />
           <RevenueStatement entries={revenueLedger} stores={statementStores} firstDate={statementFirstDate} latestDate={revenueLatestDate} today={today} />
           <div className={overviewStyles.trendGrid}>
             {revenueTrendSeries.perStore.map(({ store, series }) => <TrendChart key={store.id} title={`${store.name.toLocaleUpperCase("vi")} · ONLINE VS OFFLINE`} note={store.openedOn ? `mở ${dateLabel(store.openedOn)}` : undefined} series={series} latestDate={revenueLatestDate} empty="Điểm bán này chưa có doanh thu." />)}
@@ -4393,46 +4416,11 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       {reportView === "pnl" && <PnlStatement entries={pnlLedger} stores={pnlStores} channelCost={pnlChannelCost} onOpenLot={onOpenInventoryLot} onOpenExpense={(id, date) => { const expense = state.expenses.find((entry) => entry.id === id); if (expense) openEditExpense(expense, expense.category === "investment" ? undefined : date); }} firstDate={statementFirstDate} latestDate={revenueLatestDate} today={today} footer={<p className={styles.metricDisclaimer}>Luôn là Toàn chuỗi, không theo chip chi nhánh hay bộ lọc kỳ phía trên; mỗi dòng xổ ra Nhà 1, Nhà 2 và <b>Dùng chung</b> (chi phí ghi cho Toàn chuỗi, NVL ở kho không bán). <b>Doanh thu</b> = hoá đơn SAPO (bỏ đơn huỷ) + đơn sàn chưa vào SAPO. <b>NVL xuất dùng</b> theo tháng ghi nhận chi phí của từng lần mở; <b>NVL mua lẻ ngoài kho</b> = chi phí nhóm con NL pha chế (đá viên). <b>Nhân sự &amp; vận hành</b> = nhóm Vận hành. <b>Phí &amp; quảng cáo sàn</b>: ngày đã đối soát = SAPO ghi nhận − tiền sàn chuyển về (đo thật) + quảng cáo ngày; ngày chưa đối soát dùng phí SAPO ước tính. <b>Quảng cáo Facebook</b> = chi phí có nhóm con chứa "quảng cáo"; <b>Thuế &amp; lệ phí</b> = nhóm con Thuế &amp; lệ phí. <b>Khấu hao</b> = tài sản nhóm Đầu tư chia đều theo tháng sử dụng. <b>Lợi nhuận gộp Online / Offline</b>: giá vốn thật của từng nhà chia theo giá vốn công thức (Quản lý sản phẩm) của các hoá đơn mỗi kênh, nên hai kênh cộng lại đúng bằng lợi nhuận gộp của nhà; lợi nhuận gộp Online chưa trừ phí và quảng cáo sàn (nằm ở Chi phí hoạt động). Kỳ có * là kỳ đang chạy.</p>} />}
       {reportView === "cash" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article className={styles.visualPrimary}><span>TIỀN VÀO</span><strong>{money(cashIn)}</strong><small>{cashInDetails.length} dòng thu</small></article><article><span>TIỀN RA</span><strong>{money(cashOut)}</strong><small>{cashOutDetails.length} dòng chi</small></article><article className={netCash < 0 ? styles.visualRisk : ""}><span>DÒNG TIỀN THUẦN</span><strong>{money(netCash)}</strong><small>{cashIn ? percent(netCash / cashIn * 100) : "-"} tiền vào</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>TIỀN RA THEO NHÓM</span><h3>Dòng tiền đang đi vào đâu?</h3></div><b>{money(cashOut)}</b></div><div className={styles.visualBars}>{cashComponents.length ? cashComponents.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxCashComponent * 100}%` }} /></i><small>{cashOut ? percent(entry.value / cashOut * 100) : "0%"} tiền ra</small></div>) : <p>Chưa có dòng tiền ra trong kỳ.</p>}</div></article></section>}
       {reportView === "inventory" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article><span>TỒN ĐẦU KỲ</span><strong>{money(openingInventory)}</strong><small>{openingInventoryEntries.length} lô</small></article><article className={styles.visualPrimary}><span>TỒN CUỐI KỲ</span><strong>{money(closingInventory)}</strong><small>{closingInventoryEntries.length} lô còn giá trị</small></article><article><span>XUẤT KHỎI KHO</span><strong>{money(inventoryIssued)}</strong><small>dùng {money(inventoryCogs)} · hao hụt {money(inventoryWaste)}</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>CƠ CẤU TỒN CUỐI KỲ</span><h3>Category giữ nhiều giá trị nhất</h3></div><b>{closingCategoryValues.length} category</b></div><div className={styles.visualBars}>{closingCategoryValues.length ? closingCategoryValues.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxClosingCategory * 100}%` }} /></i><small>{closingInventory ? percent(entry.value / closingInventory * 100) : "0%"} tồn cuối kỳ</small></div>) : <p>Chưa có tồn kho cuối kỳ.</p>}</div></article></section>}
-      {reportView === "assets" && <section className={styles.reportVisualization}><div className={styles.reportVisualKpis}><article className={styles.visualPrimary}><span>NGUYÊN GIÁ</span><strong>{money(assetOriginalValue)}</strong><small>{assetsOwned.length} tài sản</small></article><article><span>ĐÃ KHẤU HAO</span><strong>{money(assetAccumulatedValue)}</strong><small>{assetOriginalValue ? percent(assetAccumulatedValue / assetOriginalValue * 100) : "0%"} nguyên giá</small></article><article><span>GIÁ TRỊ CÒN LẠI</span><strong>{money(assetRemainingValue)}</strong><small>Khấu hao kỳ {money(depreciation)}</small></article></div><article className={styles.visualPanel}><div className={styles.visualPanelHead}><div><span>CƠ CẤU TÀI SẢN</span><h3>Nguyên giá theo nhóm tài sản</h3></div><b>{assetCategoryValues.length} nhóm</b></div><div className={styles.visualBars}>{assetCategoryValues.length ? assetCategoryValues.map((entry) => <div key={entry.label}><div><span>{entry.label}</span><b>{money(entry.value)}</b></div><i><b style={{ width: `${entry.value / maxAssetCategory * 100}%` }} /></i><small>{assetOriginalValue ? percent(entry.value / assetOriginalValue * 100) : "0%"} nguyên giá</small></div>) : <p>Chưa có tài sản trong kỳ.</p>}</div><div className={styles.assetValueTrack}><span>Giá trị còn lại</span><i><b style={{ width: `${assetOriginalValue ? assetRemainingValue / assetOriginalValue * 100 : 0}%` }} /></i><strong>{assetOriginalValue ? percent(assetRemainingValue / assetOriginalValue * 100) : "0%"}</strong></div></article></section>}
-      {reportView === "pnl" && scope === "all" && scopeSummaries && (() => {
-        const columns = [...scopeSummaries.outlets.map((row) => ({ key: row.key, label: storeLabel(row.key), row, allocated: -row.allocated, after: row.afterAllocation })), { key: "shared", label: "Toàn chuỗi (dùng chung)", row: scopeSummaries.shared, allocated: scopeSummaries.pool, after: scopeSummaries.shared.operatingProfit + scopeSummaries.pool }];
-        const lines: Array<{ code: string; label: string; value: (column: typeof columns[number]) => number; strong?: boolean }> = [
-          { code: "C", label: "Doanh thu thuần", value: (column) => column.row.net },
-          { code: "F", label: "Lợi nhuận gộp", value: (column) => column.row.grossProfit },
-          { code: "G+H+I", label: "Chi phí cố định, vận hành, bán hàng & sàn", value: (column) => -(column.row.fixed + column.row.operating + column.row.sales) },
-          { code: "K", label: "Khấu hao", value: (column) => -column.row.depreciation },
-          { code: "L", label: "Lợi nhuận trực tiếp", value: (column) => column.row.operatingProfit, strong: true },
-          { code: "M", label: "Chi phí chung phân bổ", value: (column) => column.allocated },
-          { code: "N", label: "Lợi nhuận sau phân bổ", value: (column) => column.after, strong: true },
-        ];
-        const totalL = columns.reduce((sum, column) => sum + column.row.operatingProfit, 0);
-        return <article className={`${styles.revenuePanel} ${styles.storeCompare}`}>
-          <div className={styles.revenuePanelTitle}><div><span>SO SÁNH ĐIỂM BÁN · {bounds.label}</span><strong>{scopeSummaries.outlets.map((row) => `${storeLabel(row.key)} ${percent(row.share * 100)}`).join(" · ")}</strong></div><small>tỷ trọng doanh thu thuần = tỷ lệ gánh chi phí chung</small></div>
-          <div className={styles.storeTableWrap}><table className={styles.storeTable}><thead><tr><th>Mã</th><th>Dòng</th>{columns.map((column) => <th className={styles.numberCell} key={column.key}>{column.label}</th>)}<th className={styles.numberCell}>Cộng</th></tr></thead><tbody>
-            {lines.map((line) => <tr key={line.code} className={line.strong ? styles.storeTableStrong : ""}><td>{line.code}</td><td>{line.label}</td>{columns.map((column) => { const value = line.value(column); return <td className={`${styles.numberCell} ${value < 0 ? styles.negativeCell : ""}`} key={column.key}>{money(value)}</td>; })}<td className={styles.numberCell}>{money(columns.reduce((sum, column) => sum + line.value(column), 0))}</td></tr>)}
-          </tbody></table></div>
-          <p className={styles.metricDisclaimer}>Mỗi điểm bán: doanh thu và đơn sàn của chính nó, NVL mở dùng tại kho của nó, chi phí và tài sản ghi nhận cho nó. Toàn chuỗi (dùng chung) = khoản ghi nhận cho Toàn chuỗi + NVL mở/hao hụt ở kho không bán, chia cho các điểm bán theo tỷ trọng doanh thu thuần (dòng M). Cột Cộng dòng L = {money(totalL)}{Math.abs(totalL - operatingProfit) >= 1 ? ` — lệch ${money(totalL - operatingProfit)} so với P&L Toàn chuỗi bên dưới vì doanh thu điểm bán lấy từ hoá đơn, Toàn chuỗi lấy từ SAPO tổng quan` : " = lợi nhuận hoạt động Toàn chuỗi bên dưới"}.</p>
-        </article>;
-      })()}
+      {reportView === "assets" && <AssetStatement assets={assetRecords} stores={pnlStores} firstDate={statementFirstDate} today={today} onOpenExpense={(id) => { const expense = state.expenses.find((entry) => entry.id === id); if (expense) openEditExpense(expense); }} footer={<p className={styles.metricDisclaimer}>Mọi khoản ghi ở Ghi nhận chi phí → Đầu tư ban đầu. Khấu hao chia đều theo số tháng khấu hao kể từ ngày bắt đầu dùng (giá trị thu hồi được trừ trước); khoản không có số tháng (tiền cọc) giữ nguyên giá trị. Khấu hao trong kỳ ở đây bằng dòng Khấu hao tài sản &amp; setup của Kết quả kinh doanh. Luôn là Toàn chuỗi, không theo chip chi nhánh hay bộ lọc kỳ phía trên.</p>} />}
       {reportView === "cash" && <FinancialAccordion rows={cashRows} />}
       {reportView === "inventory" && <FinancialAccordion rows={inventoryRows} />}
-      {reportView === "assets" && <FinancialAccordion rows={assetRows} />}
     </section>}
 
-    {tab === "dashboard" && <section className={`${styles.content} ${styles.dashboard}`}>
-      <div className={styles.dashboardActions}><div><span>DASHBOARD ĐIỀU HÀNH</span><h2>Hiệu quả kinh doanh</h2></div><button onClick={() => { setTab("revenue"); setRevenueSubTab(!periodProducts.length ? "products" : "overview"); }}>Nhập dữ liệu Excel</button></div>
-      <div className={styles.targetCard}><div><span>MỤC TIÊU DOANH THU</span><strong>{money(revenueTarget)}</strong><p>{manualRevenueTarget ? previousNetRevenue ? `Mục tiêu nhập trực tiếp · tương đương ${targetGrowthRate.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% so với ${money(previousNetRevenue)} kỳ trước` : "Mục tiêu doanh thu nhập trực tiếp." : previousNetRevenue ? `Tự tính tăng ${growthTargetPercent.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}% từ ${money(previousNetRevenue)} kỳ trước` : "Nhập mục tiêu doanh thu để bắt đầu theo dõi."}</p></div><div className={styles.targetPercent}>{targetProgress.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%</div><div className={styles.progressTrack}><i style={{ width: `${targetProgress}%` }} /></div><div className={styles.targetInputs}><label>Mục tiêu doanh thu (₫)<input inputMode="numeric" placeholder="Ví dụ: 50,000,000" value={manualRevenueTarget ? amountInput(String(manualRevenueTarget)) : ""} onChange={(event) => { const amount = parseAmount(event.target.value); setState((current) => scope === "all" ? { ...current, revenueTargetAmount: amount } : { ...current, storeRevenueTargets: { ...current.storeRevenueTargets, [scope]: amount } }); }} /></label><label>Tăng trưởng tự tính (%)<input min="0" step="0.1" type="number" value={state.growthTargetPercent} onChange={(event) => setState((current) => ({ ...current, growthTargetPercent: Math.max(0, Number(event.target.value) || 0), ...(scope === "all" ? { revenueTargetAmount: 0 } : { storeRevenueTargets: { ...current.storeRevenueTargets, [scope]: 0 } }) }))} /></label><div className={styles.targetAuto}><span>MỤC TIÊU LY TỰ TÍNH</span><strong>{cupTarget.toLocaleString("vi-VN")} ly</strong><small>≈ {money(baselineAveragePerCup)}/ly theo kỳ trước</small></div></div><p>Đã đạt {money(netRevenue)} · còn thiếu {money(revenueRemaining)}</p></div>
-      <div className={styles.kpiGrid}><article className={styles.averageCup}><span>Trung bình/đơn</span><strong>{money(averagePerOrder)}</strong><small>{totalReportedOrders.toLocaleString("vi-VN")} đơn toàn báo cáo</small></article><article><span>Trung bình/sản phẩm</span><strong>{money(averageProductValue || averagePerItem)}</strong><small>sau giảm giá</small></article><article><span>Sản phẩm bán</span><strong>{(productQuantity || datasetItems).toLocaleString("vi-VN")}</strong><small>{periodProducts.length || importedRevenueRows.length} dòng dữ liệu</small></article><article className={cancellationRate > 3 ? styles.attention : ""}><span>Tỷ lệ hủy đơn</span><strong>{percent(cancellationRate)}</strong><small>{cancelledOrders.toLocaleString("vi-VN")} đơn hủy</small></article><article className={productDiscountRate > 15 ? styles.attention : ""}><span>Tỷ lệ giảm giá</span><strong>{percent(productDiscountRate || discountRate)}</strong><small>{money(productDiscountAmount || reportedDiscountAmount)}</small></article><article><span>Gross margin</span><strong>{percent(grossMargin)}</strong><small>{bounds.label}</small></article></div>
-
-      <div className={styles.dashboardDataNote}><span>Doanh thu: <b>{revenueImport ? `${dateLabel(revenueImport.periodStart)} – ${dateLabel(revenueImport.periodEnd)}` : "chưa import"}</b></span><span>Mặt hàng: <b>{productsImport ? `${dateLabel(productsImport.periodStart)} – ${dateLabel(productsImport.periodEnd)}` : "chưa import"}</b></span><span>Phục vụ: <b>{serviceImport ? `${dateLabel(serviceImport.periodStart)} – ${dateLabel(serviceImport.periodEnd)}` : "chưa import"}</b></span><span>Hóa đơn: <b>{ordersImport ? `${dateLabel(ordersImport.periodStart)} – ${dateLabel(ordersImport.periodEnd)}` : "chưa import"}</b></span></div>
-
-      <div className={styles.productVisualGrid}>
-        <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>CƠ CẤU DOANH THU</span><strong>Theo danh mục</strong></div></div>{categoryPerformance.length ? <div className={styles.categoryBars}>{categoryPerformance.slice(0, 8).map((entry) => <div key={entry.name}><div><span><b>{entry.name}</b><small>{entry.quantity.toLocaleString("vi-VN")} sản phẩm</small></span><strong>{money(entry.revenue)}</strong></div><div><i style={{ width: `${entry.revenue / maxCategoryRevenue * 100}%` }} /></div></div>)}</div> : <div className={styles.panelEmpty}>Import Báo cáo mặt hàng để xem cơ cấu danh mục.</div>}</article>
-        <article className={styles.revenuePanel}><div className={styles.revenuePanelTitle}><div><span>TOP SẢN PHẨM</span><strong>Đóng góp doanh thu cao</strong></div></div>{topProducts.length ? <div className={styles.topRevenueList}>{topProducts.slice(0, 6).map((entry, index) => <div key={entry.id}><i>{index + 1}</i><span><b>{entry.name}</b><small>{entry.category} · {entry.quantity.toLocaleString("vi-VN")} SP</small></span><strong>{money(entry.totalAmount)}</strong></div>)}</div> : <div className={styles.panelEmpty}>Chưa có dữ liệu mặt hàng.</div>}</article>
-      </div>
-
-      <div className={styles.chartGrid}><article className={styles.costMixCard}><div><span>CƠ CẤU CHI PHÍ · {bounds.label.toUpperCase()}</span><strong>{money(totalPeriodExpense)}</strong></div><div className={styles.donut} style={{ background: `conic-gradient(#171916 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste) / totalPeriodExpense * 100 : 0}%, #887a5d 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste + fixedCost) / totalPeriodExpense * 100 : 0}%, #c9b896 0 ${totalPeriodExpense ? (inventoryCogs + inventoryWaste + fixedCost + operatingCost) / totalPeriodExpense * 100 : 0}%, #e9dfca 0 100%)` }}><i>{grossMargin.toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%<small>gross margin</small></i></div><div className={styles.legend}><span><i className={styles.legendDark} />NVL {money(inventoryCogs + inventoryWaste)}</span><span><i className={styles.legendBrown} />Cố định {money(fixedCost)}</span><span><i className={styles.legendSand} />Vận hành {money(operatingCost)}</span><span><i className={styles.legendCream} />Bán hàng {money(salesCost)}</span></div></article><article className={styles.forecastCard}><span>ĐỐI SOÁT & SỨC KHỎE</span><strong>{periodProducts.length && revenueDataset.length ? money(Math.abs(revenueProductGap)) : "Chưa đủ dữ liệu"}</strong><p>Chênh lệch giữa Doanh thu thực và Tổng tiền mặt hàng.</p><div><span>Doanh thu thực</span><b>{money(datasetRevenue)}</b></div><div><span>Tổng tiền mặt hàng</span><b>{money(productNetAmount)}</b></div><div><span>EBITDA {bounds.label}</span><b className={ebitda < 0 ? styles.redText : ""}>{money(ebitda)}</b></div><div><span>Tồn kho hiện tại</span><b>{money(closingInventory)}</b></div></article></div>
-    </section>}
 
     {showStoreConfig && onSaveStore && <StoreConfigSheet stores={stores} onClose={() => setShowStoreConfig(false)} onSave={onSaveStore}>
       {invoiceGroups.length > 0 && <details className={`${styles.revenuePanel} ${styles.invoiceGroups}`}>

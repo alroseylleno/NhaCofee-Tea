@@ -27,7 +27,7 @@ export type PnlStore = { id: string; name: string; color: string };
 /// (Product Master). Used only as the WEIGHT that splits an outlet's real cost
 /// of goods between Online and Offline; the real cost still comes from the kho.
 export type PnlChannelCost = { date: string; storeId: string; channel: "online" | "offline"; revenue: number; cost: number };
-type Grain = "month" | "quarter" | "year";
+export type Grain = "month" | "quarter" | "year";
 type Totals = Record<PnlLineKey, number>;
 
 const COST_LINES: PnlLineKey[] = ["cogsIssued", "cogsWaste", "cogsRetail", "rent", "operating", "platform", "ads", "salesOther", "tax", "fixedOther", "depreciation"];
@@ -70,21 +70,21 @@ const ROWS: RowDef[] = [
 
 const DEFAULT_OPEN = ["revenue", "cogs", "gross", "opex", "ebitda", "depreciation"];
 
-function bucketKey(date: string, grain: Grain) {
+export function bucketKey(date: string, grain: Grain) {
   const year = date.slice(0, 4);
   if (grain === "year") return year;
   return grain === "quarter" ? `${year}-Q${Math.ceil(Number(date.slice(5, 7)) / 3)}` : date.slice(0, 7);
 }
-function bucketLabel(key: string, grain: Grain) {
+export function bucketLabel(key: string, grain: Grain) {
   if (grain === "year") return key;
   return grain === "quarter" ? key.slice(5) : `T${Number(key.slice(5, 7))}`;
 }
-function bucketEnd(key: string, grain: Grain) {
+export function bucketEnd(key: string, grain: Grain) {
   const year = Number(key.slice(0, 4));
   const lastMonth = grain === "year" ? 12 : grain === "quarter" ? Number(key.slice(6)) * 3 : Number(key.slice(5, 7));
   return `${year}-${String(lastMonth).padStart(2, "0")}-${String(new Date(Date.UTC(year, lastMonth, 0)).getUTCDate()).padStart(2, "0")}`;
 }
-function bucketRange(first: string, last: string, grain: Grain) {
+export function bucketRange(first: string, last: string, grain: Grain) {
   const keys: string[] = [];
   let year = Number(first.slice(0, 4));
   let month = grain === "year" ? 1 : Number(first.slice(5, 7));
@@ -100,10 +100,10 @@ function bucketRange(first: string, last: string, grain: Grain) {
   }
   return keys;
 }
-const amountText = (value: number | undefined) => value === undefined ? "–" : Math.abs(value) < 0.5 ? "–" : value < 0 ? `(${Math.round(-value).toLocaleString("vi-VN")})` : Math.round(value).toLocaleString("vi-VN");
-const percentText = (value: number | undefined) => value === undefined || !Number.isFinite(value) ? "" : `${value < 0 ? "(" : ""}${Math.abs(value).toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%${value < 0 ? ")" : ""}`;
-const dayLabel = (date: string) => `${date.slice(8, 10)}/${date.slice(5, 7)}`;
-const fullDate = (date: string) => `${date.slice(8, 10)}/${date.slice(5, 7)}/${date.slice(0, 4)}`;
+export const amountText = (value: number | undefined) => value === undefined ? "–" : Math.abs(value) < 0.5 ? "–" : value < 0 ? `(${Math.round(-value).toLocaleString("vi-VN")})` : Math.round(value).toLocaleString("vi-VN");
+export const percentText = (value: number | undefined) => value === undefined || !Number.isFinite(value) ? "" : `${value < 0 ? "(" : ""}${Math.abs(value).toLocaleString("vi-VN", { maximumFractionDigits: 1 })}%${value < 0 ? ")" : ""}`;
+export const dayLabel = (date: string) => `${date.slice(8, 10)}/${date.slice(5, 7)}`;
+export const fullDate = (date: string) => `${date.slice(8, 10)}/${date.slice(5, 7)}/${date.slice(0, 4)}`;
 
 type Row = { key: string; depth: number; label: ReactNode; values: number[]; cumulative: number; percent?: number; tone?: string };
 type Detail = { key: string; title: string; path: string; sign: 1 | -1 };
