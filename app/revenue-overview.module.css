@@ -86,14 +86,21 @@
 .lossDetails[open] > summary small i { transform: rotate(90deg); }
 .lossDetails[open] > summary { margin-bottom: 10px; }
 
-/* Đối soát: three boxes + store badge */
-.reconBoxes { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
-.reconBoxes article { display: grid; gap: 4px; min-width: 0; padding: 12px 13px; border: 1px solid #dfe4d8; border-radius: 12px; background: #fff; }
-.reconBoxes article > span { color: #5d6a61; font: 700 9px Arial, sans-serif; letter-spacing: .08em; }
+/* Đối soát: boxes (chain row, then one row per outlet) + store badge */
+.reconBoxes { display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 700px) { .reconBoxes { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.reconBoxes article { display: grid; gap: 4px; align-content: start; min-width: 0; padding: 12px 13px; border: 1px solid #dfe4d8; border-radius: 12px; background: #fff; }
+.reconHead { display: flex; justify-content: space-between; gap: 8px; align-items: center; min-width: 0; }
+.reconHead > span { color: #5d6a61; font: 700 9px Arial, sans-serif; letter-spacing: .08em; }
+.reconPct { flex: 0 0 auto; padding: 2px 7px; border-radius: 999px; color: #1e4b3f; background: #e6f1e6; font: 700 11px Arial, sans-serif; font-style: normal; font-variant-numeric: tabular-nums; }
+.reconGap .reconPct { color: #b9433a; background: #fbecea; }
+.reconStore { border-left-width: 4px !important; background: #fbfcfa !important; }
+.reconMissing { color: #b9433a; font-weight: 700; }
+.nestedTrend { box-shadow: none; background: #fbfcfa; }
 .reconBoxes article > strong { font-size: clamp(16px, 4vw, 21px); letter-spacing: -.02em; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .reconBoxes article > small { color: #77756d; font: 9px/1.45 Arial, sans-serif; font-variant-numeric: tabular-nums; }
 .reconBoxes .reconLead { color: #fff; border-color: #285a4d; background: linear-gradient(135deg, #183d35, #276450); }
-.reconBoxes .reconLead > span, .reconBoxes .reconLead > small { color: #cfe0d1; }
+.reconBoxes .reconLead .reconHead > span, .reconBoxes .reconLead > small { color: #cfe0d1; }
 .reconBoxes .reconGap > strong { color: #b9433a; }
 .storeBadge { display: inline-block; margin-right: 5px; padding: 1px 5px; border-radius: 4px; color: #fff; font: 700 9px/1.4 Arial, sans-serif; vertical-align: 1px; }
 

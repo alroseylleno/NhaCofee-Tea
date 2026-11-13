@@ -7,9 +7,13 @@ import styles from "./revenue-overview.module.css";
 // Doanh thu → Tổng quan (statement + trend charts) and the trend charts of
 // Nền tảng. Pure presentation: finance-module.tsx decides which outlet and
 // channel every đồng belongs to and hands over dated entries; this file only
-// buckets them by month / quarter / year and draws them.
+// buckets them by day / week / month / quarter / year and draws them.
 
-export type TrendGrain = "month" | "quarter" | "year";
+export type TrendGrain = "day" | "week" | "month" | "quarter" | "year";
+/// The statement's columns and most charts; a chart may offer every grain.
+const DEFAULT_GRAINS: TrendGrain[] = ["month", "quarter", "year"];
+export const ALL_GRAINS: TrendGrain[] = ["day", "week", "month", "quarter", "year"];
+const GRAIN_LABELS: Record<TrendGrain, string> = { day: "Ngày", week: "Tuần", month: "Tháng", quarter: "Quý", year: "Năm" };
 export type LedgerChannel = "quay" | "website" | "grab" | "shopee" | "greensm" | "befood" | "gofood" | "other" | "unsplit";
 /// One dated amount. An invoice carries `revenue` (and `received` when the money
 /// lands at once — counter, Website); a sàn report carries `received` (payout −
@@ -31,21 +35,36 @@ function short(value: number) {
   return value < 0 ? `−${text}` : text;
 }
 function dayLabel(date: string) { return `${date.slice(8, 10)}/${date.slice(5, 7)}`; }
+const DAY_MS = 86_400_000;
+const dayTime = (date: string) => Date.UTC(Number(date.slice(0, 4)), Number(date.slice(5, 7)) - 1, Number(date.slice(8, 10)));
+const isoDay = (time: number) => new Date(time).toISOString().slice(0, 10);
+/// Weeks run Monday → Sunday, keyed by their Monday.
+const mondayOf = (date: string) => isoDay(dayTime(date) - ((new Date(dayTime(date)).getUTCDay() + 6) % 7) * DAY_MS);
 
-/// Bucket key of a day: "2026-07", "2026-Q3" or "2026".
+/// Bucket key of a day: the day itself, the Monday of its week, "2026-07",
+/// "2026-Q3" or "2026". Keys of one grain sort as strings.
 export function grainKey(date: string, grain: TrendGrain) {
+  if (grain === "day") return date.slice(0, 10);
+  if (grain === "week") return mondayOf(date);
   const year = date.slice(0, 4);
   if (grain === "year") return year;
   const month = Number(date.slice(5, 7));
   return grain === "quarter" ? `${year}-Q${Math.ceil(month / 3)}` : date.slice(0, 7);
 }
 function grainLabel(key: string, grain: TrendGrain, withYear: boolean) {
+  if (grain === "day" || grain === "week") return withYear ? `${dayLabel(key)}/${key.slice(2, 4)}` : dayLabel(key);
   if (grain === "year") return key;
   const year = key.slice(2, 4);
   if (grain === "quarter") return withYear ? `${key.slice(5)}/${year}` : key.slice(5);
   return withYear ? `T${Number(key.slice(5, 7))}/${year}` : `T${Number(key.slice(5, 7))}`;
 }
+/// Tooltip heading: a week names both ends.
+function grainTitle(key: string, grain: TrendGrain, withYear: boolean) {
+  return grain === "week" ? `Tuần ${grainLabel(key, grain, withYear)} – ${dayLabel(grainEnd(key, grain))}` : grainLabel(key, grain, withYear);
+}
 function grainEnd(key: string, grain: TrendGrain) {
+  if (grain === "day") return key;
+  if (grain === "week") return isoDay(dayTime(key) + 6 * DAY_MS);
   const year = Number(key.slice(0, 4));
   const lastMonth = grain === "year" ? 12 : grain === "quarter" ? Number(key.slice(6)) * 3 : Number(key.slice(5, 7));
   const lastDay = new Date(Date.UTC(year, lastMonth, 0)).getUTCDate();
@@ -54,6 +73,14 @@ function grainEnd(key: string, grain: TrendGrain) {
 /// Every bucket from the one holding `first` to the one holding `last`, in order.
 function grainRange(first: string, last: string, grain: TrendGrain) {
   const keys: string[] = [];
+  if (grain === "day" || grain === "week") {
+    const end = grainKey(last, grain);
+    for (let time = dayTime(grainKey(first, grain)), guard = 0; guard < 5000; guard += 1, time += (grain === "week" ? 7 : 1) * DAY_MS) {
+      keys.push(isoDay(time));
+      if (keys[keys.length - 1] >= end) break;
+    }
+    return keys;
+  }
   let year = Number(first.slice(0, 4));
   let month = grain === "year" ? 1 : Number(first.slice(5, 7));
   if (grain === "quarter") month = (Math.ceil(month / 3) - 1) * 3 + 1;
@@ -69,19 +96,20 @@ function grainRange(first: string, last: string, grain: TrendGrain) {
   return keys;
 }
 
-export function GrainToggle({ value, onChange, label = "Gom theo" }: { value: TrendGrain; onChange: (grain: TrendGrain) => void; label?: string }) {
+export function GrainToggle({ value, onChange, label = "Gom theo", grains = DEFAULT_GRAINS }: { value: TrendGrain; onChange: (grain: TrendGrain) => void; label?: string; grains?: TrendGrain[] }) {
   return <div className={styles.grain} role="group" aria-label={label}>
-    {([["month", "Tháng"], ["quarter", "Quý"], ["year", "Năm"]] as const).map(([grain, text]) => (
-      <button type="button" key={grain} aria-pressed={value === grain} className={value === grain ? styles.grainOn : undefined} onClick={() => onChange(grain)}>{text}</button>
+    {grains.map((grain) => (
+      <button type="button" key={grain} aria-pressed={value === grain} className={value === grain ? styles.grainOn : undefined} onClick={() => onChange(grain)}>{GRAIN_LABELS[grain]}</button>
     ))}
   </div>;
 }
 
-/// Line chart over time with its own Tháng / Quý / Năm control. The bucket that
-/// holds `latestDate` but ends after it is still running: its segment is dashed
-/// and its label carries a star, so eight days of November never read as a crash.
-export function TrendChart({ title, headline, note, series, latestDate, empty, footer }: { title: string; headline?: string; note?: string; series: TrendSeries[]; latestDate?: string; empty?: string; footer?: ReactNode }) {
-  const [grain, setGrain] = useState<TrendGrain>("month");
+/// Line chart over time with its own grain control (Tháng / Quý / Năm unless
+/// `grains` offers more). The bucket that holds `latestDate` but ends after it
+/// is still running: its segment is dashed and its label carries a star, so
+/// eight days of November never read as a crash.
+export function TrendChart({ title, headline, note, series, latestDate, empty, footer, grains = DEFAULT_GRAINS, defaultGrain = "month", className }: { title: string; headline?: string; note?: string; series: TrendSeries[]; latestDate?: string; empty?: string; footer?: ReactNode; grains?: TrendGrain[]; defaultGrain?: TrendGrain; className?: string }) {
+  const [grain, setGrain] = useState<TrendGrain>(grains.includes(defaultGrain) ? defaultGrain : grains[0]);
   const [hidden, setHidden] = useState<Record<string, boolean>>({});
   const [hover, setHover] = useState<number>();
   const [width, setWidth] = useState(640);
@@ -107,7 +135,7 @@ export function TrendChart({ title, headline, note, series, latestDate, empty, f
       const firstKey = line.from ? grainKey(line.from, grain) : undefined;
       return { ...line, values: keys.map((key) => firstKey && key < firstKey ? undefined : sums.get(key) || 0) };
     });
-    return { keys, labels: keys.map((key) => grainLabel(key, grain, multiYear)), partialIndex, lines };
+    return { keys, labels: keys.map((key) => grainLabel(key, grain, multiYear)), titles: keys.map((key) => grainTitle(key, grain, multiYear)), partialIndex, lines };
   }, [series, grain, latestDate]);
 
   const visible = model ? model.lines.filter((line) => !hidden[line.key]) : [];
@@ -129,14 +157,19 @@ export function TrendChart({ title, headline, note, series, latestDate, empty, f
   const count = model?.keys.length || 0;
   const x = (index: number) => count <= 1 ? (pad.left + width - pad.right) / 2 : pad.left + index * (width - pad.left - pad.right) / (count - 1);
   const y = (value: number) => pad.top + (1 - (value - min) / (max - min)) * (height - pad.top - pad.bottom);
+  // Days and weeks give many buckets: label every k-th one, counted back from
+  // the newest so the latest bucket always carries its label, and drop the
+  // resting dots (the hovered bucket still gets its dots).
+  const labelEvery = Math.max(1, Math.ceil(count / Math.max(2, Math.floor((width - pad.left - pad.right) / 46))));
+  const dense = count > 40;
   const ticks = Array.from({ length: Math.round((max - min) / step) + 1 }, (_, index) => max - index * step);
   const path = (points: Array<{ index: number; value: number }>) => points.map((point, order) => `${order ? "L" : "M"}${x(point.index).toFixed(1)} ${y(point.value).toFixed(1)}`).join(" ");
   const placedLabels: number[] = [];
 
-  return <article className={`${shell.revenuePanel} ${styles.trendPanel}`}>
+  return <article className={`${shell.revenuePanel} ${styles.trendPanel} ${className || ""}`}>
     <div className={styles.trendHead}>
       <div className={shell.revenuePanelTitle}><div><span>{title}</span>{headline && <strong>{headline}</strong>}</div></div>
-      <GrainToggle value={grain} onChange={(next) => { setGrain(next); setHover(undefined); }} />
+      <GrainToggle value={grain} grains={grains} onChange={(next) => { setGrain(next); setHover(undefined); }} />
     </div>
     {model && <div className={styles.legend} role="group" aria-label="Ẩn / hiện đường">
       {model.lines.map((line) => <button type="button" key={line.key} aria-pressed={!hidden[line.key]} className={hidden[line.key] ? styles.legendOff : undefined} onClick={() => toggleLine(line.key)}><i style={{ background: line.color }} />{line.name}</button>)}
@@ -149,7 +182,7 @@ export function TrendChart({ title, headline, note, series, latestDate, empty, f
             <line className={tick === 0 ? styles.zero : styles.gridLine} x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} />
             <text className={styles.axisText} x={pad.left - 7} y={y(tick) + 3} textAnchor="end">{short(tick)}</text>
           </g>)}
-          {model.labels.map((label, index) => <text key={model.keys[index]} className={styles.axisLabel} x={x(index)} y={height - 8} textAnchor="middle">{label}{index === model.partialIndex ? "*" : ""}</text>)}
+          {model.labels.map((label, index) => (count - 1 - index) % labelEvery === 0 && <text key={model.keys[index]} className={styles.axisLabel} x={x(index)} y={height - 8} textAnchor="middle">{label}{index === model.partialIndex ? "*" : ""}</text>)}
           {hover !== undefined && <line className={styles.cross} x1={x(hover)} x2={x(hover)} y1={pad.top} y2={height - pad.bottom} />}
           {visible.map((line) => {
             const points = line.values.map((value, index) => value === undefined ? undefined : { index, value }).filter((point): point is { index: number; value: number } => Boolean(point));
@@ -163,7 +196,7 @@ export function TrendChart({ title, headline, note, series, latestDate, empty, f
             return <g key={line.key}>
               {solid.length > 1 && <path className={styles.line} d={path(solid)} style={{ stroke: line.color }} />}
               {tail.length === 2 && <path className={`${styles.line} ${styles.lineRunning}`} d={path(tail)} style={{ stroke: line.color }} />}
-              {points.map((point) => <circle key={point.index} className={styles.dot} cx={x(point.index)} cy={y(point.value)} r={hover === point.index ? 5 : 3.5} style={{ fill: line.color }} />)}
+              {points.filter((point) => !dense || hover === point.index).map((point) => <circle key={point.index} className={styles.dot} cx={x(point.index)} cy={y(point.value)} r={hover === point.index ? 5 : 3.5} style={{ fill: line.color }} />)}
               {anchor && <text className={styles.endLabel} x={x(anchor.index) + (count <= 1 || anchor.index === 0 ? 9 : -6)} y={labelY} textAnchor={count <= 1 || anchor.index === 0 ? "start" : "end"} style={{ fill: line.color }}>{line.name} {short(anchor.value)}</text>}
             </g>;
           })}
@@ -173,7 +206,7 @@ export function TrendChart({ title, headline, note, series, latestDate, empty, f
           })}
         </svg>
         {hover !== undefined && <div className={styles.tooltip} style={{ left: `${Math.min(80, Math.max(20, x(hover) / width * 100))}%` }}>
-          <b>{model.labels[hover]}</b>
+          <b>{model.titles[hover]}</b>
           {model.lines.map((line) => <div key={line.key}><span><i style={{ background: line.color }} />{line.name}</span><em>{line.values[hover] === undefined ? "chưa mở" : `${number(line.values[hover]!)} ₫`}</em></div>)}
           {hover === model.partialIndex && latestDate && <small>Kỳ đang chạy · dữ liệu tới {dayLabel(latestDate)}</small>}
         </div>}

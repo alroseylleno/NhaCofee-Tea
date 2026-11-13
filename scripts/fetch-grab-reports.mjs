@@ -25,6 +25,7 @@
 //   GRAB_MAIL_FROM=no-reply@grab.com         # optional, this is the default
 //   GRAB_MAIL_SUBJECT=Báo cáo doanh số       # optional, this is the default
 //   GRAB_REPORT_DIR=/abs/path                # optional, defaults to ../../Report/Grab Report
+//   REPORT_FORWARDERS=a@x.com,b@y.com        # optional, replaces the default forwarder list
 
 
 import { ImapFlow } from "imapflow";
@@ -41,6 +42,21 @@ const DEFAULT_REPORT_DIR = path.join(REPORT_ROOT, "Grab Report");
 /// with the PDF attached. All three must hold before a mail is downloaded.
 const DEFAULT_FROM = "no-reply@grab.com";
 const DEFAULT_SUBJECT = "Báo cáo doanh số";
+
+/// Inboxes that forward a store's sàn reports here. N2's Grab store mails its
+/// reports to the owner's own address (tam.nnt@outlook.com since 19/10/2026),
+/// and Tâm forwards them from nt.tam937@gmail.com — daily from 12/11/2026, the
+/// backlog 01/10 → 10/11 as one mail "Báo cáo N2 10.10" carrying every
+/// original as an attached .eml (Long, 12/11/2026). A forward arrives with the
+/// forwarder as sender and her own subject, so for these senders the subject
+/// is not checked; instead each attachment must carry the sàn's own file-name
+/// pattern (`fileName` below), nested .eml parts included. Which store a file
+/// belongs to is still read from the file (name / content), never the sender.
+const DEFAULT_FORWARDERS = ["nt.tam937@gmail.com", "tam.nnt@outlook.com"];
+function reportForwarders() {
+  const list = process.env.REPORT_FORWARDERS !== undefined ? process.env.REPORT_FORWARDERS.split(",") : DEFAULT_FORWARDERS;
+  return [...new Set(list.map((address) => address.trim().toLowerCase()).filter(Boolean))];
+}
 
 /// One entry per sàn. Every platform follows the same contract: sender +
 /// subject fragment (matched accent-insensitively in code, never in IMAP
@@ -106,6 +122,7 @@ const PLATFORMS = [
     from: () => process.env.GRAB_MAIL_FROM ?? DEFAULT_FROM,
     subject: () => process.env.GRAB_MAIL_SUBJECT ?? DEFAULT_SUBJECT,
     extensions: [".pdf"],
+    fileName: /^\d-[A-Z0-9]+-\d{8}\.pdf$/i,
     dir: () => (process.env.GRAB_REPORT_DIR ? path.resolve(process.env.GRAB_REPORT_DIR) : DEFAULT_REPORT_DIR),
     minBytes: 1024,
   },
@@ -115,6 +132,7 @@ const PLATFORMS = [
     from: () => "no-reply@shopeefood.vn",
     subject: () => "Báo cáo doanh thu hàng ngày",
     extensions: [".csv"],
+    fileName: /^Shopeefood_Income_Details_Merchant_.+\.csv$/i,
     dir: () => path.join(REPORT_ROOT, "Shopee Report"),
     minBytes: 100,
   },
@@ -124,6 +142,7 @@ const PLATFORMS = [
     from: () => "no-reply@greensm.com",
     subject: () => "Báo cáo doanh thu",
     extensions: [".xlsx"],
+    fileName: /^Revenue_Report_.+\.xlsx$/i,
     dir: () => path.join(REPORT_ROOT, "GreenSM Report"),
     minBytes: 500,
   },
@@ -259,20 +278,22 @@ async function main() {
       await mkdir(directory, { recursive: true });
       const existing = new Set((await readdir(directory)).map((name) => name.toLowerCase()));
       const sender = platform.from();
+      const forwarders = reportForwarders().filter((address) => address !== sender.toLowerCase());
       const wantedSubject = foldAccents(platform.subject());
 
       // Only ASCII criteria go to the server. Gmail's IMAP SEARCH needs a UTF-8
       // charset dance for Vietnamese subjects and quietly returns nothing when
       // it goes wrong, so the subject is matched here, accent-insensitively.
-      const search = { from: sender };
+      const search = forwarders.length ? { or: [{ from: sender }, ...forwarders.map((from) => ({ from }))] } : { from: sender };
       if (!args.all) {
         const since = new Date();
         since.setDate(since.getDate() - args.days);
         search.since = since;
       }
-      console.log(`\n[${platform.label}] từ "${sender}" · tiêu đề chứa "${platform.subject()}" · ${args.all ? "toàn bộ hộp thư" : `${args.days} ngày gần nhất`}`);
+      console.log(`\n[${platform.label}] từ "${sender}"${forwarders.length ? ` + chuyển tiếp từ ${forwarders.join(", ")}` : ""} · tiêu đề chứa "${platform.subject()}" · ${args.all ? "toàn bộ hộp thư" : `${args.days} ngày gần nhất`}`);
 
       let matchedSender = 0;
+      let forwardedMatches = 0;
       let subjectMismatch = 0;
       let scanned = 0;
       // imapflow holds the connection for the whole life of a fetch iterator, so
@@ -281,16 +302,19 @@ async function main() {
       const candidates = [];
       for await (const message of client.fetch(search, { uid: true, envelope: true, bodyStructure: true })) {
         matchedSender++;
-        if (wantedSubject && !foldAccents(message.envelope?.subject).includes(wantedSubject)) {
+        const forwarded = forwarders.includes(String(message.envelope?.from?.[0]?.address || "").toLowerCase());
+        if (!forwarded && wantedSubject && !foldAccents(message.envelope?.subject).includes(wantedSubject)) {
           subjectMismatch++;
           continue;
         }
-        const parts = collectAttachmentParts(message.bodyStructure, platform.extensions);
+        const parts = collectAttachmentParts(message.bodyStructure, platform.extensions)
+          .filter((part) => !forwarded || platform.fileName.test(path.basename(part.filename || "")));
         if (!parts.length) continue;
         scanned++;
+        if (forwarded) forwardedMatches++;
         candidates.push({ uid: message.uid, subject: message.envelope?.subject || "", parts });
       }
-      console.log(`  quét: ${matchedSender} email · ${subjectMismatch} sai tiêu đề · ${scanned} có file đính kèm`);
+      console.log(`  quét: ${matchedSender} email · ${subjectMismatch} sai tiêu đề · ${scanned} có file đính kèm${forwarders.length ? ` (${forwardedMatches} thư chuyển tiếp)` : ""}`);
 
       let platformSaved = 0;
       for (const candidate of candidates) {

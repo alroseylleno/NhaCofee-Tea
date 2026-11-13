@@ -50,7 +50,7 @@ import { buildSanCogsBook, emptySanCogsBook, sanLineUnitCogs, type SanCogsBook }
 import { isSupabaseConfigured } from "@/lib/supabase";
 import { useUrlState } from "@/lib/use-url-state";
 import styles from "./finance.module.css";
-import { RevenueStatement, TrendChart, storeShortName, type LedgerChannel, type LedgerEntry, type StatementStore } from "./revenue-overview";
+import { ALL_GRAINS, RevenueStatement, TrendChart, storeShortName, type LedgerChannel, type LedgerEntry, type StatementStore } from "./revenue-overview";
 import overviewStyles from "./revenue-overview.module.css";
 import { PnlStatement, type PnlChannelCost, type PnlEntry, type PnlStore } from "./pnl-statement";
 import { AssetStatement, type AssetRecord, type StockBook } from "./asset-statement";
@@ -3703,6 +3703,20 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
     key: store.id, name: storeShortName(store.name), color: store.color, from: store.openedOn,
     entries: state.grabDailyReports.filter((report) => (report.storeId || fallbackStoreId) === store.id && report.totalMarketing).map((report) => ({ date: report.reportDate, value: report.totalMarketing })),
   })), [statementStores, state.grabDailyReports, fallbackStoreId]);
+  /// Đối soát charts: online revenue and money received per outlet, from the
+  /// same ledger as Doanh thu → Tổng quan (online = sàn + Website; a sàn's
+  /// money is its daily report's payout − that day's ads), so a month here
+  /// equals the Online rows of the statement.
+  /// Received stops at the newest sàn report: later days hold sàn orders whose
+  /// money is not known yet and would plot as a fake drop to 0.
+  const latestSanReport = state.grabDailyReports.map((report) => report.reportDate).sort().pop();
+  const onlineTrendSeries = useMemo(() => {
+    const pick = (value: (entry: LedgerEntry) => number | undefined, until?: string) => statementStores.map((store) => ({
+      key: store.id, name: storeShortName(store.name), color: store.color, from: store.openedOn,
+      entries: revenueLedger.filter((entry) => entry.storeId === store.id && entry.channel !== "quay" && entry.channel !== "unsplit" && value(entry) && (!until || entry.date <= until)).map((entry) => ({ date: entry.date, value: value(entry) || 0 })),
+    }));
+    return { revenue: pick((entry) => entry.revenue), received: pick((entry) => entry.received, latestSanReport) };
+  }, [revenueLedger, statementStores, latestSanReport]);
   const outletsWithoutGrab = outlets.filter((store) => !(store.platformAccounts || []).some((account) => account.platform === "grab"));
   /// The order table is grouped by day. Each day header reads what actually
   /// landed in the pocket two ways: "PDF" is the sàn's own day total (payout −
@@ -3785,29 +3799,51 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
       ? sign * left.date.localeCompare(right.date)
       : byValue(key === "counter" ? left.counterValue : left.cogsValue, key === "counter" ? right.counterValue : right.cogsValue) || right.date.localeCompare(left.date));
   })();
-  /// The three boxes above the đối soát table: period + sàn chip, both outlets.
-  /// Gap is measured on reconciled orders only, so an order still waiting for
-  /// its report never reads as money the sàn kept.
+  /// The boxes above the đối soát table: period + sàn chip — one row for the
+  /// whole chain, then one row per outlet. Gap is measured on reconciled orders
+  /// only, so an order still waiting for its report never reads as money the
+  /// sàn kept; thực nhận % and gap % share that denominator and add up to 100%.
   const reconciliationTotals = (() => {
     const rows = reconciliationRowsView.filter((row) => reconciliationPlatform === "all" || row.platformKey === reconciliationPlatform);
-    const totals = { orders: rows.length, revenue: 0, pendingOrders: 0, pendingRevenue: 0, reconciledRevenue: 0, received: 0, commission: 0, tax: 0, settled: 0, ads: 0, byStore: new Map<string, number>() };
+    const blank = () => ({ orders: 0, revenue: 0, pendingOrders: 0, pendingRevenue: 0, reconciledRevenue: 0, received: 0, commission: 0, tax: 0, settled: 0, ads: 0 });
+    const chain = blank();
+    const perStore = new Map<string, ReturnType<typeof blank>>();
+    const tallies = (storeId: string) => {
+      let store = perStore.get(storeId);
+      if (!store) { store = blank(); perStore.set(storeId, store); }
+      return [chain, store];
+    };
     for (const row of rows) {
       const reported = row.reconciliation ? row.reconciliation.reportedAmount : row.order.reportedAmount;
       const storeId = row.reconciliation ? storeOfReconciliation(row.reconciliation) : storeOfOrder(row.order.id);
-      totals.revenue += reported;
-      totals.byStore.set(storeId, (totals.byStore.get(storeId) || 0) + reported);
-      if (!row.reconciliation) { totals.pendingOrders += 1; totals.pendingRevenue += reported; continue; }
-      totals.reconciledRevenue += reported;
-      totals.received += row.reconciliation.receivedAmount;
-      const settlement = row.reconciliation.settlement;
-      if (settlement) { totals.settled += 1; totals.commission += settlement.grabCommission || 0; totals.tax += (settlement.vatTax || 0) + (settlement.incomeTax || 0); }
+      for (const totals of tallies(storeId)) {
+        totals.orders += 1;
+        totals.revenue += reported;
+        if (!row.reconciliation) { totals.pendingOrders += 1; totals.pendingRevenue += reported; continue; }
+        totals.reconciledRevenue += reported;
+        totals.received += row.reconciliation.receivedAmount;
+        const settlement = row.reconciliation.settlement;
+        if (settlement) { totals.settled += 1; totals.commission += settlement.grabCommission || 0; totals.tax += (settlement.vatTax || 0) + (settlement.incomeTax || 0); }
+      }
     }
-    for (const report of state.grabDailyReports) if (inRange(report.reportDate, bounds) && (reconciliationPlatform === "all" || (report.platform || "grab") === reconciliationPlatform)) totals.ads += report.totalMarketing;
-    const gap = totals.reconciledRevenue - totals.received;
+    for (const report of state.grabDailyReports) {
+      if (!inRange(report.reportDate, bounds) || (reconciliationPlatform !== "all" && (report.platform || "grab") !== reconciliationPlatform)) continue;
+      for (const totals of tallies(report.storeId || fallbackStoreId)) totals.ads += report.totalMarketing;
+    }
     // Measured: gap = commission + tax to the đồng on every settled order; ship
     // support is already inside SAPO's amount, so it is not a further deduction.
-    return { ...totals, gap, other: gap - totals.commission - totals.tax };
+    const finish = (totals: ReturnType<typeof blank>) => {
+      const gap = totals.reconciledRevenue - totals.received;
+      return { ...totals, gap, other: gap - totals.commission - totals.tax };
+    };
+    return { ...finish(chain), byStore: new Map([...perStore].map(([storeId, totals]) => [storeId, finish(totals)])) };
   })();
+  /// Sàn an outlet has never received a single daily report from (any period):
+  /// its boxes and charts cannot hold that sàn's orders, so the panel says so.
+  const missingReportPlatforms = (storeId: string) => {
+    const present = new Set(state.grabDailyReports.filter((report) => (report.storeId || fallbackStoreId) === storeId).map((report) => report.platform || "grab"));
+    return (["grab", "shopee", "greensm"] as const).filter((platform) => !present.has(platform) && (reconciliationPlatform === "all" || reconciliationPlatform === platform));
+  };
   function toggleReconciliationDaySort(key: "counter" | "cogs") {
     setReconciliationDaySort((current) => current.key !== key ? { key, dir: "asc" } : current.dir === "asc" ? { key, dir: "desc" } : { key: "date", dir: "desc" });
   }
@@ -4126,10 +4162,24 @@ export default function FinanceModule({ inventoryLots, inventorySessions, onOpen
         <article className={`${styles.revenuePanel} ${styles.grabReconciliationPanel}`}>
           <div className={styles.revenuePanelTitle}><div><span>ĐỐI SOÁT ĐƠN SÀN · {RECONCILIATION_BUILD} · {bounds.label}</span><strong>{reconciliationDoneCount.toLocaleString("vi-VN")}/{reconciliationRowsView.length.toLocaleString("vi-VN")} đơn đã đối soát</strong></div><small>{percent(reconciliationRowsView.length ? reconciliationDoneCount / reconciliationRowsView.length * 100 : 0)} coverage</small></div>
           <div className={overviewStyles.reconBoxes}>
-            <article className={overviewStyles.reconLead}><span>TỔNG DOANH THU SÀN</span><strong>{money(reconciliationTotals.revenue)}</strong><small>{reconciliationTotals.orders.toLocaleString("vi-VN")} đơn{multiOutlet ? ` · ${statementStores.map((store) => `${storeShortName(store.name)} ${money(reconciliationTotals.byStore.get(store.id) || 0)}`).join(" · ")}` : ""}{reconciliationTotals.pendingOrders ? ` · ${reconciliationTotals.pendingOrders} đơn chưa đối soát ${money(reconciliationTotals.pendingRevenue)}` : ""}</small></article>
-            <article><span>TỔNG THỰC NHẬN</span><strong>{money(reconciliationTotals.received)}</strong><small>{(reconciliationTotals.orders - reconciliationTotals.pendingOrders).toLocaleString("vi-VN")}/{reconciliationTotals.orders.toLocaleString("vi-VN")} đơn đã đối soát · sau quảng cáo {money(reconciliationTotals.received - reconciliationTotals.ads)}</small></article>
-            <article className={overviewStyles.reconGap}><span>GAP</span><strong>{reconciliationTotals.gap > 0 ? "−" : ""}{money(Math.abs(reconciliationTotals.gap))}</strong><small>{reconciliationTotals.reconciledRevenue ? `${percent(reconciliationTotals.gap / reconciliationTotals.reconciledRevenue * 100)} doanh thu đơn đã đối soát` : "chưa có đơn đối soát"} · chiết khấu {money(reconciliationTotals.commission)} · thuế {money(reconciliationTotals.tax)}{Math.abs(reconciliationTotals.other) >= 1000 ? ` · khác ${reconciliationTotals.other < 0 ? "−" : ""}${money(Math.abs(reconciliationTotals.other))}` : ""} · chưa gồm quảng cáo {money(reconciliationTotals.ads)}</small></article>
+            {[undefined, ...(multiOutlet ? statementStores : [])].map((store) => {
+              const totals = store ? reconciliationTotals.byStore.get(store.id) : reconciliationTotals;
+              if (!totals) return null;
+              const share = (value: number) => totals.reconciledRevenue ? percent(value / totals.reconciledRevenue * 100) : "–";
+              const badge = store ? <b className={overviewStyles.storeBadge} style={{ background: store.color }}>{storeShortName(store.name)}</b> : null;
+              const missing = store ? missingReportPlatforms(store.id) : [];
+              return <Fragment key={store?.id || "all"}>
+                <article className={store ? overviewStyles.reconStore : overviewStyles.reconLead} style={store ? { borderLeftColor: store.color } : undefined}><div className={overviewStyles.reconHead}><span>{badge}{store ? "DOANH THU SÀN" : "TỔNG DOANH THU SÀN"}</span></div><strong>{money(totals.revenue)}</strong><small>{totals.orders.toLocaleString("vi-VN")} đơn{store && reconciliationTotals.revenue ? ` · ${percent(totals.revenue / reconciliationTotals.revenue * 100)} doanh thu sàn chuỗi` : ""}{totals.pendingOrders ? ` · ${totals.pendingOrders} đơn chưa đối soát ${money(totals.pendingRevenue)}` : ""}{missing.length ? <b className={overviewStyles.reconMissing}> · chưa có báo cáo {missing.map((platform) => MARKETPLACE_LABELS[platform] || platform).join(", ")} nào</b> : null}</small></article>
+                <article className={store ? overviewStyles.reconStore : undefined} style={store ? { borderLeftColor: store.color } : undefined}><div className={overviewStyles.reconHead}><span>{badge}{store ? "THỰC NHẬN" : "TỔNG THỰC NHẬN"}</span><em className={overviewStyles.reconPct}>{share(totals.received)}</em></div><strong>{money(totals.received)}</strong><small>{totals.reconciledRevenue ? `trên ${money(totals.reconciledRevenue)} doanh thu đã đối soát` : "chưa có đơn đối soát"} ({(totals.orders - totals.pendingOrders).toLocaleString("vi-VN")}/{totals.orders.toLocaleString("vi-VN")} đơn) · sau quảng cáo {money(totals.received - totals.ads)}{totals.reconciledRevenue ? ` = ${share(totals.received - totals.ads)}` : ""}</small></article>
+                <article className={`${overviewStyles.reconGap} ${store ? overviewStyles.reconStore : ""}`} style={store ? { borderLeftColor: store.color } : undefined}><div className={overviewStyles.reconHead}><span>{badge}GAP</span><em className={overviewStyles.reconPct}>{totals.reconciledRevenue ? `${totals.gap > 0 ? "−" : ""}${share(Math.abs(totals.gap))}` : "–"}</em></div><strong>{totals.gap > 0 ? "−" : ""}{money(Math.abs(totals.gap))}</strong><small>{totals.reconciledRevenue ? "trên cùng doanh thu đã đối soát" : "chưa có đơn đối soát"} · chiết khấu {money(totals.commission)} · thuế {money(totals.tax)}{Math.abs(totals.other) >= 1000 ? ` · khác ${totals.other < 0 ? "−" : ""}${money(Math.abs(totals.other))}` : ""} · chưa gồm quảng cáo {money(totals.ads)}</small></article>
+              </Fragment>;
+            })}
           </div>
+          {statementStores.length > 0 && <div className={overviewStyles.trendGrid}>
+            <TrendChart className={overviewStyles.nestedTrend} title="DOANH THU ONLINE · THEO ĐIỂM BÁN" series={onlineTrendSeries.revenue} latestDate={revenueLatestDate} grains={ALL_GRAINS} defaultGrain="week" empty="Chưa có doanh thu online." />
+            <TrendChart className={overviewStyles.nestedTrend} title="THỰC NHẬN ONLINE · THEO ĐIỂM BÁN" series={onlineTrendSeries.received} latestDate={latestSanReport || revenueLatestDate} grains={ALL_GRAINS} defaultGrain="week" note={latestSanReport ? `báo cáo sàn mới nhất ${dateLabel(latestSanReport)}` : undefined} empty="Chưa có tiền thực nhận online." />
+          </div>}
+          {statementStores.length > 0 && <p className={styles.metricDisclaimer}>Hai biểu đồ: cả hai nhà, toàn bộ lịch sử, không theo bộ lọc kỳ hay chip sàn — cùng số với dòng Online ở Doanh thu → Tổng quan. Online = GrabFood + ShopeeFood + GreenSM + Website. Thực nhận = tiền sàn chuyển trừ quảng cáo ngày (Website = doanh thu); biểu đồ thực nhận dừng ở ngày có báo cáo sàn mới nhất, và một đơn sàn chỉ vào thực nhận khi báo cáo ngày của nó về. Kỳ có * là kỳ đang chạy. Các ô ở trên theo kỳ và chip sàn; % thực nhận và % gap tính trên doanh thu các đơn đã đối soát nên cộng lại đúng 100%.</p>}
           <div className={styles.grabIngestRow}>
             <label className={`${styles.grabPdfUpload} ${importingGrabReport ? styles.importing : ""}`}><input type="file" accept="application/pdf,.pdf,.csv,.xlsx" multiple disabled={importingGrabReport} onChange={(event) => void importGrabReportPdf(event)} /><span>{importingGrabReport ? "Đang đọc báo cáo…" : "⇧ Upload báo cáo sàn (Grab PDF · Shopee CSV · GreenSM xlsx)"}</span></label>
             {onLocalMachine

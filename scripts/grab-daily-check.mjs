@@ -82,6 +82,29 @@ async function listReports() {
   }
 }
 
+/// Grab mails one PDF per store per day, also on days without an order, named
+/// "<merchant>-YYYYMMDD.pdf" and sent the next morning — so by 22:00 yesterday's
+/// file should be on disk for every store. N1's comes straight from Grab; N2's
+/// only when Tâm forwards it (Long, 12/11/2026). Names every store whose newest
+/// PDF is older than yesterday, so a forgotten forward shows up the same night.
+const GRAB_STORES = [
+  { merchantId: "5-C8BGGY6BV2V3RE", label: "N1" },
+  { merchantId: "5-C8JHMAUKVTV1HA", label: "N2 (chị Tâm forward)" },
+];
+async function lateGrabStores(now = new Date()) {
+  const files = await listReports();
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const wanted = todayKey(yesterday).replace(/-/g, "");
+  const late = [];
+  for (const store of GRAB_STORES) {
+    const prefix = `${store.merchantId.toLowerCase()}-`;
+    const newest = files.map((name) => name.toLowerCase()).filter((name) => name.startsWith(prefix)).map((name) => name.slice(prefix.length, prefix.length + 8)).filter((day) => /^\d{8}$/.test(day)).sort().pop();
+    if (!newest || newest < wanted) late.push(`${store.label} mới tới ${newest ? `${newest.slice(6, 8)}/${newest.slice(4, 6)}` : "—"}`);
+  }
+  return late;
+}
+
 /// AppleScript string literals break on embedded quotes and backslashes.
 function osaQuote(value) {
   return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
@@ -246,6 +269,8 @@ async function main() {
     const entry = state[key];
     console.log(entry ? `${key}: DONE — approved lúc ${entry.approvedAt}` : `${key}: chưa approve`);
     console.log(`Báo cáo trong thư mục: ${(await listReports()).length}`);
+    const late = await lateGrabStores();
+    console.log(late.length ? `Thiếu báo cáo Grab hôm qua: ${late.join(" · ")}` : "Báo cáo Grab hôm qua: đủ mọi cửa hàng");
     console.log(`State file: ${STATE_FILE}`);
     return;
   }
@@ -296,6 +321,8 @@ async function main() {
     }
     if (sapo.ran || sapo.note) headline += ` ${sapo.note}`;
     if (grabRaw.note) headline += ` ${grabRaw.note}`;
+    const late = await lateGrabStores();
+    if (late.length) headline += `\n⚠ Thiếu báo cáo Grab hôm qua: ${late.join(" · ")}.`;
 
     const failed = !fetched.ok || (sapo.ran && !sapo.ok) || !grabRaw.ok;
     const delta = counted.total - before;
